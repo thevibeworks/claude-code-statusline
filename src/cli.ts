@@ -99,7 +99,9 @@ program
     const monitor = new QuotaMonitor(apiKey, config, envConfig.apiBaseUrl);
     
     try {
-      await monitor.update();
+      const status = await monitor.getStatus();
+      const renderer = new (await import('./ui/renderer')).StatuslineRenderer(config);
+      console.log(renderer.render(status.quotaLimits, status.subscription, status.warnings));
     } catch (error: any) {
       console.error(chalk.red(`Error: ${error.message}`));
       process.exit(1);

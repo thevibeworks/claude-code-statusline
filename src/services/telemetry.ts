@@ -93,14 +93,16 @@ export class TelemetryService {
 
   /**
    * Calculate cost estimate based on usage
+   * Note: Uses 7-day usage only to avoid double-counting,
+   * as 5-hour usage is a subset of 7-day usage
    */
   calculateCostEstimate(snapshot: UsageSnapshot): number {
     // Simplified cost calculation
-    // Real implementation would use actual pricing tiers
-    const { fiveHour, sevenDay } = snapshot.quotaLimits;
+    // Real implementation would use actual pricing tiers and token counts
+    const { sevenDay } = snapshot.quotaLimits;
     const baseRate = 0.001; // $0.001 per request (placeholder)
     
-    return (fiveHour.used + sevenDay.used) * baseRate;
+    return sevenDay.used * baseRate;
   }
 
   /**

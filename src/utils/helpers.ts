@@ -1,4 +1,4 @@
-import { QuotaLimits, QuotaWarning } from '../types';
+import { QuotaLimits, QuotaWarning, RateLimit } from '../types';
 
 /**
  * Analyze quota limits and generate warnings
@@ -33,7 +33,7 @@ export function analyzeQuotaWarnings(quotaLimits: QuotaLimits): QuotaWarning[] {
  * Check individual rate limit
  */
 function checkRateLimit(
-  limit: any,
+  limit: RateLimit,
   type: 'fiveHour' | 'sevenDay',
   label: string
 ): QuotaWarning | null {

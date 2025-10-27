@@ -2,7 +2,18 @@ import axios, { AxiosInstance } from 'axios';
 import { QuotaLimits, RateLimit, SubscriptionMetadata } from '../types';
 
 /**
- * Service for interacting with Claude API to fetch quota information
+ * Service for interacting with Claude API to fetch quota information.
+ * 
+ * This service handles communication with the Anthropic Claude API to retrieve
+ * rate limit information from response headers. It parses both 5-hour and 7-day
+ * rate limit data and provides subscription metadata.
+ * 
+ * @example
+ * ```typescript
+ * const apiService = new ClaudeApiService('your-api-key');
+ * const quotaLimits = await apiService.fetchQuotaLimits();
+ * console.log(quotaLimits.fiveHour.remaining);
+ * ```
  */
 export class ClaudeApiService {
   private client: AxiosInstance;
