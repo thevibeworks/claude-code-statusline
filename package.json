@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Real-time quota monitoring and usage telemetry for Claude Code CLI",
   "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "bin": {
     "claude-statusline": "./dist/cli.js"
   },
@@ -20,10 +21,30 @@
     "quota",
     "monitoring",
     "cli",
-    "statusline"
+    "statusline",
+    "rate-limit",
+    "usage",
+    "telemetry",
+    "api-monitoring"
   ],
-  "author": "",
+  "author": "The Vibe Works",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/thevibeworks/claude-code-statusline.git"
+  },
+  "bugs": {
+    "url": "https://github.com/thevibeworks/claude-code-statusline/issues"
+  },
+  "homepage": "https://github.com/thevibeworks/claude-code-statusline#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "dependencies": {
     "axios": "^1.6.2",
     "chalk": "^4.1.2",
