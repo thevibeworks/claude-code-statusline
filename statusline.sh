@@ -347,7 +347,6 @@ fetch_usage_for_session() {
         -H "Authorization: Bearer $token" \
         -H "Content-Type: application/json" \
         -H "User-Agent: $ua" \
-        -H "anthropic-beta: oauth-2025-04-20" \
         --max-time 5)
 
     local http_code=$(echo "$response" | tail -1)

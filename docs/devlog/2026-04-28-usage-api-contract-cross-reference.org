@@ -1,0 +1,190 @@
+* [2026-04-28] Dev Log: /api/oauth/usage Contract Cross-Reference     :statusline:oauth:api-contract:
+
+** Context
+Three implementations call =GET /api/oauth/usage=: statusline.sh (bash), Claude Code CLI
+v2.1.76 (Node/cli.js), and Claude Code CLI v2.1.121 (Bun binary). Two http-spec files
+document the endpoint: =specs/claude-code-api-complete.http= and =specs/claude-oauth-api.http=.
+
+** Why
+statusline.sh was written against an older version of the CLI. This analysis pins the
+exact contract differences so deviations can be corrected and the http-spec kept accurate.
+
+** What
+- =UNNECESSARY= stale =anthropic-beta: oauth-2025-04-20= header in statusline.sh usage call
+  (line 350 of statusline.sh) — endpoint is GA, neither CLI version sends this header
+- =DOCS= =claude-oauth-api.http= falsely documents =anthropic-beta: oauth-2025-04-20= on
+  =GET /api/oauth/usage= (lines 263, 285) — contradicts actual CLI behavior
+- =RELIABILITY= v2.1.121 added =uE()= retry-on-401 wrapper; statusline.sh has no equivalent —
+  token expiry causes silent fallback to stale cache for up to 120s
+- =DOCS= =claude-code-api-complete.http= correctly omits the beta flag on =GET /api/oauth/usage=
+  (line 335+) — no change needed
+
+** How
+*** Comparison Table
+
+| Aspect             | statusline.sh                      | CLI v2.1.76                        | CLI v2.1.121                       |
+|--------------------+------------------------------------+------------------------------------+------------------------------------|
+| URL                | https://api.anthropic.com/api/oauth/usage | ${BASE_API_URL}/api/oauth/usage | ${BASE_API_URL}/api/oauth/usage |
+| Method             | GET                                | GET                                | GET                                |
+| Content-Type       | application/json                   | application/json                   | application/json                   |
+| User-Agent         | claude-code/{cli_version:-2.1.76}  | claude-code/2.1.76 via pO()        | claude-code/2.1.121 via G1()       |
+| Authorization      | Bearer $token                      | Bearer <token> via authHeaders     | Bearer <token> via t2().headers    |
+| anthropic-beta     | oauth-2025-04-20 (UNNECESSARY)     | None                               | None                               |
+| Timeout            | 5s (--max-time 5)                  | 5000ms                             | 5000ms                             |
+| Retry on 401       | No — .err file + 120s backoff      | No                                 | Yes — uE() refresh-and-retry       |
+| Error handling     | ${session_id}.err + cache fallback | None visible                       | uE() wrapper + structured logging  |
+
+*** statusline.sh — annotated call site (statusline.sh:343-352)
+
+#+BEGIN_SRC bash
+local response=$(curl -s -w "\n%{http_code}" -X GET \
+    "https://api.anthropic.com/api/oauth/usage" \
+    -H "Authorization: Bearer $token" \
+    -H "Content-Type: application/json" \
+    -H "User-Agent: $ua" \
+    -H "anthropic-beta: oauth-2025-04-20" \   # <-- REMOVE: endpoint is GA
+    --max-time 5)
+#+END_SRC
+
+*** CLI v2.1.76 — deobfuscated (cli.js)
+
+#+BEGIN_SRC javascript
+X8.get(`${BASE_API_URL}/api/oauth/usage`, {
+    headers: {
+        "Content-Type": "application/json",
+        "User-Agent": pO(),          // resolves to "claude-code/2.1.76"
+        ...authHeaders               // { Authorization: "Bearer <token>" }
+    },
+    timeout: 5000
+})
+// No retry logic. No anthropic-beta header.
+#+END_SRC
+
+*** CLI v2.1.121 — deobfuscated (Bun binary)
+
+#+BEGIN_SRC javascript
+let K = `${H_().BASE_API_URL}/api/oauth/usage`;
+z = await uE(() => {            // uE = retry wrapper: 401 -> refresh -> retry
+    let O = t2();               // t2 = get current auth headers
+    return w6.get(K, {
+        headers: {
+            "Content-Type": "application/json",
+            "User-Agent": G1(),  // resolves to "claude-code/2.1.121"
+            ...O.headers         // { Authorization: "Bearer <token>" }
+        },
+        timeout: 5000
+    })
+});
+// On 401: refreshes OAuth access token, retries once.
+// Logs: "fetchUtilization: 200 after N attempt(s) (401->refresh->retry succeeded)"
+// No anthropic-beta header.
+#+END_SRC
+
+*** Diffs
+
+Fix 1 — remove stale beta header from statusline.sh (statusline.sh:350):
+
+#+BEGIN_SRC diff
+--- a/statusline.sh
++++ b/statusline.sh
+@@ -347,7 +347,6 @@ fetch_usage_for_session() {
+         "https://api.anthropic.com/api/oauth/usage" \
+         -H "Authorization: Bearer $token" \
+         -H "Content-Type: application/json" \
+         -H "User-Agent: $ua" \
+-        -H "anthropic-beta: oauth-2025-04-20" \
+         --max-time 5)
+#+END_SRC
+
+Fix 2 — correct =claude-oauth-api.http= usage endpoint docs:
+
+#+BEGIN_SRC diff
+--- a/specs/claude-oauth-api.http
++++ b/specs/claude-oauth-api.http
+@@ -259,7 +259,6 @@ GET {{baseApiUrl}}/api/oauth/usage
+ # @name get_usage_oauth
+ GET {{baseApiUrl}}/api/oauth/usage
+ Authorization: Bearer {{accessToken}}
+ Content-Type: application/json
+ User-Agent: claude-code/{{cliVersion}}
+-anthropic-beta: oauth-2025-04-20
+
+ ###
+
+@@ -282,7 +281,6 @@ GET {{baseApiUrl}}/api/oauth/usage
+ GET {{baseApiUrl}}/api/oauth/usage
+ Authorization: Bearer {{accessToken}}
+ Content-Type: application/json
+ User-Agent: claude-code/{{cliVersion}}
+-anthropic-beta: oauth-2025-04-20
+#+END_SRC
+
+*** Response Shape (all three implementations expect identical structure)
+
+#+BEGIN_SRC json
+{
+    "five_hour": {
+        "utilization": 45.2,
+        "resets_at": "2026-04-28T12:00:00Z"
+    },
+    "seven_day": {
+        "utilization": 23.1,
+        "resets_at": "2026-05-01T00:00:00Z"
+    },
+    "seven_day_opus": {
+        "utilization": 15.0,
+        "resets_at": "2026-05-01T00:00:00Z"
+    },
+    "seven_day_sonnet": {
+        "utilization": 8.1,
+        "resets_at": "2026-05-01T00:00:00Z"
+    }
+}
+#+END_SRC
+
+** Result
+*** Outcome
+- statusline.sh sends one extraneous header (=anthropic-beta: oauth-2025-04-20=) on =GET
+  /api/oauth/usage=. Server accepts and ignores it. Functionally harmless; misleading in code.
+- =claude-oauth-api.http= documents that same extraneous header on two usage endpoint variants
+  (lines 263, 285). =claude-code-api-complete.http= is already correct (no beta flag).
+- v2.1.121's =uE()= retry wrapper is a deliberate CLI improvement. statusline.sh intentionally
+  does not replicate it; the 120s error backoff + cache fallback is the accepted degradation
+  model for a status display.
+
+** Decisions
+
+| Decision | Alternatives | Rationale | DRI | Timestamp (UTC) |
+|----------+--------------+-----------+-----+-----------------|
+| Remove anthropic-beta from statusline.sh usage call | Keep it | Endpoint is GA; neither CLI version sends it; server ignores it; it is misleading cargo | @eric | 2026-04-28T00:00:00Z |
+| Remove anthropic-beta from claude-oauth-api.http usage variants | Keep it as "optional" note | Spec should reflect actual CLI behavior; adding inaccurate headers trains callers incorrectly | @eric | 2026-04-28T00:00:00Z |
+| Do not add token-refresh retry to statusline.sh | Port uE() logic | Retry requires storing refresh_token, spawning background refresh, managing race conditions — cost exceeds benefit for a status bar widget | @eric | 2026-04-28T00:00:00Z |
+| Document 120s stale-data window as known limitation | Treat as bug | statusline is a display tool; a 120s stale read during token refresh is acceptable degradation, not a defect | @eric | 2026-04-28T00:00:00Z |
+
+** WIP
+- [ ] Apply Fix 1 to statusline.sh (remove =anthropic-beta= header, line 350)
+- [ ] Apply Fix 2 to specs/claude-oauth-api.http (lines 263, 285)
+- [X] Verify claude-code-api-complete.http — already correct, no beta flag on usage endpoint
+
+** Links
+- Files:
+  - =worktree/claude-code-statusline/statusline.sh= (line 350)
+  - =worktree/claude-code-http-spec/specs/claude-oauth-api.http= (lines 263, 285)
+  - =worktree/claude-code-http-spec/specs/claude-code-api-complete.http= (line 335) — correct, no action
+
+** Notes
+*** Known Limitation
+When the OAuth access token expires mid-session:
+- CLI v2.1.121: =uE()= refreshes the token and retries transparently.
+- statusline.sh: the 200→non-200 transition writes =${session_id}.err=, triggers 120s backoff,
+  and falls back to the last cached response. Max stale window = cache TTL + 120s backoff.
+  This is by design.
+
+*** Gotchas
+- =anthropic-beta: oauth-2025-04-20= was required when the usage endpoint was behind the OAuth
+  beta gate. The gate was removed; the header was not cleaned up from statusline.sh or the
+  oauth-api spec at that time.
+- =claude-oauth-api.http= defines =@oauthBeta = oauth-2025-04-20= at line 22 and uses it via
+  variable reference on several other endpoints that still legitimately require it. The variable
+  definition itself stays; only the two =anthropic-beta: {{oauthBeta}}= lines on the usage
+  endpoint blocks should be removed.
