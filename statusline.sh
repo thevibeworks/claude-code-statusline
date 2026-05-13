@@ -785,25 +785,52 @@ is_1m_model() {
 
 runtime_model=$(get_runtime_model "$model_id")
 
+abbreviate_model_id() {
+    local m="$1"
+    case "$m" in
+    claude-opus-*|claude-sonnet-*|claude-haiku-*)
+        local family="${m#claude-}"
+        family="${family%%-[0-9]*}"
+        local rest="${m#claude-${family}-}"
+        local major="${rest%%-*}"
+        rest="${rest#*-}"
+        local minor="${rest%%-*}"
+        echo "${family}${major}.${minor}"
+        ;;
+    *) echo "$m" ;;
+    esac
+}
+
 if [ -n "$configured_model" ]; then
-    # Strip [1m] suffix from configured model for case matching
     local_cfg="${configured_model%%\[1m\]}"
     case "$local_cfg" in
     "opusplan")
         model_text="opusplan"
         model_color='\033[1;35m'
         ;;
-    "opus")
-        model_text="opus"
+    "opus"|claude-opus-*)
         model_color='\033[0;35m'
+        if [ "$local_cfg" = "opus" ]; then
+            model_text="opus"
+        else
+            model_text=$(abbreviate_model_id "$local_cfg")
+        fi
         ;;
-    "sonnet")
-        model_text="sonnet"
+    "sonnet"|claude-sonnet-*)
         model_color='\033[0;36m'
+        if [ "$local_cfg" = "sonnet" ]; then
+            model_text="sonnet"
+        else
+            model_text=$(abbreviate_model_id "$local_cfg")
+        fi
         ;;
-    "haiku")
-        model_text="haiku"
+    "haiku"|claude-haiku-*)
         model_color='\033[0;34m'
+        if [ "$local_cfg" = "haiku" ]; then
+            model_text="haiku"
+        else
+            model_text=$(abbreviate_model_id "$local_cfg")
+        fi
         ;;
     *)
         model_text="$local_cfg"
