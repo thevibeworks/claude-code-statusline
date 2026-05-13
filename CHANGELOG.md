@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.3.0 — 2026-05-12 — Quota Reset Time & API Cleanup
+
+### Quota Reset Display
+
+When utilization enters the warning zone, reset time auto-appears:
+
+- **5h >= 80%**: wall-clock time — `5h[87%@14:30]`
+- **7d >= 70%**: relative countdown — `7d[75%~2d5h]`
+
+Clock time for 5h (you're thinking "can I resume after lunch?").
+Relative for 7d ("2d5h" is more actionable than a specific datetime).
+Below threshold, display is unchanged: `5h[25%] 7d[10%]`.
+
+### API Accuracy
+
+- Removed stale `anthropic-beta: oauth-2025-04-20` from usage API call —
+  endpoint is GA, neither CLI v2.1.76 nor v2.1.121 sends this header
+- Usage jq parsing batched into single `eval "$(jq -r @sh ...)"` call
+  (was 4 separate jq invocations)
+
+### Cross-Reference
+
+API contract verified against Claude Code CLI v2.1.76 (cli.js) and v2.1.121
+(Bun binary). See `docs/devlog/2026-04-28-usage-api-contract-cross-reference.org`.
+
+---
+
 ## v0.2.0 — 2026-03-16 — 1M Context Window & API Hardening
 
 ### Critical Fixes
