@@ -13,11 +13,13 @@ myproject (main*)  +84/-14 8m $6.72 opus4.6[1m][█░░░░░26%] [MAX|feas
 
 Needs `jq` (`brew install jq` / `apt install jq`).
 
+**One-liner:**
+
 ```bash
-cp statusline.sh ~/.claude/statusline.sh && chmod +x ~/.claude/statusline.sh
+curl -fsSL https://raw.githubusercontent.com/thevibeworks/claude-code-statusline/main/statusline.sh -o ~/.claude/statusline.sh && chmod +x ~/.claude/statusline.sh
 ```
 
-Add to `~/.claude/settings.json`:
+Then add to `~/.claude/settings.json`:
 
 ```json
 {
@@ -27,6 +29,16 @@ Add to `~/.claude/settings.json`:
     "padding": 0
   }
 }
+```
+
+**Or let Claude Code do it** -- paste this prompt into any Claude Code session:
+
+```
+Download https://raw.githubusercontent.com/thevibeworks/claude-code-statusline/main/statusline.sh
+to ~/.claude/statusline.sh (chmod +x). Then add to ~/.claude/settings.json:
+statusLine: {type: "command", command: "bash ~/.claude/statusline.sh", padding: 0}
+Merge with existing settings if the file already exists.
+```
 ```
 
 ## What's New in v0.3.0
