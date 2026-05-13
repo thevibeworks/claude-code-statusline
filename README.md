@@ -1,24 +1,20 @@
 # Claude Code Statusline
 
-Custom statusline for Claude Code. Shows project, git, model, context, user tier, and quota at a glance.
+Tmux/terminal statusline for [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
+Project, git, model, context, cost, quota, tier -- one line.
 
 ```
-cc-statusline (main)  +105/-3 4m $0.93 opus[1m][██░░░░41%] [MAX|feast.] 5h[12.0%] 7d[99%]
-     ^          ^       ^     ^   ^       ^         ^           ^           ^         ^
-   project   branch  edits  time cost   model    context      user       5h quota  7d quota
+myproject (main*)  +84/-14 8m $6.72 opus4.6[1m][█░░░░░26%] [MAX|feast.t.] 5h[24%] 7d[100%~12h6m]
+    ^        ^       ^     ^   ^        ^          ^            ^           ^          ^
+  project  branch  edits  time cost    model     context       user      5h quota   7d quota
 ```
-
-## Dependencies
-
-- `jq` -- `brew install jq` / `apt install jq`
-- `curl` -- already on your system
-- Claude Code OAuth login -- quota and user info need `~/.claude/.credentials.json`
 
 ## Install
 
+Needs `jq` (`brew install jq` / `apt install jq`).
+
 ```bash
-cp statusline.sh ~/.claude/statusline.sh
-chmod +x ~/.claude/statusline.sh
+cp statusline.sh ~/.claude/statusline.sh && chmod +x ~/.claude/statusline.sh
 ```
 
 Add to `~/.claude/settings.json`:
@@ -33,64 +29,103 @@ Add to `~/.claude/settings.json`:
 }
 ```
 
-With theme and custom cache dir:
+## What's New in v0.3.0
 
-```json
-{
-  "env": {
-    "CLAUDE_CACHE_DIR": "/tmp/claude-sessions"
-  },
-  "statusLine": {
-    "type": "command",
-    "command": "bash ~/.claude/statusline.sh --theme compact",
-    "padding": 0
-  }
-}
-```
+**Quota reset times.** When you're burning quota, the statusline tells you
+when it resets -- because staring at a percentage doesn't answer the question
+you actually have.
+
+- 5h >= 80%: wall-clock time -- `5h[87%@14:30]` -- "can I resume after lunch?"
+- 7d >= 70%: relative countdown -- `7d[75%~2d5h]` -- "how long until capacity?"
+- Below threshold: just the percentage. You don't need the noise yet.
+
+Clock for 5h because you're thinking about your day. Countdown for 7d because
+"resets Tuesday at 09:14 UTC" means nothing to a tired human.
+
+**Model abbreviation.** `claude-opus-4-6` becomes `opus4.6`. Short aliases
+(`opus`, `sonnet`, `haiku`) stay unchanged. The version only appears when
+you've pinned a specific model rather than using the default alias.
 
 ## Components
 
 Default order: `activity,time,cost,model,context,user,quota`
 
-| Component | What it shows | Example |
-|-----------|---------------|---------|
-| `activity` | Lines added/removed | `+105/-3` |
-| `time` | API duration | `4m` |
-| `cost` | Session cost | `$0.93` |
-| `model` | Active model | `opus` |
-| `context` | Context window usage (progress bar) | `[██░░░░41%]` |
-| `user` | Subscription tier + display name | `[MAX\|feast.]` |
-| `quota` | 5h / 7d API quota utilization | `5h[12.0%] 7d[99%]` |
+| Component | Shows | Example |
+|-----------|-------|---------|
+| `activity` | Lines added/removed | `+84/-14` |
+| `time` | API duration | `8m` |
+| `cost` | Session cost | `$6.72` |
+| `model` | Active model (abbreviated) | `opus4.6` |
+| `context` | Context window usage bar | `[█░░░░░26%]` |
+| `user` | Tier + display name | `[MAX\|feast.t.]` |
+| `quota` | 5h / 7d quota utilization | `5h[24%] 7d[100%~12h6m]` |
 
 Custom order: `--order "model,context,quota"`
 
 ## Context Window
 
-Context percentage matches the CLI's `/context` formula exactly:
+Matches the CLI's `/context` formula exactly:
 
 ```
 percentage = totalTokens / contextWindow * 100
 ```
 
-Where `totalTokens = cache_read_input_tokens + input_tokens` from the latest assistant message usage.
+Where `totalTokens = cache_read_input_tokens + input_tokens` from the latest
+assistant message.
 
-**1M context auto-detection:** If `model.id` contains `[1m]`, the window is 1,000,000 tokens. Otherwise 200,000. This mirrors the CLI's internal `NO(A)` function. The model display appends `[1m]` so you know which window you're on (e.g. `opus[1m]`).
+**1M auto-detection:** If `model.id` contains `[1m]`, the window is 1,000,000
+tokens. Otherwise 200,000. The model display appends `[1m]` so you know which
+window you're on: `opus4.6[1m]`.
 
-Override with `CLAUDE_CONTEXT_LIMIT` if you need manual control.
+Override with `CLAUDE_CONTEXT_LIMIT` if needed.
 
-Color thresholds: green < 85%, yellow >= 85%, red >= 100%.
+Color: green < 85%, yellow >= 85%, red >= 100%.
+
+## Quota Display
+
+Format: `5h[24%] 7d[100%~12h6m] op[45%]`
+
+- **5h** -- 5-hour rolling window. Yellow at 80%, red at 90%.
+- **7d** -- 7-day aggregate. Yellow at 70%, red at 85%.
+- **op** -- Opus-specific 7d (MAX users only).
+- **sn** -- Sonnet-specific 7d (PRO / TEAM / ENT users).
+
+### Adaptive Polling
+
+The script doesn't hammer the API. TTL adapts based on 5h utilization:
+
+| 5h Utilization | Poll Interval |
+|----------------|---------------|
+| < 20% | 5 min |
+| 20-49% | 2 min |
+| 50-79% | 1 min |
+| >= 80% | 30 sec |
+
+Fresh data when it matters, backs off when it doesn't. Error backoff: 2 min.
+
+### OAuth Gate
+
+Quota/user components are **skipped** when `ANTHROPIC_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN`, or `ANTHROPIC_BASE_URL` is set. The usage endpoint
+only works with OAuth tokens at `api.anthropic.com`.
+
+### Credentials
+
+1. **Linux:** `~/.claude/.credentials.json` (`claudeAiOauth.accessToken`)
+2. **macOS:** Keychain first, plaintext fallback
+3. **OrbStack:** resolves real `$HOME` via `getent passwd`
 
 ## Themes (`--theme`)
 
 | Theme | What you get |
 |-------|--------------|
 | `minimal` | Model + context + user only |
-| `compact` | Everything, unicode progress bars (default layout) |
-| `detailed` | Bracketed bars, shows working path |
-| `developer` | Dot progress bars, right-aligned, full path |
+| `compact` | Everything, unicode bars (default) |
+| `detailed` | Bracketed bars, working path |
+| `developer` | Dot bars, right-aligned, full path |
 | `manager` | Percent only, cost prominent |
 
-## Progress Bar Styles (`--style`)
+## Bar Styles (`--style`)
 
 | Style | Output |
 |-------|--------|
@@ -104,15 +139,15 @@ Color thresholds: green < 85%, yellow >= 85%, red >= 100%.
 | `percent-only` | `42%` |
 | `fraction-display` | `3/8` |
 
-## All Options
+## Options
 
 ```
 --style <style>        Progress bar style
 --theme <theme>        Preset theme (overrides style/order/path/alignment)
 --order <csv>          Component order: activity,time,cost,model,context,user,quota
---path-display <type>  Path display: project | cwd | full | relative
---alignment <type>     Alignment: left-right | right-left | center
---debug                Debug log -> /tmp/claude-code-statusline.log
+--path-display <type>  project | cwd | full | relative
+--alignment <type>     left-right | right-left | center
+--debug                Log to /tmp/claude-code-statusline.log
 --test [json]          Test mode (pipe JSON or pass as argument)
 ```
 
@@ -120,67 +155,22 @@ Color thresholds: green < 85%, yellow >= 85%, red >= 100%.
 
 | Variable | Default | What it does |
 |----------|---------|--------------|
-| `CLAUDE_CONTEXT_LIMIT` | auto-detected | Override context token limit (200k or 1M) |
+| `CLAUDE_CONTEXT_LIMIT` | auto | Override context token limit (200k or 1M) |
 | `CLAUDE_DATA_DIR` | script directory | Where `usage.jsonl` lives |
-| `CLAUDE_CACHE_DIR` | `$CLAUDE_DATA_DIR/sessions` | Cache for quota/profile data |
+| `CLAUDE_CACHE_DIR` | `$CLAUDE_DATA_DIR/sessions` | Quota/profile cache |
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | `32000` | Max output tokens |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Claude config directory |
 
-## Quota Display
-
-Format: `5h[12.5%] 7d[70.2%] op[45.0%]` or `sn[16.3%]`
-
-- **5h** -- 5-hour rolling window. Shown when >0%. Yellow at 80%, red at 90%.
-- **7d** -- 7-day aggregate. Shown when >0%. Yellow at 70%, red at 85%.
-- **op** -- Opus-specific 7d quota (MAX users only).
-- **sn** -- Sonnet-specific 7d quota (PRO / TEAM / ENT users).
-
-### Adaptive Quota Polling
-
-The script doesn't hammer the API like an idiot. TTL adapts based on 5h utilization:
-
-| 5h Utilization | Poll Interval |
-|----------------|---------------|
-| < 20% | 5 min |
-| 20-49% | 2 min |
-| 50-79% | 1 min |
-| >= 80% | 30 sec |
-
-When it matters, you get fresh data. When it doesn't, it backs off. Error backoff is 2 minutes.
-
-### OAuth Gate
-
-If any of these are set, quota/user components are **skipped entirely**:
-
-- `ANTHROPIC_API_KEY`
-- `ANTHROPIC_AUTH_TOKEN`
-- `ANTHROPIC_BASE_URL`
-
-The `/api/oauth/usage` endpoint only works with OAuth tokens at `api.anthropic.com`. Calling it with an API key is pointless, so we don't.
-
-### Credential Resolution
-
-1. **Linux:** `~/.claude/.credentials.json` (reads `claudeAiOauth.accessToken`)
-2. **macOS Keychain:** service=`"Claude Code-credentials"`, account=`$USER`
-3. **macOS fallback:** `~/.claude/.credentials.json` (plaintext)
-
-**OrbStack:** If `$HOME/.claude` doesn't exist (OrbStack sets `$HOME` to the macOS host path), the script resolves the real home via `getent passwd` and uses that instead.
-
 ## Testing
 
-Pipe test JSON to verify everything works:
+Pipe JSON to verify:
 
 ```bash
-echo '{"model":{"id":"claude-opus-4-5-20251101[1m]","display_name":"Opus"},"cwd":"/home/dev/project","cost":{"total_cost_usd":0.93,"total_lines_added":105,"total_lines_removed":3,"total_api_duration_ms":240000}}' \
+echo '{"model":{"id":"claude-opus-4-6-20251101[1m]","display_name":"Opus"},"cwd":"/home/dev/project","cost":{"total_cost_usd":6.72,"total_lines_added":84,"total_lines_removed":14,"total_api_duration_ms":480000}}' \
   | bash ~/.claude/statusline.sh --test
 ```
 
-Debug mode dumps everything to `/tmp/claude-code-statusline.log`:
-
-```bash
-echo '...' | bash ~/.claude/statusline.sh --test --debug
-cat /tmp/claude-code-statusline.log
-```
+Add `--debug` to dump diagnostics to `/tmp/claude-code-statusline.log`.
 
 ## License
 
