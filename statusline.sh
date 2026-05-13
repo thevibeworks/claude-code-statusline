@@ -536,6 +536,38 @@ get_adaptive_ttl() {
     fi
 }
 
+format_reset_clock() {
+    local iso_ts="$1"
+    [ -z "$iso_ts" ] || [ "$iso_ts" = "null" ] && return
+    date -d "$iso_ts" "+%H:%M" 2>/dev/null
+}
+
+format_reset_relative() {
+    local iso_ts="$1"
+    [ -z "$iso_ts" ] || [ "$iso_ts" = "null" ] && return
+    local reset_epoch now_epoch delta
+    reset_epoch=$(date -d "$iso_ts" +%s 2>/dev/null) || return
+    now_epoch=$(date +%s)
+    delta=$((reset_epoch - now_epoch))
+    [ "$delta" -le 0 ] && { echo "now"; return; }
+
+    local days=$((delta / 86400))
+    local hours=$(((delta % 86400) / 3600))
+    local mins=$(((delta % 3600) / 60))
+
+    if [ "$days" -gt 0 ]; then
+        if [ "$hours" -gt 0 ]; then echo "${days}d${hours}h"
+        else echo "${days}d"
+        fi
+    elif [ "$hours" -gt 0 ]; then
+        if [ "$mins" -gt 0 ]; then echo "${hours}h${mins}m"
+        else echo "${hours}h"
+        fi
+    else
+        echo "${mins}m"
+    fi
+}
+
 get_usage_color() {
     local percent=$(printf '%.0f' "$1" 2>/dev/null || echo 0)
     if [ "$percent" -ge 90 ]; then
@@ -567,10 +599,15 @@ build_usage_display() {
         return
     fi
 
-    local five_util=$(echo "$usage_data" | jq -r '.five_hour.utilization // 0' 2>/dev/null)
-    local seven_util=$(echo "$usage_data" | jq -r '.seven_day.utilization // 0' 2>/dev/null)
-    local opus_util=$(echo "$usage_data" | jq -r '.seven_day_opus.utilization // 0' 2>/dev/null)
-    local sonnet_util=$(echo "$usage_data" | jq -r '.seven_day_sonnet.utilization // 0' 2>/dev/null)
+    local five_util five_reset seven_util seven_reset opus_util sonnet_util
+    eval "$(echo "$usage_data" | jq -r '
+        @sh "five_util=\(.five_hour.utilization // 0)",
+        @sh "five_reset=\(.five_hour.resets_at // "")",
+        @sh "seven_util=\(.seven_day.utilization // 0)",
+        @sh "seven_reset=\(.seven_day.resets_at // "")",
+        @sh "opus_util=\(.seven_day_opus.utilization // 0)",
+        @sh "sonnet_util=\(.seven_day_sonnet.utilization // 0)"
+    ' 2>/dev/null)"
 
     local five_int=$(printf '%.0f' "$five_util" 2>/dev/null || echo 0)
     local seven_int=$(printf '%.0f' "$seven_util" 2>/dev/null || echo 0)
@@ -580,15 +617,27 @@ build_usage_display() {
     local parts=()
 
     # 5h quota (always show if >0)
+    # When >= 80% (yellow zone), show wall-clock reset time: 5h[87%@14:30]
     if [ "$five_int" -gt 0 ] 2>/dev/null; then
         local color=$(get_usage_color "$five_int")
-        parts+=("${DIM}5h${color}[${five_util}%]${RESET}")
+        local reset_suffix=""
+        if [ "$five_int" -ge 80 ] && [ -n "$five_reset" ]; then
+            local clock=$(format_reset_clock "$five_reset")
+            [ -n "$clock" ] && reset_suffix="${DIM}@${clock}${color}"
+        fi
+        parts+=("${DIM}5h${color}[${five_util}%${reset_suffix}]${RESET}")
     fi
 
     # 7d aggregate quota (if present and >0)
+    # When >= 70% (yellow zone), show relative countdown: 7d[75%~2d5h]
     if [ "$seven_int" -gt 0 ] 2>/dev/null; then
         local color=$(get_seven_day_color "$seven_int")
-        parts+=("${DIM}7d${color}[${seven_util}%]${RESET}")
+        local reset_suffix=""
+        if [ "$seven_int" -ge 70 ] && [ -n "$seven_reset" ]; then
+            local rel=$(format_reset_relative "$seven_reset")
+            [ -n "$rel" ] && reset_suffix="${DIM}~${rel}${color}"
+        fi
+        parts+=("${DIM}7d${color}[${seven_util}%${reset_suffix}]${RESET}")
     fi
 
     # Model-specific 7d quotas
