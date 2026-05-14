@@ -565,8 +565,10 @@ JSON
 
 @test "integration: stdin rate_limits fallback without OAuth cache" {
     tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    echo '{"claudeAiOauth":{"accessToken":"fake"}}' > "$tmpdir/.claude/.credentials.json"
     result=$(echo '{"model":{"id":"claude-opus-4-6[1m]","display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.141","context_window":{"used_percentage":10,"context_window_size":1000000},"rate_limits":{"five_hour":{"used_percentage":55,"resets_at":1778756400},"seven_day":{"used_percentage":12,"resets_at":1779292800}}}' \
-        | CLAUDE_CACHE_DIR="$tmpdir" bash "$SCRIPT_DIR/statusline.sh" --test)
+        | HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
     plain=$(strip_ansi "$result")
     [[ "$plain" == *"5h[55%]"* ]]
     [[ "$plain" == *"7d[12%]"* ]]
