@@ -5,7 +5,7 @@
 # Styles: single-block, unicode-blocks, bracketed-bars, filled-dots, square-blocks, line-segments, ascii-bars, percent-only, fraction-display
 
 progress_bar_style="unicode-blocks"
-stat_order="activity,time,cost,model,context,user,quota"
+stat_order="activity,time,cost,model,context,user,quota,extra"
 path_display="project" # project, cwd, full, relative
 alignment="left-right" # left-right, right-left, center
 theme=""
@@ -96,19 +96,19 @@ apply_theme() {
         ;;
     "compact")
         progress_bar_style="unicode-blocks"
-        stat_order="activity,time,cost,model,context,user,quota"
+        stat_order="activity,time,cost,model,context,user,quota,extra"
         path_display="project"
         alignment="left-right"
         ;;
     "detailed")
         progress_bar_style="bracketed-bars"
-        stat_order="model,activity,time,cost,context,user,quota"
+        stat_order="model,activity,time,cost,context,user,quota,extra"
         path_display="cwd"
         alignment="left-right"
         ;;
     "developer")
         progress_bar_style="filled-dots"
-        stat_order="activity,time,cost,model,context,user,quota"
+        stat_order="activity,time,cost,model,context,user,quota,extra"
         path_display="full"
         alignment="right-left"
         ;;
@@ -203,6 +203,110 @@ term_width=$(tput cols 2>/dev/null || echo 80)
 
 # Usage quota tracking
 
+oauth_token_expired() {
+    local expires_at="${1:-}"
+
+    if [ -z "$expires_at" ] || [ "$expires_at" = "null" ]; then
+        return 1
+    fi
+
+    local expiry
+    expiry=$(printf '%.0f' "$expires_at" 2>/dev/null) || return 1
+
+    # Claude Code stores expiresAt in milliseconds. Accept seconds for older
+    # notes/tools that used second precision.
+    if [ "$expiry" -lt 100000000000 ] 2>/dev/null; then
+        expiry=$((expiry * 1000))
+    fi
+
+    local now_ms="${STATUSLINE_TEST_NOW_MS:-$(($(date +%s) * 1000))}"
+    [ $((now_ms + 300000)) -ge "$expiry" ]
+}
+
+refresh_oauth_credentials_file() {
+    local cred_file="$1"
+    local refresh_token scope scope_string payload response http_code body
+
+    [ -f "$cred_file" ] || return 1
+
+    refresh_token=$(jq -r '.claudeAiOauth.refreshToken // empty' "$cred_file" 2>/dev/null)
+    [ -n "$refresh_token" ] || return 1
+
+    mkdir -p "$CLAUDE_CACHE_DIR"
+    local lock_file="$CLAUDE_CACHE_DIR/oauth_refresh.lock"
+    if [ -f "$lock_file" ]; then
+        local lock_age=$(($(date +%s) - $(stat -c %Y "$lock_file" 2>/dev/null || stat -f %m "$lock_file" 2>/dev/null || echo 0)))
+        [ "$lock_age" -lt 30 ] && return 1
+        rm -f "$lock_file"
+    fi
+    touch "$lock_file"
+
+    scope_string=$(jq -r '.claudeAiOauth.scopes // [] | join(" ")' "$cred_file" 2>/dev/null)
+    if [ -z "$scope_string" ]; then
+        scope_string="user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
+    fi
+
+    payload=$(jq -n \
+        --arg refresh "$refresh_token" \
+        --arg scope "$scope_string" \
+        '{
+            grant_type:"refresh_token",
+            refresh_token:$refresh,
+            client_id:"9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+            scope:$scope
+        }')
+
+    response=$(curl -sS -w "\n%{http_code}" -X POST \
+        "https://platform.claude.com/v1/oauth/token" \
+        -H "Content-Type: application/json" \
+        --data "$payload" \
+        --max-time 15)
+
+    http_code=$(echo "$response" | tail -1)
+    body=$(echo "$response" | sed '$d')
+    rm -f "$lock_file"
+
+    if [ "$http_code" != "200" ]; then
+        debug_log "refresh_oauth_credentials_file: refresh failed (code: $http_code)"
+        return 1
+    fi
+
+    local access_token new_refresh_token expires_in now_ms expires_at scopes_json tmp_file
+    access_token=$(echo "$body" | jq -r '.access_token // empty' 2>/dev/null)
+    new_refresh_token=$(echo "$body" | jq -r '.refresh_token // empty' 2>/dev/null)
+    expires_in=$(echo "$body" | jq -r '.expires_in // empty' 2>/dev/null)
+    scope=$(echo "$body" | jq -r '.scope // empty' 2>/dev/null)
+
+    [ -n "$access_token" ] || return 1
+    [ -n "$new_refresh_token" ] || new_refresh_token="$refresh_token"
+    [ -n "$expires_in" ] || expires_in=3600
+    [ -n "$scope" ] || scope="$scope_string"
+
+    now_ms="${STATUSLINE_TEST_NOW_MS:-$(($(date +%s) * 1000))}"
+    expires_at=$((now_ms + expires_in * 1000))
+    scopes_json=$(printf '%s' "$scope" | jq -R 'split(" ") | map(select(length > 0))')
+
+    tmp_file="${cred_file}.tmp.$$"
+    jq \
+        --arg access "$access_token" \
+        --arg refresh "$new_refresh_token" \
+        --argjson expires "$expires_at" \
+        --argjson scopes "$scopes_json" \
+        '.claudeAiOauth.accessToken = $access
+         | .claudeAiOauth.refreshToken = $refresh
+         | .claudeAiOauth.expiresAt = $expires
+         | .claudeAiOauth.scopes = $scopes' \
+        "$cred_file" >"$tmp_file" 2>/dev/null || {
+            rm -f "$tmp_file"
+            return 1
+        }
+    chmod 600 "$tmp_file" 2>/dev/null || true
+    mv -f "$tmp_file" "$cred_file"
+
+    debug_log "refresh_oauth_credentials_file: refreshed OAuth token"
+    echo "$access_token"
+}
+
 get_oauth_token() {
     # 1. Credentials file (Linux, or macOS plaintext fallback)
     local cred_file="$CLAUDE_HOME/.claude/.credentials.json"
@@ -211,6 +315,18 @@ get_oauth_token() {
     if [ -f "$cred_file" ]; then
         local token=$(jq -r '.claudeAiOauth.accessToken // .access_token // empty' "$cred_file" 2>/dev/null)
         if [ -n "$token" ]; then
+            local expires_at=$(jq -r '.claudeAiOauth.expiresAt // empty' "$cred_file" 2>/dev/null)
+            if oauth_token_expired "$expires_at"; then
+                debug_log "get_oauth_token: credentials token expired, attempting refresh"
+                local refreshed_token
+                refreshed_token=$(refresh_oauth_credentials_file "$cred_file" 2>/dev/null)
+                if [ -n "$refreshed_token" ]; then
+                    debug_log "get_oauth_token: refreshed token from credentials file (${#refreshed_token} chars)"
+                    echo "$refreshed_token"
+                    return 0
+                fi
+                debug_log "get_oauth_token: refresh failed, using existing token"
+            fi
             debug_log "get_oauth_token: token from credentials file (${#token} chars)"
             echo "$token"
             return 0
@@ -375,6 +491,93 @@ fetch_usage_for_session() {
     fi
 }
 
+get_cached_org_uuid() {
+    local profile_cache="$CLAUDE_CACHE_DIR/profile.cache"
+    if [ -f "$profile_cache" ]; then
+        jq -r '.organization.uuid // empty' "$profile_cache" 2>/dev/null
+    fi
+}
+
+fetch_prepaid_balance() {
+    local org_uuid="$1"
+    local cache_file="$CLAUDE_CACHE_DIR/prepaid_credits.cache"
+    local lock_file="$CLAUDE_CACHE_DIR/prepaid_credits.lock"
+    local err_file="$CLAUDE_CACHE_DIR/prepaid_credits.err"
+
+    [ -n "$org_uuid" ] || return 1
+
+    mkdir -p "$CLAUDE_CACHE_DIR"
+    debug_log "fetch_prepaid_balance: org=$org_uuid"
+
+    if [ -f "$cache_file" ]; then
+        local fetched_at=$(jq -r '.fetched_at // 0' "$cache_file" 2>/dev/null)
+        local age=$(($(date +%s) - fetched_at))
+        if [ $age -lt 300 ]; then
+            cat "$cache_file"
+            return 0
+        fi
+    fi
+
+    if [ -f "$err_file" ]; then
+        local err_at=$(cat "$err_file" 2>/dev/null || echo 0)
+        local err_age=$(($(date +%s) - err_at))
+        if [ $err_age -lt 120 ]; then
+            [ -f "$cache_file" ] && cat "$cache_file"
+            return 0
+        fi
+        rm -f "$err_file"
+    fi
+
+    if [ -f "$lock_file" ]; then
+        local lock_age=$(($(date +%s) - $(stat -c %Y "$lock_file" 2>/dev/null || stat -f %m "$lock_file" 2>/dev/null || echo 0)))
+        if [ $lock_age -lt 10 ]; then
+            [ -f "$cache_file" ] && cat "$cache_file"
+            return 0
+        fi
+        rm -f "$lock_file"
+    fi
+
+    local token=$(get_oauth_token)
+    if [ -z "$token" ]; then
+        debug_log "fetch_prepaid_balance: no token available"
+        [ -f "$cache_file" ] && cat "$cache_file"
+        return 1
+    fi
+
+    touch "$lock_file"
+
+    local ua="claude-code/${cli_version:-2.1.76}"
+    local response=$(curl -s -w "\n%{http_code}" -X GET \
+        "https://api.anthropic.com/api/oauth/organizations/${org_uuid}/prepaid/credits" \
+        -H "Authorization: Bearer $token" \
+        -H "Content-Type: application/json" \
+        -H "User-Agent: $ua" \
+        -H "x-organization-uuid: $org_uuid" \
+        --max-time 5)
+
+    local http_code=$(echo "$response" | tail -1)
+    local body=$(echo "$response" | sed '$d')
+
+    rm -f "$lock_file"
+
+    debug_log "PREPAID API RESPONSE: HTTP $http_code"
+    debug_log "PREPAID RESPONSE BODY: $body"
+
+    if [ "$http_code" = "200" ]; then
+        local tmp_cache="${cache_file}.tmp.$$"
+        echo "$body" | jq --arg ts "$(date +%s)" '. + {fetched_at: ($ts|tonumber)}' >"$tmp_cache" 2>/dev/null
+        mv -f "$tmp_cache" "$cache_file"
+        rm -f "$err_file"
+        cat "$cache_file"
+        return 0
+    else
+        debug_log "fetch_prepaid_balance: API failed (code: $http_code)"
+        date +%s >"$err_file" 2>/dev/null
+        [ -f "$cache_file" ] && cat "$cache_file"
+        return 1
+    fi
+}
+
 log_usage_snapshot() {
     local session_id="$1"
     local usage_data="$2"
@@ -457,7 +660,8 @@ log_usage_snapshot() {
             },
             five_hour:.five_hour,
             seven_day:.seven_day,
-            seven_day_opus:.seven_day_opus
+            seven_day_opus:.seven_day_opus,
+            extra_usage:.extra_usage
         }' \
         >>"$usage_log" 2>/dev/null
 }
@@ -525,6 +729,59 @@ render_bar() {
     for ((i=0; i<filled; i++)); do bar+="$fill_char"; done
     for ((i=0; i<empty; i++)); do bar+="$empty_char"; done
     printf '%s' "$bar"
+}
+
+format_money_minor() {
+    local amount="${1:-}"
+    local currency="${2:-USD}"
+    local mode="${3:-fit}"
+
+    if [ -z "$amount" ] || [ "$amount" = "null" ]; then
+        echo ""
+        return
+    fi
+
+    local minor
+    minor=$(printf '%.0f' "$amount" 2>/dev/null) || {
+        echo ""
+        return
+    }
+
+    local upper_currency
+    upper_currency=$(printf '%s' "$currency" | tr '[:lower:]' '[:upper:]')
+    local symbol=""
+    case "$upper_currency" in
+    USD) symbol="$" ;;
+    EUR) symbol="€" ;;
+    GBP) symbol="£" ;;
+    JPY) symbol="¥" ;;
+    CAD) symbol="CA$" ;;
+    AUD) symbol="A$" ;;
+    NZD) symbol="NZ$" ;;
+    SGD) symbol="S$" ;;
+    BRL) symbol="R$" ;;
+    *)   symbol="${upper_currency} " ;;
+    esac
+
+    case "$upper_currency" in
+    JPY|KRW|VND)
+        printf "%s%d" "$symbol" "$minor"
+        return
+        ;;
+    esac
+
+    if [ "$mode" = "whole" ]; then
+        printf "%s%d" "$symbol" $(((minor + 50) / 100))
+        return
+    fi
+
+    local whole=$((minor / 100))
+    local cents=$((minor % 100))
+    if [ "$cents" -eq 0 ]; then
+        printf "%s%d" "$symbol" "$whole"
+    else
+        printf "%s%d.%02d" "$symbol" "$whole" "$cents"
+    fi
 }
 
 get_adaptive_ttl() {
@@ -657,6 +914,78 @@ build_usage_display() {
 
     local IFS=' '
     echo "${parts[*]}"
+}
+
+build_extra_usage_display() {
+    local usage_data="$1"
+    local balance_data="${2:-}"
+
+    if [ -z "$usage_data" ]; then
+        echo ""
+        return
+    fi
+
+    local extra_present is_enabled monthly_limit used_credits utilization currency
+    eval "$(echo "$usage_data" | jq -r '
+        @sh "extra_present=\(.extra_usage != null)",
+        @sh "is_enabled=\(.extra_usage.is_enabled // "")",
+        @sh "monthly_limit=\(if .extra_usage.monthly_limit == null then "null" else (.extra_usage.monthly_limit // "" | tostring) end)",
+        @sh "used_credits=\(.extra_usage.used_credits // "")",
+        @sh "utilization=\(.extra_usage.utilization // "")",
+        @sh "currency=\(.extra_usage.currency // "USD")"
+    ' 2>/dev/null)"
+
+    [ "$extra_present" = "true" ] || {
+        echo ""
+        return
+    }
+
+    if [ "$is_enabled" != "true" ]; then
+        echo "${DIM}ex[off]${RESET}"
+        return
+    fi
+
+    local balance_amount balance_currency auto_reload
+    if [ -n "$balance_data" ]; then
+        eval "$(echo "$balance_data" | jq -r '
+            @sh "balance_amount=\(.amount // "")",
+            @sh "balance_currency=\(.currency // "USD")",
+            @sh "auto_reload=\(.auto_reload_settings.enabled // false)"
+        ' 2>/dev/null)"
+    fi
+
+    local balance_part=""
+    if [ -n "$balance_amount" ] && [ "$balance_amount" != "null" ]; then
+        local balance_display
+        balance_display=$(format_money_minor "$balance_amount" "${balance_currency:-$currency}")
+        [ -n "$balance_display" ] && balance_part=" bal${balance_display}"
+    fi
+
+    local auto_reload_part=""
+    [ "$auto_reload" = "true" ] && auto_reload_part=" ar"
+
+    if [ "$monthly_limit" = "null" ]; then
+        echo "${DIM}ex${GREEN}[unlimited${balance_part}${auto_reload_part}]${RESET}"
+        return
+    fi
+
+    if [ -z "$used_credits" ] || [ -z "$monthly_limit" ] || [ -z "$utilization" ]; then
+        echo ""
+        return
+    fi
+
+    local used_display limit_display util_int color
+    used_display=$(format_money_minor "$used_credits" "$currency")
+    limit_display=$(format_money_minor "$monthly_limit" "$currency" whole)
+    util_int=$(printf '%.0f' "$utilization" 2>/dev/null || echo 0)
+    color=$(get_usage_color "$util_int")
+
+    if [ -z "$used_display" ] || [ -z "$limit_display" ]; then
+        echo ""
+        return
+    fi
+
+    echo "${DIM}ex${color}[${used_display}/${limit_display} ${util_int}%${balance_part}${auto_reload_part}]${RESET}"
 }
 
 get_user_tier() {
@@ -1004,6 +1333,7 @@ add_component_no_space() {
 }
 
 quota_component=""
+extra_component=""
 user_component=""
 user_tier=""
 
@@ -1067,6 +1397,41 @@ if [ -n "$session_id" ] && [ "$_may_have_oauth" = true ]; then
         usage_data=$(cat "$cache_file" 2>/dev/null)
         quota_display=$(build_usage_display "$usage_data" "$user_tier")
         [ -n "$quota_display" ] && quota_component="$quota_display"
+
+        extra_usage_enabled=$(echo "$usage_data" | jq -r '.extra_usage.is_enabled // false' 2>/dev/null || echo false)
+        prepaid_data=""
+        if [ "$extra_usage_enabled" = "true" ]; then
+            org_uuid=$(get_cached_org_uuid)
+            prepaid_cache="$CLAUDE_CACHE_DIR/prepaid_credits.cache"
+            prepaid_lock="$CLAUDE_CACHE_DIR/prepaid_credits.lock"
+            prepaid_err="$CLAUDE_CACHE_DIR/prepaid_credits.err"
+            should_fetch_prepaid=false
+
+            if [ -n "$org_uuid" ]; then
+                if [ ! -f "$prepaid_cache" ]; then
+                    should_fetch_prepaid=true
+                else
+                    prepaid_fetched_at=$(jq -r '.fetched_at // 0' "$prepaid_cache" 2>/dev/null || echo 0)
+                    prepaid_age=$(($(date +%s) - prepaid_fetched_at))
+                    [ "$prepaid_age" -ge 300 ] && should_fetch_prepaid=true
+                fi
+
+                if [ "$should_fetch_prepaid" = true ] && [ -f "$prepaid_err" ]; then
+                    prepaid_err_at=$(cat "$prepaid_err" 2>/dev/null || echo 0)
+                    prepaid_err_age=$(($(date +%s) - prepaid_err_at))
+                    [ $prepaid_err_age -lt 120 ] && should_fetch_prepaid=false
+                fi
+
+                if [ "$should_fetch_prepaid" = true ] && [ ! -f "$prepaid_lock" ]; then
+                    (fetch_prepaid_balance "$org_uuid" >/dev/null 2>&1 &)
+                fi
+
+                [ -f "$prepaid_cache" ] && prepaid_data=$(cat "$prepaid_cache" 2>/dev/null)
+            fi
+        fi
+
+        extra_display=$(build_extra_usage_display "$usage_data" "$prepaid_data")
+        [ -n "$extra_display" ] && extra_component="$extra_display"
     fi
 
     user_component=$(build_user_info "$user_tier")
@@ -1083,6 +1448,7 @@ for item in "${order_array[@]}"; do
     "context") add_component_no_space "$context_component" ;;
     "user") add_component "$user_component" ;;
     "quota") add_component "$quota_component" ;;
+    "extra") add_component "$extra_component" ;;
     esac
 done
 

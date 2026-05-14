@@ -76,7 +76,7 @@ setup() {
 }
 
 @test "format_reset_relative: exact days" {
-    ts=$(date -u -d '+3 days' '+%Y-%m-%dT%H:%M:%SZ')
+    ts=$(date -u -d '+3 days 1 minute' '+%Y-%m-%dT%H:%M:%SZ')
     result=$(format_reset_relative "$ts")
     [ "$result" = "3d" ]
 }
@@ -90,6 +90,52 @@ setup() {
 @test "format_reset_relative: empty returns empty" {
     result=$(format_reset_relative "")
     [ -z "$result" ]
+}
+
+# --- OAuth token refresh ---
+
+@test "oauth_token_expired: uses five minute buffer for millisecond timestamps" {
+    STATUSLINE_TEST_NOW_MS=1778728000000
+    export STATUSLINE_TEST_NOW_MS
+
+    run oauth_token_expired 1778728299000
+    [ "$status" -eq 0 ]
+
+    run oauth_token_expired 1778728301000
+    [ "$status" -eq 1 ]
+
+    unset STATUSLINE_TEST_NOW_MS
+}
+
+@test "refresh_oauth_credentials_file: refreshes expired token and updates credentials" {
+    tmpdir=$(mktemp -d)
+    cred_file="$tmpdir/.credentials.json"
+    cat >"$cred_file" <<'JSON'
+{"claudeAiOauth":{"accessToken":"old-access","refreshToken":"old-refresh","expiresAt":1000,"scopes":["user:profile","user:inference"],"subscriptionType":"max","rateLimitTier":"tier"}}
+JSON
+    chmod 600 "$cred_file"
+
+    curl() {
+        printf '%s\n200\n' '{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600,"scope":"user:profile user:inference"}'
+    }
+
+    STATUSLINE_TEST_NOW_MS=1000000
+    CLAUDE_CACHE_DIR="$tmpdir"
+    export STATUSLINE_TEST_NOW_MS
+    export CLAUDE_CACHE_DIR
+
+    result=$(refresh_oauth_credentials_file "$cred_file")
+
+    [ "$result" = "new-access" ]
+    [ "$(jq -r '.claudeAiOauth.accessToken' "$cred_file")" = "new-access" ]
+    [ "$(jq -r '.claudeAiOauth.refreshToken' "$cred_file")" = "new-refresh" ]
+    [ "$(jq -r '.claudeAiOauth.expiresAt' "$cred_file")" = "4600000" ]
+    [ "$(jq -r '.claudeAiOauth.scopes | join(" ")' "$cred_file")" = "user:profile user:inference" ]
+    [ "$(stat -c '%a' "$cred_file")" = "600" ]
+
+    unset STATUSLINE_TEST_NOW_MS
+    unset CLAUDE_CACHE_DIR
+    rm -rf "$tmpdir"
 }
 
 # --- get_usage_color ---
@@ -178,6 +224,66 @@ setup() {
 @test "render_bar: 1% shows minimum 1 filled" {
     result=$(render_bar 1 6 "#" ".")
     [ "$result" = "#....." ]
+}
+
+# --- extra usage ---
+
+@test "format_money_minor: USD cents use compact dollars" {
+    result=$(format_money_minor 1629 USD)
+    [ "$result" = '$16.29' ]
+
+    result=$(format_money_minor 20000 USD whole)
+    [ "$result" = '$200' ]
+
+    result=$(format_money_minor 466 usd)
+    [ "$result" = '$4.66' ]
+}
+
+@test "build_extra_usage_display: shows spend limit percent and balance" {
+    usage='{"extra_usage":{"is_enabled":true,"monthly_limit":20000,"used_credits":1629,"utilization":8.145,"currency":"USD"}}'
+    balance='{"amount":466,"currency":"USD","auto_reload_settings":{"enabled":false}}'
+
+    result=$(build_extra_usage_display "$usage" "$balance")
+    plain=$(strip_ansi "$result")
+
+    [ "$plain" = 'ex[$16.29/$200 8% bal$4.66]' ]
+}
+
+@test "build_extra_usage_display: marks auto reload when enabled" {
+    usage='{"extra_usage":{"is_enabled":true,"monthly_limit":20000,"used_credits":1629,"utilization":8.145,"currency":"USD"}}'
+    balance='{"amount":466,"currency":"USD","auto_reload_settings":{"enabled":true}}'
+
+    result=$(build_extra_usage_display "$usage" "$balance")
+    plain=$(strip_ansi "$result")
+
+    [ "$plain" = 'ex[$16.29/$200 8% bal$4.66 ar]' ]
+}
+
+@test "build_extra_usage_display: shows unlimited extra usage" {
+    usage='{"extra_usage":{"is_enabled":true,"monthly_limit":null,"used_credits":1629,"utilization":null,"currency":"USD"}}'
+    balance='{"amount":466,"currency":"USD","auto_reload_settings":{"enabled":false}}'
+
+    result=$(build_extra_usage_display "$usage" "$balance")
+    plain=$(strip_ansi "$result")
+
+    [ "$plain" = 'ex[unlimited bal$4.66]' ]
+}
+
+@test "build_extra_usage_display: shows disabled extra usage" {
+    usage='{"extra_usage":{"is_enabled":false,"monthly_limit":20000,"used_credits":0,"utilization":0,"currency":"USD"}}'
+
+    result=$(build_extra_usage_display "$usage" "")
+    plain=$(strip_ansi "$result")
+
+    [ "$plain" = 'ex[off]' ]
+}
+
+@test "build_extra_usage_display: hides when usage payload has no extra usage object" {
+    usage='{"five_hour":{"utilization":20}}'
+
+    result=$(build_extra_usage_display "$usage" "")
+
+    [ -z "$result" ]
 }
 
 # --- get_context_limit ---

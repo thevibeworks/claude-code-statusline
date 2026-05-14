@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Added default `extra` statusline component for Claude Code extra usage:
+  `ex[$16.29/$200 8% bal$4.66]`.
+- Reads monthly extra spend from `/api/oauth/usage` and prepaid balance from
+  `/api/oauth/organizations/:orgUUID/prepaid/credits` when OAuth profile data is
+  available.
+- Caches prepaid balance for 5 minutes with the same lock/backoff pattern used
+  by quota fetching.
+- Refreshes expired file-based Claude Code OAuth tokens before quota/profile
+  requests.
+
+### Documentation
+
+- Documented the extra-usage component, API behavior, and updated README preview
+  signals.
+
+---
+
 ## v0.3.0 — 2026-05-12 — Quota Reset Time & API Cleanup
 
 ### Quota Reset Display

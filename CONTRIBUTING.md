@@ -5,8 +5,7 @@
 ```bash
 git clone https://github.com/thevibeworks/claude-code-statusline.git
 cd claude-code-statusline
-npm install -g bats   # or: brew install bats-core
-bats t/               # run tests
+npm exec --yes bats -- t/   # or: brew install bats-core && bats t/
 ```
 
 ## Guidelines
@@ -19,9 +18,9 @@ bats t/               # run tests
 ## Tests
 
 ```bash
-bats t/                  # all tests
-bats t/statusline.bats   # statusline only
-bats t/install.bats      # install only
+npm exec --yes bats -- t/                   # all tests, no global install
+npm exec --yes bats -- t/statusline.bats    # statusline only
+npm exec --yes bats -- t/install.bats       # install only
 ```
 
 Tests source functions from the real `statusline.sh` via `t/helpers.bash` —
@@ -32,7 +31,7 @@ no copies, no drift. Install tests use mock `curl` and temp `$HOME` isolation.
 - One feature per PR. Small diffs review faster.
 - Include test coverage for new functions.
 - Update CHANGELOG.md if user-facing behavior changes.
-- Run `bats t/` before pushing. CI runs it too.
+- Run `npm exec --yes bats -- t/` before pushing. CI runs it too.
 
 ## Bug Reports
 
