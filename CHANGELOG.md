@@ -14,6 +14,37 @@
 - Refreshes expired file-based Claude Code OAuth tokens before quota/profile
   requests.
 
+### Extra Usage Display Mode
+
+New `--extra` flag controls when the extra-usage component appears:
+
+- `always` (default) — show whenever extra usage is enabled
+- `on-limit` — show only when 5h >= 80% or 7d >= 70% (quota under pressure)
+- `off` — never show
+
+The `developer` theme defaults to `on-limit`; `minimal` defaults to `off`.
+
+### UX Refinements
+
+- Quota percentages now display as integers: `5h[12%]` instead of `5h[12.0%]`.
+- Refresh indicator: `~` appears after quota cluster when an API fetch is in
+  flight, `!` when the last fetch failed and data may be stale. Extra usage
+  has its own independent indicator (separate API call).
+- Duration shows hours for long sessions: `1h30m` instead of `90m`.
+- Added space between model suffix and context bar to prevent visual confusion:
+  `opus4.6[1m] [█░░░░░26%]` instead of `opus4.6[1m][█░░░░░26%]`.
+- Removed dead `add_component_no_space` and `format_usage_bar` functions.
+- Fixed `format_duration(0)` returning "1m" instead of "0m".
+- Fixed color variables used before definition (git info, path had no color).
+- Guarded context percentage against division by zero (`CLAUDE_CONTEXT_LIMIT=0`).
+
+### Color Hierarchy
+
+- Path demoted to dim cyan — frees visual weight for primary signals.
+- Git branch: dirty=yellow (pops), clean=dim yellow (recedes).
+- Time: plain dim instead of dim cyan — less color noise.
+- User tier label gets color: MAX=green, PRO=cyan, ENT/TEAM=dim cyan.
+
 ### Documentation
 
 - Documented the extra-usage component, API behavior, and updated README preview

@@ -92,6 +92,190 @@ setup() {
     [ -z "$result" ]
 }
 
+# --- format_duration ---
+
+@test "format_duration: zero returns 0m" {
+    result=$(format_duration 0)
+    [ "$result" = "0m" ]
+}
+
+@test "format_duration: sub-minute rounds up to 1m" {
+    result=$(format_duration 30000)
+    [ "$result" = "1m" ]
+}
+
+@test "format_duration: exact minutes" {
+    result=$(format_duration 120000)
+    [ "$result" = "2m" ]
+}
+
+@test "format_duration: 59 minutes stays as minutes" {
+    result=$(format_duration 3540000)
+    [ "$result" = "59m" ]
+}
+
+@test "format_duration: 60 minutes becomes 1h" {
+    result=$(format_duration 3600000)
+    [ "$result" = "1h" ]
+}
+
+@test "format_duration: 90 minutes becomes 1h30m" {
+    result=$(format_duration 5400000)
+    [ "$result" = "1h30m" ]
+}
+
+@test "format_duration: 3 hours exact" {
+    result=$(format_duration 10800000)
+    [ "$result" = "3h" ]
+}
+
+# --- build_usage_display integer percentages ---
+
+@test "build_usage_display: rounds float percentages to integers" {
+    usage='{"five_hour":{"utilization":12.345,"resets_at":""},"seven_day":{"utilization":67.8,"resets_at":""}}'
+    result=$(build_usage_display "$usage" "")
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"5h[12%]"* ]]
+    [[ "$plain" == *"7d[68%]"* ]]
+}
+
+@test "build_usage_display: zero utilization is hidden" {
+    usage='{"five_hour":{"utilization":0},"seven_day":{"utilization":0}}'
+    result=$(build_usage_display "$usage" "")
+    [ -z "$result" ]
+}
+
+@test "build_usage_display: 5h at 87% includes clock reset suffix" {
+    reset_time=$(date -u -d '+1 hour' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":87,\"resets_at\":\"$reset_time\"},\"seven_day\":{\"utilization\":10}}"
+    result=$(build_usage_display "$usage" "")
+    plain=$(strip_ansi "$result")
+    [[ "$plain" =~ 5h\[87%@ ]]
+}
+
+@test "build_usage_display: 7d at 75% includes relative reset suffix" {
+    reset_time=$(date -u -d '+2 days 5 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":10},\"seven_day\":{\"utilization\":75,\"resets_at\":\"$reset_time\"}}"
+    result=$(build_usage_display "$usage" "")
+    plain=$(strip_ansi "$result")
+    [[ "$plain" =~ 7d\[75%\~ ]]
+}
+
+@test "build_usage_display: MAX tier shows opus model quota" {
+    usage='{"five_hour":{"utilization":10},"seven_day":{"utilization":5},"seven_day_opus":{"utilization":20},"seven_day_sonnet":{"utilization":15}}'
+    result=$(build_usage_display "$usage" "MAX")
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"op[20%]"* ]]
+    [[ "$plain" != *"sn["* ]]
+}
+
+@test "build_usage_display: non-MAX tier shows sonnet model quota" {
+    usage='{"five_hour":{"utilization":10},"seven_day":{"utilization":5},"seven_day_opus":{"utilization":20},"seven_day_sonnet":{"utilization":15}}'
+    result=$(build_usage_display "$usage" "PRO")
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"sn[15%]"* ]]
+    [[ "$plain" != *"op["* ]]
+}
+
+@test "build_usage_display: below threshold hides reset suffix" {
+    reset_time=$(date -u -d '+1 hour' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":50,\"resets_at\":\"$reset_time\"},\"seven_day\":{\"utilization\":40,\"resets_at\":\"$reset_time\"}}"
+    result=$(build_usage_display "$usage" "")
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"5h[50%]"* ]]
+    [[ "$plain" == *"7d[40%]"* ]]
+    [[ "$plain" != *"@"* ]]
+    [[ "$plain" != *"~"* ]]
+}
+
+# --- should_show_extra ---
+
+@test "should_show_extra: always mode shows regardless of quota" {
+    run should_show_extra "always" 10 5
+    [ "$status" -eq 0 ]
+}
+
+@test "should_show_extra: off mode hides regardless of quota" {
+    run should_show_extra "off" 95 90
+    [ "$status" -eq 1 ]
+}
+
+@test "should_show_extra: on-limit shows when 5h >= 80" {
+    run should_show_extra "on-limit" 85 50
+    [ "$status" -eq 0 ]
+}
+
+@test "should_show_extra: on-limit shows when 7d >= 70" {
+    run should_show_extra "on-limit" 10 75
+    [ "$status" -eq 0 ]
+}
+
+@test "should_show_extra: on-limit hides when both under threshold" {
+    run should_show_extra "on-limit" 50 40
+    [ "$status" -eq 1 ]
+}
+
+# --- build_user_info ---
+
+@test "build_user_info: MAX with name shows tier and truncated name" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_CACHE_DIR="$tmpdir"
+    echo '{"account":{"display_name":"feast.tablet"}}' > "$tmpdir/profile.cache"
+    result=$(build_user_info "MAX")
+    plain=$(strip_ansi "$result")
+    [ "$plain" = "[MAX|feast.t.]" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_user_info: tier only without profile" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_CACHE_DIR="$tmpdir"
+    result=$(build_user_info "PRO")
+    plain=$(strip_ansi "$result")
+    [ "$plain" = "[PRO]" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_user_info: short name preserved" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_CACHE_DIR="$tmpdir"
+    echo '{"account":{"display_name":"eric"}}' > "$tmpdir/profile.cache"
+    result=$(build_user_info "MAX")
+    plain=$(strip_ansi "$result")
+    [ "$plain" = "[MAX|eric]" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_user_info: empty tier and no profile returns empty" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_CACHE_DIR="$tmpdir"
+    result=$(build_user_info "")
+    [ -z "$result" ]
+    rm -rf "$tmpdir"
+}
+
+# --- format_money_minor currencies ---
+
+@test "format_money_minor: EUR uses euro symbol" {
+    result=$(format_money_minor 1500 EUR)
+    [ "$result" = '€15' ]
+}
+
+@test "format_money_minor: JPY uses yen with no decimals" {
+    result=$(format_money_minor 1500 JPY)
+    [ "$result" = '¥1500' ]
+}
+
+@test "format_money_minor: null returns empty" {
+    result=$(format_money_minor "" USD)
+    [ -z "$result" ]
+}
+
+@test "format_money_minor: GBP uses pound symbol" {
+    result=$(format_money_minor 2550 GBP)
+    [ "$result" = '£25.50' ]
+}
+
 # --- OAuth token refresh ---
 
 @test "oauth_token_expired: uses five minute buffer for millisecond timestamps" {

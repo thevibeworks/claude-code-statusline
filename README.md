@@ -1,40 +1,47 @@
 # Claude Code Statusline
 
-> Live quota, extra-usage spend, context usage, model, cost, git activity, and
-> session timing for Claude Code.
+> Quota, context, cost, model, and git -- live in your Claude Code prompt.
 
 [![tests](https://github.com/thevibeworks/claude-code-statusline/actions/workflows/test.yml/badge.svg)](https://github.com/thevibeworks/claude-code-statusline/actions/workflows/test.yml)
 [![version](https://img.shields.io/github/v/tag/thevibeworks/claude-code-statusline?label=version&sort=semver)](https://github.com/thevibeworks/claude-code-statusline/tags)
 [![license](https://img.shields.io/github/license/thevibeworks/claude-code-statusline)](LICENSE)
 [![bash](https://img.shields.io/badge/shell-bash-4EAA25)](statusline.sh)
-[![deps](https://img.shields.io/badge/deps-jq%20%2B%20curl-blue)](#requirements)
+[![deps](https://img.shields.io/badge/deps-jq%20%2B%20curl-blue)](#install)
 
 <p align="center">
-  <img src="assets/statusline-preview.svg" alt="Claude Code Statusline terminal preview showing git branch, edits, time, cost, model, context, user tier, quota, and extra usage." width="100%">
+  <img src="assets/statusline-preview.svg" alt="Claude Code Statusline" width="100%">
 </p>
 
-Claude Code Statusline is a single-file Bash statusline for developers who keep
-[Claude Code](https://code.claude.com) open all day. It plugs into the official
-`statusLine` command hook and turns the prompt footer into a compact operations
-readout: current model, context usage, session cost, elapsed API time, git
-activity, subscription tier, 5-hour / 7-day quota, and optional extra-usage
-spend.
+One Bash file that plugs into the official `statusLine` command hook. Shows
+what matters: active model, context window, session cost, 5h / 7d quota with
+reset countdowns, extra-usage spend, git activity, and subscription tier.
+No daemon, no telemetry, no npm.
 
-It is intentionally small: Bash, `jq`, and `curl`; no package manager, no
-background daemon, no maintainer telemetry. Quota and profile calls use Claude
-Code's OAuth credentials when available, including read-only extra-usage balance
-when enabled, and are skipped for API-key or custom base URL setups.
-
-## Quick Start
-
-### Install
+## Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/thevibeworks/claude-code-statusline/main/install.sh | bash
 ```
 
-The installer downloads `statusline.sh` to `~/.claude/`, then configures
-`~/.claude/settings.json`:
+Downloads `statusline.sh` to `~/.claude/` and wires up `settings.json`.
+Restart Claude Code (or send a message) and the statusline appears.
+
+**Requires:** Bash, `jq`, `curl`.
+
+<details><summary>Manual install / inspect first</summary>
+
+```bash
+# Download and inspect
+curl -fsSL https://raw.githubusercontent.com/thevibeworks/claude-code-statusline/main/install.sh -o /tmp/install-statusline.sh
+less /tmp/install-statusline.sh
+bash /tmp/install-statusline.sh
+
+# Or skip the installer entirely
+curl -fsSL https://raw.githubusercontent.com/thevibeworks/claude-code-statusline/main/statusline.sh -o ~/.claude/statusline.sh
+chmod +x ~/.claude/statusline.sh
+```
+
+Then add to `~/.claude/settings.json`:
 
 ```json
 {
@@ -46,238 +53,134 @@ The installer downloads `statusline.sh` to `~/.claude/`, then configures
 }
 ```
 
-Restart Claude Code, or send another message, and the statusline will render on
-the next prompt.
-
-### Requirements
-
-- Claude Code with the `statusLine` hook
-- Bash
-- `jq`
-- `curl`
-
-Prefer to inspect installers first?
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/thevibeworks/claude-code-statusline/main/install.sh -o /tmp/claude-code-statusline-install.sh
-less /tmp/claude-code-statusline-install.sh
-bash /tmp/claude-code-statusline-install.sh
-```
-
-### Manual Install
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/thevibeworks/claude-code-statusline/main/statusline.sh -o ~/.claude/statusline.sh
-chmod +x ~/.claude/statusline.sh
-```
-
-Then add the `statusLine` block above to `~/.claude/settings.json`.
+</details>
 
 ## What It Shows
 
 ```text
-myproject (main*)  +84/-14 8m $6.72 opus4.6[1m][█░░░░░26%] [MAX|feast.t.] 5h[24%] 7d[100%~12h6m] ex[$16.29/$200 8% bal$4.66]
-    ^        ^       ^     ^   ^        ^          ^            ^           ^          ^                ^
-  project  branch  edits  time cost    model     context       user      5h quota   7d quota       extra usage
+project (main*)  +84/-14 1h30m $6.72 opus4.6[1m] [███░░░26%] [MAX|feast.t.] 5h[24%] 7d[100%~12h6m] ex[$16.29/$200 8% bal$4.66]
+   |       |       |      |     |       |           |            |           |          |                |
+ path   branch   edits   time  cost   model       context       user      5h quota   7d quota       extra usage
 ```
+
+Every component earns its place:
 
 | Signal | Why it matters |
 |--------|----------------|
-| Git path and branch | Know which repo and branch Claude Code is touching. |
-| Lines added / removed | Spot session activity without opening git status. |
-| API time and cost | Keep long sessions visible. |
-| Model abbreviation | See the active model without reading full model IDs. |
-| Context bar | Track context pressure using Claude Code's `/context` formula. |
-| User tier | Confirm profile and subscription resolution. |
-| 5h / 7d quota | See utilization and reset timing before you hit the wall. |
-| Extra usage | Track monthly extra spend and prepaid balance when enabled. |
+| Path and branch | Know where Claude Code is writing. Dirty branch is bright yellow. |
+| Activity | Session diff without opening git. |
+| Time and cost | Track long sessions. Hours format above 60m (`1h30m`). |
+| Model | Abbreviated. `claude-opus-4-6[1m]` becomes `opus4.6[1m]`. |
+| Context bar | Green / yellow / red by pressure. Matches `/context` formula. |
+| User tier | MAX is green, PRO is cyan. Truncated display name. |
+| Quota | Integer percentages. Reset countdown when 5h >= 80% or 7d >= 70%. |
+| Extra usage | Monthly spend, limit, prepaid balance. `--extra on-limit` to auto-hide. |
 
-## Why This Instead of `/statusline`?
-
-Claude Code's built-in [`/statusline`](https://code.claude.com/docs/en/statusline)
-can generate simple one-off scripts. This repo is for people who want a
-maintained default with quota intelligence, caching, themes, tests, and a clean
-install path.
+## vs Built-in `/statusline`
 
 | Feature | `/statusline` | This repo |
 |---------|:-------------:|:---------:|
-| Context bar | Yes | Yes |
-| Cost / duration | Yes | Yes |
-| Git branch | Yes | Yes |
-| Live 5h / 7d quota | No | Yes |
-| Extra usage spend / balance | No | Yes |
-| Quota reset countdown | No | Yes |
-| Adaptive API polling | No | Yes |
-| Subscription tier display | No | Yes |
-| Model abbreviation | No | Yes |
-| Themes and bar styles | No | Yes |
-| OAuth credential resolution | No | Yes |
-| macOS Keychain fallback | No | Yes |
-| Bats test suite and CI | No | Yes |
-
-## Examples
-
-### Quota Reset Countdowns
-
-Reset timing appears only when utilization enters the warning zone:
-
-```text
-Low usage:   5h[24%] 7d[10%]
-Warning:     5h[87%@14:30] 7d[75%~2d5h]
-Critical:    5h[95%@14:30] 7d[88%~2d5h]
-```
-
-- `5h` uses clock time, because you are usually planning the current work block.
-- `7d` uses relative time, because duration is easier to act on than a date.
-- Warning thresholds: `5h >= 80%`, `7d >= 70%`.
-
-### Model Abbreviation
-
-Long model IDs are shortened. Aliases stay unchanged.
-
-```text
-claude-opus-4-6[1m]  ->  opus4.6[1m]
-opus[1m]             ->  opus[1m]
-claude-haiku-4-5-*   ->  haiku4.5
-```
-
-### Local Test Render
-
-```bash
-echo '{"model":{"id":"claude-opus-4-6[1m]","display_name":"Opus"},"cwd":"/tmp/project","workspace":{"current_dir":"/tmp/project"},"cost":{"total_cost_usd":6.72,"total_lines_added":84,"total_lines_removed":14,"total_api_duration_ms":480000},"version":"2.1.139"}' \
-  | bash statusline.sh --test
-```
-
-Try another preset:
-
-```bash
-echo '{"model":{"id":"claude-sonnet-4-6","display_name":"Sonnet"},"cwd":"/tmp/project","workspace":{"current_dir":"/tmp/project"},"cost":{"total_cost_usd":1.20,"total_lines_added":12,"total_lines_removed":3,"total_api_duration_ms":90000},"version":"2.1.139"}' \
-  | bash statusline.sh --test --theme developer
-```
+| Context bar, cost, git | Yes | Yes |
+| Live 5h / 7d quota | -- | Yes |
+| Extra usage + prepaid balance | -- | Yes |
+| Quota reset countdown | -- | Yes |
+| Adaptive polling (30s -- 5min) | -- | Yes |
+| Refresh `~` / error `!` indicator | -- | Yes |
+| `--extra` display gating | -- | Yes |
+| Tier display + model abbreviation | -- | Yes |
+| 5 themes, 9 bar styles | -- | Yes |
+| OAuth + macOS Keychain | -- | Yes |
+| 85 bats tests + CI | -- | Yes |
 
 ## Configuration
 
-Add flags to the configured command in `~/.claude/settings.json`:
+Flags go in the command string in `~/.claude/settings.json`:
 
 ```json
-{
-  "statusLine": {
-    "type": "command",
-    "command": "bash ~/.claude/statusline.sh --theme compact --style unicode-blocks",
-    "padding": 0
-  }
-}
+"command": "bash ~/.claude/statusline.sh --theme developer --extra on-limit"
 ```
 
-| Flag | Values |
-|------|--------|
-| `--theme` | `minimal`, `compact`, `detailed`, `developer`, `manager` |
-| `--style` | `unicode-blocks`, `single-block`, `bracketed-bars`, `filled-dots`, `square-blocks`, `line-segments`, `ascii-bars`, `percent-only`, `fraction-display` |
-| `--order` | Comma-separated component list, such as `model,context,quota` |
-| `--path-display` | `project`, `cwd`, `full`, `relative` |
-| `--alignment` | `left-right`, `right-left`, `center` |
-| `--debug` | Write debug logs to `/tmp/claude-code-statusline.log` |
-| `--test [json]` | Render with mock JSON instead of Claude Code input |
-
-Default order:
-
-```text
-activity,time,cost,model,context,user,quota,extra
-```
-
-## Components
-
-| Component | Shows | Example |
-|-----------|-------|---------|
-| `activity` | Lines added / removed | `+84/-14` |
-| `time` | API duration | `8m` |
-| `cost` | Session cost | `$6.72` |
-| `model` | Active model, abbreviated | `opus4.6[1m]` |
-| `context` | Context window usage | `[█░░░░░26%]` |
-| `user` | Tier and display name | `[MAX|feast.t.]` |
-| `quota` | 5h and 7d utilization | `5h[24%] 7d[100%~12h6m]` |
-| `extra` | Extra-usage spend and prepaid balance | `ex[$16.29/$200 8% bal$4.66]` |
-
-## Themes and Styles
+| Flag | Values | Default |
+|------|--------|---------|
+| `--theme` | `minimal`, `compact`, `detailed`, `developer`, `manager` | (none) |
+| `--style` | `unicode-blocks`, `single-block`, `bracketed-bars`, `filled-dots`, `square-blocks`, `line-segments`, `ascii-bars`, `percent-only`, `fraction-display` | `unicode-blocks` |
+| `--order` | Comma-separated: `activity,time,cost,model,context,user,quota,extra` | all |
+| `--path-display` | `project`, `cwd`, `full`, `relative` | `project` |
+| `--alignment` | `left-right`, `right-left`, `center` | `left-right` |
+| `--extra` | `always`, `on-limit`, `off` | `always` |
+| `--debug` | Write logs to `/tmp/claude-code-statusline.log` | off |
+| `--test [json]` | Render with mock data | off |
 
 ### Themes
 
-| Theme | Layout |
-|-------|--------|
-| `minimal` | Model, context, and user only |
-| `compact` | Everything, unicode bars, project path |
-| `detailed` | Bracketed bars and working directory |
-| `developer` | Full path, filled dots, right-aligned stats |
-| `manager` | Percent-only context, cost first, centered |
+| Theme | What it does |
+|-------|-------------|
+| `minimal` | Model + context + user. Extra off. |
+| `compact` | Everything. Unicode bars. Project path. |
+| `detailed` | Bracketed bars. Working directory. |
+| `developer` | Full path. Filled dots. Right-aligned. Extra on-limit. |
+| `manager` | Percent-only. Cost first. Centered. |
 
-### Bar Styles
+### Extra Usage Gating
 
-| Style | Output |
-|-------|--------|
-| `unicode-blocks` | `[███░░░42%]` |
-| `single-block` | `▓ 42%` |
-| `bracketed-bars` | `[████░░░░] 42%` |
-| `filled-dots` | `●●●○○○ 42%` |
-| `square-blocks` | `▰▰▰▱▱▱ 42%` |
-| `line-segments` | `━━━┅┅┅ 42%` |
-| `ascii-bars` | `|||░░░ 42%` |
-| `percent-only` | `42%` |
-| `fraction-display` | `3/8` |
+```text
+--extra always      5h[24%] 7d[10%] ex[$19.52/$200 10% bal$4.66]
+--extra on-limit    5h[24%] 7d[10%]                                (quota OK, hidden)
+--extra on-limit    5h[87%@14:30] 7d[10%] ex[$19.52/$200 10%]     (5h >= 80%, shown)
+--extra off         5h[24%] 7d[10%]                                (always hidden)
+```
 
-## Quota and API Behavior
+`on-limit` keeps the statusline compact until quota pressure makes extra-usage
+budget actionable.
 
-Quota polling scales with usage so the statusline stays useful without calling
-the API on every render.
+### Quota Polling
 
-| 5h utilization | Poll interval |
-|----------------|---------------|
-| `< 20%` | 5 minutes |
-| `20-49%` | 2 minutes |
-| `50-79%` | 1 minute |
-| `>= 80%` | 30 seconds |
+| 5h utilization | Interval |
+|----------------|----------|
+| < 20% | 5 min |
+| 20 -- 49% | 2 min |
+| 50 -- 79% | 1 min |
+| >= 80% | 30 sec |
 
-Error backoff is 2 minutes. Cache writes are atomic via temporary file plus
-`mv`.
+Error backoff: 2 min. Cache writes: atomic `mv`.
 
-Extra-usage data comes from Claude Code's OAuth usage response. When extra usage
-is enabled and the profile cache contains an organization UUID, prepaid balance
-is fetched from the matching organization credits endpoint and cached for 5
-minutes. The component is read-only; it never changes your monthly limit or
-auto-reload settings.
+Indicators: `~` after quota = refresh in flight. `!` = last fetch failed.
 
-Expired OAuth access tokens are refreshed from `refreshToken` in
-`~/.claude/.credentials.json` before usage/profile requests, matching Claude
-Code's normal token flow. Refresh failures fall back to the existing token and
-the usual API error backoff.
+### Try It Locally
 
-OAuth behavior:
+```bash
+echo '{"model":{"id":"claude-opus-4-6[1m]","display_name":"Opus"},"cwd":"/tmp/project","workspace":{"current_dir":"/tmp/project"},"cost":{"total_cost_usd":6.72,"total_lines_added":84,"total_lines_removed":14,"total_api_duration_ms":5400000},"version":"2.1.139"}' \
+  | bash statusline.sh --test
+```
 
-1. If `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or `ANTHROPIC_BASE_URL` is
-   set, quota, user, and extra-usage components are skipped.
-2. `~/.claude/.credentials.json` is checked for an OAuth token.
-3. macOS Keychain is used as a fallback when no file token is available.
-4. OrbStack resolves the real Linux home directory via `getent passwd`.
+<details><summary>OAuth and API behavior</summary>
 
-## Environment Variables
+Quota, profile, and extra-usage requests use Claude Code's OAuth credentials
+from `~/.claude/.credentials.json`. Expired tokens are refreshed automatically
+via the same `refreshToken` flow the CLI uses.
+
+If `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or `ANTHROPIC_BASE_URL` is set,
+all OAuth-dependent components (quota, user, extra) are skipped silently.
+
+macOS Keychain is tried as fallback when no file credential exists. OrbStack
+resolves the real Linux home directory via `getent passwd`.
+
+The script never writes to Anthropic endpoints -- it only reads usage, profile,
+and prepaid balance data.
+
+</details>
+
+<details><summary>Environment variables</summary>
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `CLAUDE_CONTEXT_LIMIT` | auto | Context token limit override |
-| `CLAUDE_DATA_DIR` | script directory | Usage log location |
-| `CLAUDE_CACHE_DIR` | script directory `sessions/` | Quota and profile cache |
-| `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | `32000` | Max output token reserve |
+| `CLAUDE_CONTEXT_LIMIT` | auto | Override context token limit |
+| `CLAUDE_DATA_DIR` | script dir | Usage log location |
+| `CLAUDE_CACHE_DIR` | `$CLAUDE_DATA_DIR/sessions` | Quota and profile cache |
+| `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | `32000` | Output token reserve |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Claude config directory |
 
-## Safety Notes
-
-- The installer modifies only `~/.claude/statusline.sh` and the `statusLine`
-  block in `~/.claude/settings.json`.
-- The runtime reads Claude Code's statusline JSON input and local transcript
-  data needed to calculate context usage.
-- Quota, profile, and extra-usage requests go to Anthropic OAuth endpoints only
-  when Claude Code OAuth credentials are available.
-- Debug logging is opt-in with `--debug`.
-- There is no third-party analytics service and no maintainer telemetry.
+</details>
 
 ## Testing
 
@@ -285,57 +188,27 @@ OAuth behavior:
 npm exec --yes bats -- t/
 ```
 
-The suite currently covers 58 Bats tests:
-
-- `t/statusline.bats`: model abbreviation, reset formatting, OAuth refresh,
-  usage colors, adaptive TTL, progress bars, extra usage, context limits, and render
-  integration.
-- `t/install.bats`: installer file creation, settings merge behavior, command
-  updates, padding preservation, and output.
-
-CI runs the same command on push and pull request to `main`.
+85 tests across `t/statusline.bats` (72 unit + integration) and
+`t/install.bats` (12 installer). CI runs on push and PR to `main`.
 
 ## Project Structure
 
 ```text
-.github/workflows/test.yml   GitHub Actions test workflow
-assets/statusline-preview.svg README terminal preview
-statusline.sh                Main statusline script
+statusline.sh                Main script (one file, ~1500 lines)
 install.sh                   One-line installer
-t/statusline.bats            Statusline unit and integration tests
-t/install.bats               Installer tests with mock curl and isolated HOME
-t/helpers.bash               Test helpers that source the real script
+t/statusline.bats            Unit and integration tests
+t/install.bats               Installer tests (mock curl, isolated $HOME)
+t/helpers.bash               Sources real functions from statusline.sh
+.github/workflows/test.yml   CI workflow
 CHANGELOG.md                 Release notes
 CONTRIBUTING.md              Contribution guide
-docs/devlog/                 API contract notes and implementation history
-LICENSE                      MIT license
+docs/devlog/                 Implementation history
 ```
-
-## Maintenance
-
-- Latest tag in this repo: `v0.3.0`
-- CI: GitHub Actions running `npm exec --yes bats -- t/`
-- Tests: 58 Bats tests
-- API contract checked against Claude Code CLI `v2.1.76` and `v2.1.139`
-- License: MIT
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
-
-Short version:
-
-1. Keep the script dependency-light: Bash, `jq`, and `curl`.
-2. Add or update tests for user-facing behavior.
-3. Run `npm exec --yes bats -- t/` before opening a PR.
-4. Update [CHANGELOG.md](CHANGELOG.md) for visible behavior changes.
-
-Issues are most useful when they include terminal, shell, Claude Code version,
-and a reproducible `--test` input or debug log.
-
-## Acknowledgments
-
-Built on the official [Claude Code statusline API](https://code.claude.com/docs/en/statusline).
+See [CONTRIBUTING.md](CONTRIBUTING.md). Short version: keep it to Bash + `jq` +
+`curl`, add tests, run `bats t/` before pushing.
 
 ## License
 

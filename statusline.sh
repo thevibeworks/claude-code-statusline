@@ -1,6 +1,6 @@
 #!/bin/bash
 # Claude Code statusline
-# Usage: statusline.sh [--style STYLE] [--order ORDER] [--theme THEME] [--path-display TYPE] [--alignment TYPE] [--test JSON] [--debug]
+# Usage: statusline.sh [--style STYLE] [--order ORDER] [--theme THEME] [--path-display TYPE] [--alignment TYPE] [--extra MODE] [--test JSON] [--debug]
 # Themes: minimal, compact, detailed, developer, manager
 # Styles: single-block, unicode-blocks, bracketed-bars, filled-dots, square-blocks, line-segments, ascii-bars, percent-only, fraction-display
 
@@ -13,6 +13,7 @@ theme=""
 # CLAUDE_CONTEXT_LIMIT env override still honored for manual tuning
 context_limit_override="${CLAUDE_CONTEXT_LIMIT:-}"
 max_output_tokens=${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-32000}
+extra_display_mode="always" # always, on-limit, off
 test_mode=false
 test_data=""
 debug_mode=false
@@ -62,6 +63,10 @@ while [[ $# -gt 0 ]]; do
         alignment="$2"
         shift 2
         ;;
+    --extra)
+        extra_display_mode="$2"
+        shift 2
+        ;;
     --test)
         test_mode=true
         if [ -n "$2" ] && [[ "$2" != --* ]]; then
@@ -93,6 +98,7 @@ apply_theme() {
         stat_order="model,context,user"
         path_display="project"
         alignment="left-right"
+        extra_display_mode="off"
         ;;
     "compact")
         progress_bar_style="unicode-blocks"
@@ -111,6 +117,7 @@ apply_theme() {
         stat_order="activity,time,cost,model,context,user,quota,extra"
         path_display="full"
         alignment="right-left"
+        extra_display_mode="on-limit"
         ;;
     "manager")
         progress_bar_style="percent-only"
@@ -200,6 +207,17 @@ fi
 debug_log "PARSED INPUT: model=$model_display (id=$model_id) cwd=$current_dir cost=$cost_usd context_limit=$context_limit exceeds_200k=$exceeds_200k api_duration_ms=$api_duration_ms"
 
 term_width=$(tput cols 2>/dev/null || echo 80)
+
+YELLOW='\033[0;33m'
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+DIM='\033[2m'
+DIM_GREEN='\033[2;32m'
+DIM_RED='\033[2;31m'
+DIM_YELLOW='\033[2;33m'
+CYAN='\033[0;36m'
+DIM_CYAN='\033[2;36m'
+RESET='\033[0m'
 
 # Usage quota tracking
 
@@ -706,18 +724,16 @@ detect_session_boundary() {
     fi
 }
 
-format_usage_bar() {
-    local percent=$(printf '%.0f' "$1" 2>/dev/null || echo 0)
-    local width=${2:-6}
-
-    local filled=$((percent * width / 100))
-    [ "$percent" -gt 0 ] && [ "$filled" -eq 0 ] && filled=1
-    local empty=$((width - filled))
-
-    local bar=""
-    for ((i=0; i<filled; i++)); do bar="${bar}█"; done
-    for ((i=0; i<empty; i++)); do bar="${bar}░"; done
-    echo "${bar}"
+should_show_extra() {
+    local mode="$1" five_int="${2:-0}" seven_int="${3:-0}"
+    case "$mode" in
+        "off") return 1 ;;
+        "on-limit")
+            [ "$five_int" -ge 80 ] || [ "$seven_int" -ge 70 ]
+            return $?
+            ;;
+        *) return 0 ;;
+    esac
 }
 
 render_bar() {
@@ -790,6 +806,24 @@ get_adaptive_ttl() {
     elif [ "$five_int" -ge 50 ]; then echo 60
     elif [ "$five_int" -ge 20 ]; then echo 120
     else echo 300
+    fi
+}
+
+format_duration() {
+    local ms=${1:-0}
+    [ "$ms" -le 0 ] 2>/dev/null && { echo "0m"; return; }
+    local mins=$((ms / 60000))
+    [ $mins -eq 0 ] && mins=1
+    if [ $mins -ge 60 ]; then
+        local h=$((mins / 60))
+        local m=$((mins % 60))
+        if [ $m -gt 0 ]; then
+            echo "${h}h${m}m"
+        else
+            echo "${h}h"
+        fi
+    else
+        echo "${mins}m"
     fi
 }
 
@@ -882,7 +916,7 @@ build_usage_display() {
             local clock=$(format_reset_clock "$five_reset")
             [ -n "$clock" ] && reset_suffix="${DIM}@${clock}${color}"
         fi
-        parts+=("${DIM}5h${color}[${five_util}%${reset_suffix}]${RESET}")
+        parts+=("${DIM}5h${color}[${five_int}%${reset_suffix}]${RESET}")
     fi
 
     # 7d aggregate quota (if present and >0)
@@ -894,7 +928,7 @@ build_usage_display() {
             local rel=$(format_reset_relative "$seven_reset")
             [ -n "$rel" ] && reset_suffix="${DIM}~${rel}${color}"
         fi
-        parts+=("${DIM}7d${color}[${seven_util}%${reset_suffix}]${RESET}")
+        parts+=("${DIM}7d${color}[${seven_int}%${reset_suffix}]${RESET}")
     fi
 
     # Model-specific 7d quotas
@@ -903,12 +937,12 @@ build_usage_display() {
     if [ "$user_tier" = "MAX" ]; then
         if [ "$opus_int" -gt 0 ] 2>/dev/null; then
             local color=$(get_seven_day_color "$opus_int")
-            parts+=("${DIM}op${color}[${opus_util}%]${RESET}")
+            parts+=("${DIM}op${color}[${opus_int}%]${RESET}")
         fi
     else
         if [ "$sonnet_int" -gt 0 ] 2>/dev/null; then
             local color=$(get_seven_day_color "$sonnet_int")
-            parts+=("${DIM}sn${color}[${sonnet_util}%]${RESET}")
+            parts+=("${DIM}sn${color}[${sonnet_int}%]${RESET}")
         fi
     fi
 
@@ -1028,10 +1062,17 @@ build_user_info() {
         name="${name:0:7}."
     fi
 
+    local tier_color="$DIM"
+    case "$tier" in
+        "MAX")       tier_color="$GREEN" ;;
+        "PRO")       tier_color="$CYAN" ;;
+        "ENT"|"TEAM") tier_color="$DIM_CYAN" ;;
+    esac
+
     if [ -n "$tier" ] && [ -n "$name" ]; then
-        echo "${DIM}[${tier}|${name}]${RESET}"
+        echo "${DIM}[${tier_color}${tier}${DIM}|${name}]${RESET}"
     elif [ -n "$tier" ]; then
-        echo "${DIM}[${tier}]${RESET}"
+        echo "${DIM}[${tier_color}${tier}${DIM}]${RESET}"
     elif [ -n "$name" ]; then
         echo "${DIM}[${name}]${RESET}"
     else
@@ -1082,9 +1123,9 @@ if [ -d "$current_dir/.git" ] || git -C "$current_dir" rev-parse --git-dir >/dev
     branch=$(git -C "$current_dir" branch --show-current 2>/dev/null)
     if [ -n "$branch" ]; then
         if ! git -C "$current_dir" diff-index --quiet HEAD -- 2>/dev/null; then
-            git_info=" (${branch}*)"
+            git_info=" ${YELLOW}(${branch}*)${RESET}"
         else
-            git_info=" (${branch})"
+            git_info=" ${DIM_YELLOW}(${branch})${RESET}"
         fi
     fi
 fi
@@ -1190,16 +1231,6 @@ else
     esac
 fi
 
-YELLOW='\033[0;33m'
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-DIM='\033[2m'
-DIM_GREEN='\033[2;32m'
-DIM_RED='\033[2;31m'
-DIM_YELLOW='\033[2;33m'
-CYAN='\033[0;36m'
-RESET='\033[0m'
-
 context_info=""
 if [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
     debug_log "CONTEXT CALCULATION: transcript_path=$transcript_path context_limit=$context_limit"
@@ -1228,7 +1259,11 @@ if [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
             # Match CLI's /context formula: percentage = round(totalTokens / contextWindow * 100)
             # The CLI uses the FULL context window as denominator (not window - output_reserve)
             # This matches what /context displays: e.g. "104k/1000k tokens (10%)"
-            context_pct=$((input_tokens_total * 100 / context_limit))
+            if [ "$context_limit" -gt 0 ] 2>/dev/null; then
+                context_pct=$((input_tokens_total * 100 / context_limit))
+            else
+                context_pct=0
+            fi
 
             # Sanity: if exceeds_200k_tokens is true and we computed <100%, force minimum 100%
             if [ "$exceeds_200k" = "true" ] && [ "$context_limit" -le 200000 ] && [ "$context_pct" -lt 100 ]; then
@@ -1252,7 +1287,7 @@ if [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
                 case "$progress_bar_style" in
                 "bracketed-bars")
                     progress_bar=$(render_bar "$context_pct" 8 "█" "░")
-                    context_info=" ${DIM}[${RESET}${bar_color}${progress_bar}${RESET}${DIM}] ${context_pct}%${RESET}"
+                    context_info="${DIM}[${RESET}${bar_color}${progress_bar}${RESET}${DIM}] ${context_pct}%${RESET}"
                     ;;
                 "unicode-blocks")
                     progress_bar=$(render_bar "$context_pct" 6 "█" "░")
@@ -1260,29 +1295,29 @@ if [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
                     ;;
                 "filled-dots")
                     progress_bar=$(render_bar "$context_pct" 6 "●" "○")
-                    context_info=" ${bar_color}${progress_bar}${RESET} ${DIM}${context_pct}%${RESET}"
+                    context_info="${bar_color}${progress_bar}${RESET} ${DIM}${context_pct}%${RESET}"
                     ;;
                 "square-blocks")
                     progress_bar=$(render_bar "$context_pct" 6 "▰" "▱")
-                    context_info=" ${bar_color}${progress_bar}${RESET} ${DIM}${context_pct}%${RESET}"
+                    context_info="${bar_color}${progress_bar}${RESET} ${DIM}${context_pct}%${RESET}"
                     ;;
                 "line-segments")
                     progress_bar=$(render_bar "$context_pct" 6 "━" "┅")
-                    context_info=" ${bar_color}${progress_bar}${RESET} ${DIM}${context_pct}%${RESET}"
+                    context_info="${bar_color}${progress_bar}${RESET} ${DIM}${context_pct}%${RESET}"
                     ;;
                 "ascii-bars")
                     progress_bar=$(render_bar "$context_pct" 6 "|" "░")
-                    context_info=" ${bar_color}${progress_bar}${RESET} ${DIM}${context_pct}%${RESET}"
+                    context_info="${bar_color}${progress_bar}${RESET} ${DIM}${context_pct}%${RESET}"
                     ;;
                 "single-block")
-                    context_info=" ${bar_color}▓${RESET} ${DIM}${context_pct}%${RESET}"
+                    context_info="${bar_color}▓${RESET} ${DIM}${context_pct}%${RESET}"
                     ;;
                 "percent-only")
-                    context_info=" ${bar_color}${context_pct}%${RESET}"
+                    context_info="${bar_color}${context_pct}%${RESET}"
                     ;;
                 "fraction-display")
                     ratio_filled=$((context_pct * 8 / 100))
-                    context_info=" ${bar_color}${ratio_filled}/8${RESET}"
+                    context_info="${bar_color}${ratio_filled}/8${RESET}"
                     ;;
                 *)
                     progress_bar=$(render_bar "$context_pct" 6 "█" "░")
@@ -1309,12 +1344,8 @@ elif [ "$lines_removed" != "0" ]; then
 fi
 
 if [ "$api_duration_ms" != "0" ]; then
-    api_duration_min_calc=$((api_duration_ms / 60000))
-    if [ $api_duration_min_calc -eq 0 ]; then
-        api_duration_min_calc=1
-    fi
-
-    time_component="\033[2;36m${api_duration_min_calc}m${RESET}"
+    time_text=$(format_duration "$api_duration_ms")
+    time_component="${DIM}${time_text}${RESET}"
 fi
 
 if [ "$cost_usd" != "0" ] && [ "$cost_usd" != "0.00" ]; then
@@ -1325,11 +1356,6 @@ fi
 add_component() {
     local component="$1"
     [ -n "$component" ] && right_parts="${right_parts:+$right_parts }$component"
-}
-
-add_component_no_space() {
-    local component="$1"
-    [ -n "$component" ] && right_parts="${right_parts}$component"
 }
 
 quota_component=""
@@ -1367,18 +1393,21 @@ if [ -n "$session_id" ] && [ "$_may_have_oauth" = true ]; then
     lock_file="$CLAUDE_CACHE_DIR/${session_id}.lock"
     err_file="$CLAUDE_CACHE_DIR/${session_id}.err"
 
+    five_int=0
+    seven_int_cache=0
     should_fetch=false
     if [ ! -f "$cache_file" ]; then
         should_fetch=true
     else
-        fetched_at=$(jq -r '.fetched_at // 0' "$cache_file" 2>/dev/null || echo 0)
-        five_util=$(jq -r '.five_hour.utilization // 0' "$cache_file" 2>/dev/null || echo 0)
+        eval "$(jq -r '
+            @sh "fetched_at=\(.fetched_at // 0)",
+            @sh "five_util=\(.five_hour.utilization // 0)",
+            @sh "seven_util_cache=\(.seven_day.utilization // 0)"
+        ' "$cache_file" 2>/dev/null)"
         age=$(($(date +%s) - fetched_at))
-
-        # Adaptive TTL matching fetch_usage_for_session
         five_int=$(printf '%.0f' "$five_util" 2>/dev/null || echo 0)
+        seven_int_cache=$(printf '%.0f' "$seven_util_cache" 2>/dev/null || echo 0)
         ttl=$(get_adaptive_ttl "$five_int")
-
         [ "$age" -ge "$ttl" ] && should_fetch=true
     fi
 
@@ -1397,6 +1426,14 @@ if [ -n "$session_id" ] && [ "$_may_have_oauth" = true ]; then
         usage_data=$(cat "$cache_file" 2>/dev/null)
         quota_display=$(build_usage_display "$usage_data" "$user_tier")
         [ -n "$quota_display" ] && quota_component="$quota_display"
+
+        if [ -n "$quota_component" ]; then
+            if [ -f "$lock_file" ]; then
+                quota_component="${quota_component}${DIM}~${RESET}"
+            elif [ -f "$err_file" ]; then
+                quota_component="${quota_component}${DIM_RED}!${RESET}"
+            fi
+        fi
 
         extra_usage_enabled=$(echo "$usage_data" | jq -r '.extra_usage.is_enabled // false' 2>/dev/null || echo false)
         prepaid_data=""
@@ -1431,7 +1468,18 @@ if [ -n "$session_id" ] && [ "$_may_have_oauth" = true ]; then
         fi
 
         extra_display=$(build_extra_usage_display "$usage_data" "$prepaid_data")
-        [ -n "$extra_display" ] && extra_component="$extra_display"
+        if [ -n "$extra_display" ]; then
+            if [ -f "$prepaid_lock" ]; then
+                extra_display="${extra_display}${DIM}~${RESET}"
+            elif [ -f "$prepaid_err" ]; then
+                extra_display="${extra_display}${DIM_RED}!${RESET}"
+            fi
+            extra_component="$extra_display"
+        fi
+    fi
+
+    if ! should_show_extra "$extra_display_mode" "$five_int" "$seven_int_cache"; then
+        extra_component=""
     fi
 
     user_component=$(build_user_info "$user_tier")
@@ -1445,7 +1493,7 @@ for item in "${order_array[@]}"; do
     "activity") add_component "$activity_component" ;;
     "time") add_component "$time_component" ;;
     "cost") add_component "$cost_component" ;;
-    "context") add_component_no_space "$context_component" ;;
+    "context") add_component "$context_component" ;;
     "user") add_component "$user_component" ;;
     "quota") add_component "$quota_component" ;;
     "extra") add_component "$extra_component" ;;
@@ -1453,7 +1501,7 @@ for item in "${order_array[@]}"; do
 done
 
 format_output() {
-    local path_part="${CYAN}${display_path}${RESET}${YELLOW}${git_info}${RESET}"
+    local path_part="${DIM_CYAN}${display_path}${RESET}${git_info}"
     local stats_part="${right_parts}"
 
     # Strip ANSI escapes for length calculation (portable: printf %b instead of echo -e)
