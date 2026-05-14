@@ -12,7 +12,6 @@ theme=""
 # Context limit: auto-detected from model.id ([1m] suffix = 1M, default = 200k)
 # CLAUDE_CONTEXT_LIMIT env override still honored for manual tuning
 context_limit_override="${CLAUDE_CONTEXT_LIMIT:-}"
-max_output_tokens=${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-32000}
 extra_display_mode="always" # always, on-limit, off
 test_mode=false
 test_data=""
@@ -162,12 +161,16 @@ if [ "$test_mode" = true ]; then
         version: .version,
         output_style: .output_style,
         cost: .cost,
-        exceeds_200k_tokens: .exceeds_200k_tokens
+        exceeds_200k_tokens: .exceeds_200k_tokens,
+        context_window: (.context_window // {used_percentage: 15, context_window_size: 1000000}),
+        effort: .effort,
+        fast_mode: .fast_mode,
+        rate_limits: .rate_limits
     }' 2>/dev/null)
     debug_log "TEST MODE: transformed input: ${input:0:300}..."
 else
     input=$(cat)
-    debug_log "STDIN INPUT RECEIVED: ${input:0:300}..."
+    debug_log "RAW STDIN: $input"
 fi
 
 # Parse all fields in a single jq call for speed
@@ -184,7 +187,15 @@ eval "$(echo "$input" | jq -r '
     @sh "duration_ms=\(.cost.total_duration_ms // 0)",
     @sh "transcript_path=\(.transcript_path // "")",
     @sh "cli_version=\(.version // "")",
-    @sh "exceeds_200k=\(.exceeds_200k_tokens // false)"
+    @sh "exceeds_200k=\(.exceeds_200k_tokens // false)",
+    @sh "ctx_pct=\(.context_window.used_percentage // "")",
+    @sh "ctx_size=\(.context_window.context_window_size // "")",
+    @sh "effort_level=\(.effort.level // "")",
+    @sh "fast_mode=\(.fast_mode // false)",
+    @sh "rl_five_pct=\(.rate_limits.five_hour.used_percentage // "")",
+    @sh "rl_five_reset=\(.rate_limits.five_hour.resets_at // "")",
+    @sh "rl_seven_pct=\(.rate_limits.seven_day.used_percentage // "")",
+    @sh "rl_seven_reset=\(.rate_limits.seven_day.resets_at // "")"
 ' 2>/dev/null)"
 
 # Detect context window from model ID:
@@ -198,13 +209,7 @@ get_context_limit() {
     fi
 }
 
-if [ -n "$context_limit_override" ]; then
-    context_limit="$context_limit_override"
-else
-    context_limit=$(get_context_limit "$model_id")
-fi
-
-debug_log "PARSED INPUT: model=$model_display (id=$model_id) cwd=$current_dir cost=$cost_usd context_limit=$context_limit exceeds_200k=$exceeds_200k api_duration_ms=$api_duration_ms"
+debug_log "PARSED INPUT: model=$model_display (id=$model_id) cwd=$current_dir cost=$cost_usd ctx_pct=$ctx_pct exceeds_200k=$exceeds_200k api_duration_ms=$api_duration_ms"
 
 term_width=$(tput cols 2>/dev/null || echo 80)
 
@@ -828,16 +833,24 @@ format_duration() {
 }
 
 format_reset_clock() {
-    local iso_ts="$1"
-    [ -z "$iso_ts" ] || [ "$iso_ts" = "null" ] && return
-    date -d "$iso_ts" "+%H:%M" 2>/dev/null
+    local ts="$1"
+    [ -z "$ts" ] || [ "$ts" = "null" ] && return
+    if [[ "$ts" =~ ^[0-9]+$ ]]; then
+        date -d "@$ts" "+%H:%M" 2>/dev/null
+    else
+        date -d "$ts" "+%H:%M" 2>/dev/null
+    fi
 }
 
 format_reset_relative() {
-    local iso_ts="$1"
-    [ -z "$iso_ts" ] || [ "$iso_ts" = "null" ] && return
+    local ts="$1"
+    [ -z "$ts" ] || [ "$ts" = "null" ] && return
     local reset_epoch now_epoch delta
-    reset_epoch=$(date -d "$iso_ts" +%s 2>/dev/null) || return
+    if [[ "$ts" =~ ^[0-9]+$ ]]; then
+        reset_epoch="$ts"
+    else
+        reset_epoch=$(date -d "$ts" +%s 2>/dev/null) || return
+    fi
     now_epoch=$(date +%s)
     delta=$((reset_epoch - now_epoch))
     [ "$delta" -le 0 ] && { echo "now"; return; }
@@ -1238,104 +1251,89 @@ else
 fi
 
 context_info=""
-if [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
-    debug_log "CONTEXT CALCULATION: transcript_path=$transcript_path context_limit=$context_limit"
+context_pct=""
 
-    # Extract latest assistant usage: cache_read_input_tokens, input_tokens, output_tokens
-    # The transcript JSONL has entries like: {"type":"assistant","message":{"usage":{...}}}
+# Primary: use pre-calculated percentage from CLI (v2.1.132+)
+if [ -n "$ctx_pct" ]; then
+    context_pct=$(printf '%.0f' "$ctx_pct" 2>/dev/null || echo 0)
+    debug_log "CONTEXT (stdin): pct=$context_pct size=${ctx_size:-?}"
+# Fallback: parse transcript for older CLI versions
+elif [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
+    debug_log "CONTEXT (transcript fallback): $transcript_path"
+    context_limit="${context_limit_override:-${ctx_size:-$(get_context_limit "$model_id")}}"
     latest_usage=$(tail -20 "$transcript_path" 2>/dev/null | jq -r '
         select(.type=="assistant" and .message.usage) |
         .message.usage |
-        "\(.cache_read_input_tokens // 0),\(.input_tokens // 0),\(.output_tokens // 0)"
+        "\(.cache_read_input_tokens // 0),\(.input_tokens // 0)"
     ' 2>/dev/null | tail -1)
-    debug_log "CONTEXT EXTRACTION: latest_usage=$latest_usage"
-
-    if [ -n "$latest_usage" ] && [ "$latest_usage" != ",," ] && [ "$latest_usage" != "," ]; then
-        IFS=',' read -r cache_tokens input_tokens output_tokens <<<"$latest_usage"
-        cache_tokens=${cache_tokens:-0}
-        input_tokens=${input_tokens:-0}
-        output_tokens=${output_tokens:-0}
-        debug_log "CONTEXT TOKENS: cache_read=$cache_tokens input=$input_tokens output=$output_tokens"
-
-        if [ "$cache_tokens" != "0" ] || [ "$input_tokens" != "0" ]; then
-            # cache_read + input = total input tokens the model saw (includes system, tools, CLAUDE.md)
-            # No additional overhead needed — the API usage already accounts for everything
-            input_tokens_total=$((cache_tokens + input_tokens))
-
-            # Match CLI's /context formula: percentage = round(totalTokens / contextWindow * 100)
-            # The CLI uses the FULL context window as denominator (not window - output_reserve)
-            # This matches what /context displays: e.g. "104k/1000k tokens (10%)"
-            if [ "$context_limit" -gt 0 ] 2>/dev/null; then
-                context_pct=$((input_tokens_total * 100 / context_limit))
-            else
-                context_pct=0
-            fi
-
-            # Sanity: if exceeds_200k_tokens is true and we computed <100%, force minimum 100%
-            if [ "$exceeds_200k" = "true" ] && [ "$context_limit" -le 200000 ] && [ "$context_pct" -lt 100 ]; then
-                context_pct=100
-            fi
-
-            # Cap at 100% for display (can overshoot in theory)
+    if [ -n "$latest_usage" ] && [ "$latest_usage" != "," ]; then
+        IFS=',' read -r cache_tokens input_tokens <<<"$latest_usage"
+        input_tokens_total=$(( ${cache_tokens:-0} + ${input_tokens:-0} ))
+        if [ "$context_limit" -gt 0 ] 2>/dev/null && [ "$input_tokens_total" -gt 0 ]; then
+            context_pct=$((input_tokens_total * 100 / context_limit))
             [ "$context_pct" -gt 100 ] && context_pct=100
-
-            debug_log "CONTEXT MATH: input_total=$input_tokens_total pct=$context_pct window=$context_limit"
-
-            if [ $context_pct -gt 0 ]; then
-                if [ $context_pct -ge 100 ]; then
-                    bar_color='\033[0;31m'
-                elif [ $context_pct -ge 85 ]; then
-                    bar_color='\033[0;33m'
-                else
-                    bar_color='\033[0;32m'
-                fi
-
-                case "$progress_bar_style" in
-                "bracketed-bars")
-                    progress_bar=$(render_bar "$context_pct" 8 "█" "░")
-                    context_info="${DIM}[${RESET}${bar_color}${progress_bar}${RESET}${DIM}] ${context_pct}%${RESET}"
-                    ;;
-                "unicode-blocks")
-                    progress_bar=$(render_bar "$context_pct" 6 "█" "░")
-                    context_info="${bar_color}[${progress_bar}${context_pct}%]${RESET}"
-                    ;;
-                "filled-dots")
-                    progress_bar=$(render_bar "$context_pct" 6 "●" "○")
-                    context_info="${bar_color}${progress_bar}${RESET} ${DIM}${context_pct}%${RESET}"
-                    ;;
-                "square-blocks")
-                    progress_bar=$(render_bar "$context_pct" 6 "▰" "▱")
-                    context_info="${bar_color}${progress_bar}${RESET} ${DIM}${context_pct}%${RESET}"
-                    ;;
-                "line-segments")
-                    progress_bar=$(render_bar "$context_pct" 6 "━" "┅")
-                    context_info="${bar_color}${progress_bar}${RESET} ${DIM}${context_pct}%${RESET}"
-                    ;;
-                "ascii-bars")
-                    progress_bar=$(render_bar "$context_pct" 6 "|" "░")
-                    context_info="${bar_color}${progress_bar}${RESET} ${DIM}${context_pct}%${RESET}"
-                    ;;
-                "single-block")
-                    context_info="${bar_color}▓${RESET} ${DIM}${context_pct}%${RESET}"
-                    ;;
-                "percent-only")
-                    context_info="${bar_color}${context_pct}%${RESET}"
-                    ;;
-                "fraction-display")
-                    ratio_filled=$((context_pct * 8 / 100))
-                    context_info="${bar_color}${ratio_filled}/8${RESET}"
-                    ;;
-                *)
-                    progress_bar=$(render_bar "$context_pct" 6 "█" "░")
-                    context_info="${bar_color}[${progress_bar}${context_pct}%]${RESET}"
-                    ;;
-                esac
-            fi
         fi
     fi
 fi
 
-model_component="${model_color}${model_text}${RESET}"
+if [ -n "$context_pct" ] && [ "$context_pct" -gt 0 ] 2>/dev/null; then
+    if [ $context_pct -ge 100 ]; then
+        bar_color='\033[0;31m'
+    elif [ $context_pct -ge 85 ]; then
+        bar_color='\033[0;33m'
+    else
+        bar_color='\033[0;32m'
+    fi
+
+    case "$progress_bar_style" in
+    "bracketed-bars")
+        progress_bar=$(render_bar "$context_pct" 8 "█" "░")
+        context_info="${DIM}[${RESET}${bar_color}${progress_bar}${RESET}${DIM}] ${context_pct}%${RESET}"
+        ;;
+    "unicode-blocks")
+        progress_bar=$(render_bar "$context_pct" 6 "█" "░")
+        context_info="${bar_color}[${progress_bar}${context_pct}%]${RESET}"
+        ;;
+    "filled-dots")
+        progress_bar=$(render_bar "$context_pct" 6 "●" "○")
+        context_info="${bar_color}${progress_bar}${RESET} ${DIM}${context_pct}%${RESET}"
+        ;;
+    "square-blocks")
+        progress_bar=$(render_bar "$context_pct" 6 "▰" "▱")
+        context_info="${bar_color}${progress_bar}${RESET} ${DIM}${context_pct}%${RESET}"
+        ;;
+    "line-segments")
+        progress_bar=$(render_bar "$context_pct" 6 "━" "┅")
+        context_info="${bar_color}${progress_bar}${RESET} ${DIM}${context_pct}%${RESET}"
+        ;;
+    "ascii-bars")
+        progress_bar=$(render_bar "$context_pct" 6 "|" "░")
+        context_info="${bar_color}${progress_bar}${RESET} ${DIM}${context_pct}%${RESET}"
+        ;;
+    "single-block")
+        context_info="${bar_color}▓${RESET} ${DIM}${context_pct}%${RESET}"
+        ;;
+    "percent-only")
+        context_info="${bar_color}${context_pct}%${RESET}"
+        ;;
+    "fraction-display")
+        ratio_filled=$((context_pct * 8 / 100))
+        context_info="${bar_color}${ratio_filled}/8${RESET}"
+        ;;
+    *)
+        progress_bar=$(render_bar "$context_pct" 6 "█" "░")
+        context_info="${bar_color}[${progress_bar}${context_pct}%]${RESET}"
+        ;;
+    esac
+fi
+
+model_suffix=""
+if [ "$fast_mode" = "true" ]; then
+    model_suffix=" ${DIM}fast${RESET}"
+elif [ -n "$effort_level" ] && [ "$effort_level" != "high" ]; then
+    model_suffix=" ${DIM}${effort_level}${RESET}"
+fi
+model_component="${model_color}${model_text}${RESET}${model_suffix}"
 activity_component=""
 time_component=""
 cost_component=""
@@ -1482,6 +1480,18 @@ if [ -n "$session_id" ] && [ "$_may_have_oauth" = true ]; then
             fi
             extra_component="$extra_display"
         fi
+    elif [ -n "$rl_five_pct" ] || [ -n "$rl_seven_pct" ]; then
+        stdin_usage=$(jq -n \
+            --argjson fp "${rl_five_pct:-null}" \
+            --arg fr "${rl_five_reset}" \
+            --argjson sp "${rl_seven_pct:-null}" \
+            --arg sr "${rl_seven_reset}" \
+            '{five_hour:{utilization:$fp,resets_at:(if $fr == "" then null else $fr end)},
+              seven_day:{utilization:$sp,resets_at:(if $sr == "" then null else $sr end)}}')
+        quota_display=$(build_usage_display "$stdin_usage" "$user_tier")
+        [ -n "$quota_display" ] && quota_component="$quota_display"
+        five_int=$(printf '%.0f' "${rl_five_pct:-0}" 2>/dev/null || echo 0)
+        seven_int_cache=$(printf '%.0f' "${rl_seven_pct:-0}" 2>/dev/null || echo 0)
     fi
 
     if ! should_show_extra "$extra_display_mode" "$five_int" "$seven_int_cache"; then

@@ -1,0 +1,150 @@
+* [2026-05-14] Stdin-first architecture and UX overhaul          :ARCH:FEAT:
+
+** Tension
+
+The statusline was doing too much work independently. Context
+percentage was calculated by parsing the transcript JSONL file —
+reading the last 20 lines, extracting token counts, summing, dividing
+by a window size we also computed ourselves. Quota data came
+exclusively from OAuth API calls we initiated. All of this ran on
+every render (3x per second during debounce).
+
+Meanwhile, Claude Code CLI v2.1.132+ was already sending
+pre-calculated =context_window.used_percentage=, =rate_limits= with
+=resets_at= timestamps, =effort.level=, and =fast_mode= directly in
+the stdin JSON. We were ignoring it and recomputing from scratch.
+
+The real trigger: dumping the raw stdin to debug log and seeing the
+full schema — =context_window=, =rate_limits=, =effort=, =vim.mode=,
+=session_name= — all there, all unused. We were doing 60 lines of
+transcript parsing to get a number the CLI was handing us for free.
+
+** Observation
+
+Raw stdin from CLI v2.1.141 (MAX account):
+
+#+begin_src json
+{
+  "context_window": {
+    "used_percentage": 21,
+    "context_window_size": 1000000
+  },
+  "rate_limits": {
+    "five_hour": { "used_percentage": 4, "resets_at": 1778756400 },
+    "seven_day": { "used_percentage": 4, "resets_at": 1779292800 }
+  },
+  "effort": { "level": "high" },
+  "fast_mode": false,
+  "thinking": { "enabled": true },
+  "vim": { "mode": "NORMAL" }
+}
+#+end_src
+
+PRO account had =seven_day.used_percentage: 28.000000000000004= —
+floating point noise that our =printf '%.0f'= already handles.
+
+Key format difference: CLI sends =resets_at= as unix epoch seconds.
+Our OAuth API returns it as ISO 8601 strings. The =format_reset_clock=
+and =format_reset_relative= functions needed to handle both.
+
+Code review (linus-code-reviewer agent) found three bugs before
+release:
+1. Color variables defined at line 1222, first used at line 1114 —
+   git branch and path had zero ANSI coloring in production
+2. =format_duration(0)= returned "1m" instead of "0m"
+3. Division by zero when =CLAUDE_CONTEXT_LIMIT=0=
+
+CI failed on the model abbreviation test — =opus4.6[1m]= only worked
+when =~/.claude/settings.json= had a configured model. The else branch
+fell back to generic family name "opus[1m]". CI has no settings file.
+
+** Decision
+
+*Stdin as primary, transcript/OAuth as fallback.* Not a full rip-out.
+
+- =context_window.used_percentage= from stdin: use it when present,
+  fall back to transcript parsing for CLI < v2.1.132
+- =rate_limits= from stdin: use when no OAuth cache exists (covers
+  first-message display without an API call)
+- OAuth API: still required for extra_usage, prepaid balance, user
+  profile/tier — none of these are in stdin
+- Kept =get_context_limit()= and transcript parsing as dead-path
+  fallback; ~30 lines of dormant code for backward compat
+
+Rejected alternatives:
+- Rip out transcript parsing entirely: breaks users on older CLI
+- Rip out OAuth fetching: loses extra_usage, tier display, prepaid
+  balance — the features that differentiate us
+- Prefer stdin rate_limits over OAuth cache: loses extra_usage data
+  that comes in the same OAuth response
+
+*Effort/fast mode display.* Added next to model text:
+- =opus4.6[1m] max= — effort is max
+- =opus4.6[1m] fast= — fast mode enabled
+- Hidden when effort is "high" (the default) — no noise
+
+*--extra display gating.* New =--extra= flag:
+- =always= (default) — backward compatible
+- =on-limit= — show extra only when 5h >= 80% or 7d >= 70%
+- =off= — never show
+- =developer= theme defaults to =on-limit=, =minimal= to =off=
+
+*Color hierarchy.* Principle: color encodes urgency, not category.
+- Path demoted to dim cyan (was normal cyan — same weight as model)
+- Git dirty=yellow (pops), clean=dim yellow (recedes)
+- Time to plain dim (was dim cyan — unnecessary color)
+- Tier label gets semantic color: MAX=green, PRO=cyan
+
+*Versioning.* Team suggested matching CLI version (2.1.141). Rejected:
+creates false coupling. We keep our own semver. Document tested CLI
+version in CHANGELOG.
+
+** Tradeoff
+
+- Transcript fallback is dead code for v2.1.132+ users. It adds ~30
+  lines that will never execute. The alternative (ripping it out) would
+  break anyone on an older CLI.
+- OAuth is still needed for the premium features (extra_usage, tier,
+  prepaid). If Anthropic adds these to stdin in a future version, we
+  can simplify further. Until then, two data paths coexist.
+- The =resets_at= format split (epoch vs ISO) means our reset
+  formatting functions have a type-check branch. Small cost, but it's
+  the kind of dual-format handling that accumulates.
+- =session_name= is available in stdin but not displayed. Could replace
+  or supplement project path. Deferred — low urgency, nonzero design
+  work.
+- =vim.mode= available but not displayed — built-in already shows it.
+  =thinking.enabled= available but always true for current models.
+
+** Next
+
+The live wire is the OAuth/stdin data merge. Right now, if the OAuth
+cache exists, it wins entirely (it has extra_usage). If it doesn't,
+stdin rate_limits are used. But the OAuth cache can be up to 5 minutes
+stale while stdin is always fresh. The right architecture is: stdin for
+quota percentages (always freshest), OAuth only for extra_usage and
+profile. That requires splitting =build_usage_display= to accept mixed
+sources. Not urgent — the staleness window is small — but it's the
+next structural improvement.
+
+** Artifacts
+
+Committed (v0.4.0):
+- =statusline.sh=: +548/-187 lines across extra_usage, color hierarchy,
+  --extra flag, bug fixes, dead code removal
+- =t/statusline.bats=: 73 tests (was 0 before this cycle)
+- =t/install.bats=: 12 tests
+- =.github/workflows/test.yml=: CI on push/PR
+- =install.sh=: one-liner installer
+- =README.md=: full rewrite
+- =CHANGELOG.md=: v0.3.0 and v0.4.0 release notes
+
+Uncommitted (pending v0.5.0):
+- Stdin-first context/quota, effort/fast display
+- Epoch timestamp support in reset formatters
+- 91 tests (was 85)
+- =.gitignore= for raw stdin dumps and cache files
+
+Real stdin captured from CLI v2.1.141:
+- =raw-stdin-max.json= (gitignored — contains session IDs and paths)
+- =raw-stdin-pro.json= (gitignored — same)

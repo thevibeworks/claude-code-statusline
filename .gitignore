@@ -1,0 +1,5 @@
+raw-stdin-*.json
+*.cache
+*.lock
+*.err
+sessions/

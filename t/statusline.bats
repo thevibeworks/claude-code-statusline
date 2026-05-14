@@ -55,6 +55,12 @@ setup() {
     [ -z "$result" ]
 }
 
+@test "format_reset_clock: unix epoch produces HH:MM" {
+    epoch=$(date -d '+1 hour' +%s)
+    result=$(format_reset_clock "$epoch")
+    [[ "$result" =~ ^[0-9]{2}:[0-9]{2}$ ]]
+}
+
 # --- format_reset_relative ---
 
 @test "format_reset_relative: days and hours" {
@@ -85,6 +91,12 @@ setup() {
     ts=$(date -u -d '-1 hour' '+%Y-%m-%dT%H:%M:%SZ')
     result=$(format_reset_relative "$ts")
     [ "$result" = "now" ]
+}
+
+@test "format_reset_relative: unix epoch produces relative time" {
+    epoch=$(date -d '+2 hours 30 minutes' +%s)
+    result=$(format_reset_relative "$epoch")
+    [ "$result" = "2h30m" ]
 }
 
 @test "format_reset_relative: empty returns empty" {
@@ -514,4 +526,49 @@ JSON
         | bash "$SCRIPT_DIR/statusline.sh" --test)
     plain=$(strip_ansi "$result")
     [[ "$plain" == *"my-project"* ]]
+}
+
+@test "integration: --test uses stdin context_window percentage" {
+    result=$(echo '{"model":{"id":"claude-opus-4-6[1m]","display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.141","context_window":{"used_percentage":42,"context_window_size":1000000}}' \
+        | bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"42%"* ]]
+}
+
+@test "integration: --test shows effort max" {
+    result=$(echo '{"model":{"id":"claude-opus-4-6[1m]","display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.141","effort":{"level":"max"}}' \
+        | bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"max"* ]]
+}
+
+@test "integration: --test hides default effort high" {
+    result=$(echo '{"model":{"id":"claude-opus-4-6[1m]","display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.141","effort":{"level":"high"}}' \
+        | bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" != *" high"* ]]
+}
+
+@test "integration: --test shows fast mode" {
+    result=$(echo '{"model":{"id":"claude-opus-4-6[1m]","display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.141","fast_mode":true}' \
+        | bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"fast"* ]]
+}
+
+@test "integration: --test falls back to transcript when used_percentage is null" {
+    result=$(echo '{"model":{"id":"claude-opus-4-6[1m]","display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.141","context_window":{"used_percentage":null,"context_window_size":200000}}' \
+        | bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"78%"* ]]
+}
+
+@test "integration: stdin rate_limits fallback without OAuth cache" {
+    tmpdir=$(mktemp -d)
+    result=$(echo '{"model":{"id":"claude-opus-4-6[1m]","display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.141","context_window":{"used_percentage":10,"context_window_size":1000000},"rate_limits":{"five_hour":{"used_percentage":55,"resets_at":1778756400},"seven_day":{"used_percentage":12,"resets_at":1779292800}}}' \
+        | CLAUDE_CACHE_DIR="$tmpdir" bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"5h[55%]"* ]]
+    [[ "$plain" == *"7d[12%]"* ]]
+    rm -rf "$tmpdir"
 }

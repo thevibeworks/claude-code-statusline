@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+Tested against Claude Code CLI v2.1.141 (MAX and PRO accounts).
+
+### Stdin-First Architecture
+
+Context percentage, rate limits, effort level, and fast mode are now read
+directly from the CLI's JSON input instead of computing independently.
+
+- **Context bar** uses `context_window.used_percentage` from stdin. Transcript
+  JSONL parsing is kept as fallback for CLI versions before v2.1.132.
+- **Quota display** uses `rate_limits` from stdin when no OAuth cache exists.
+  OAuth fetch is still needed for extra-usage and user profile data.
+- **Effort level** shown next to model when non-default: `opus4.6[1m] max`.
+- **Fast mode** shown as `opus4.6[1m] fast` when enabled.
+- `format_reset_clock` and `format_reset_relative` now handle both ISO 8601
+  and unix epoch timestamps (CLI sends epoch, OAuth API sends ISO).
+
 ### Added
 
 - Added default `extra` statusline component for Claude Code extra usage:
