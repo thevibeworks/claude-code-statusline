@@ -20,7 +20,8 @@ curl -fsSL "${RAW}/statusline.sh" -o "$DEST"
 chmod +x "$DEST"
 info "Installed to $DEST"
 
-STATUSLINE_CMD="bash ${DEST/#$HOME/\~}"
+_tilde='~'
+STATUSLINE_CMD="bash ${DEST/#$HOME/$_tilde}"
 
 if [ ! -f "$SETTINGS" ]; then
     info "Creating $SETTINGS"
