@@ -1211,7 +1211,13 @@ if [ -n "$configured_model" ]; then
         model_text="${model_text}[1m]"
     fi
 else
-    model_text="$runtime_model"
+    base_id="${model_id%%\[*\]}"
+    abbreviated=$(abbreviate_model_id "$base_id")
+    if [ "$abbreviated" != "$base_id" ]; then
+        model_text="$abbreviated"
+    else
+        model_text="$runtime_model"
+    fi
     if is_1m_model; then
         model_text="${model_text}[1m]"
     fi

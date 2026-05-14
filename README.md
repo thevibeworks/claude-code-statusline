@@ -28,6 +28,14 @@ Restart Claude Code (or send a message) and the statusline appears.
 
 **Requires:** Bash, `jq`, `curl`.
 
+### Install via Claude Code
+
+Paste this into Claude Code and it will set everything up:
+
+```
+Install claude-code-statusline: download https://raw.githubusercontent.com/thevibeworks/claude-code-statusline/main/statusline.sh to ~/.claude/statusline.sh, make it executable, and add a statusLine command entry to ~/.claude/settings.json pointing to it with padding 0.
+```
+
 <details><summary>Manual install / inspect first</summary>
 
 ```bash
