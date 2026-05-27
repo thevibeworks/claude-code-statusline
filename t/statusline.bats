@@ -654,29 +654,44 @@ JSON
 
 # --- should_show_extra: auto mode ---
 
-# --- should_show_extra: auto mode (percentage only) ---
+# --- should_show_extra: auto mode (recovery-aware) ---
 
-@test "should_show_extra: auto shows when 5h >= 80" {
-    run should_show_extra "auto" 85 50 0
+@test "should_show_extra: auto shows when 5h >= 80 and reset distant" {
+    run should_show_extra "auto" 85 50 0 7200 ""
     [ "$status" -eq 0 ]
 }
 
-@test "should_show_extra: auto shows when 7d >= 70" {
-    run should_show_extra "auto" 10 75 0
+@test "should_show_extra: auto shows when 5h >= 80 and no reset data" {
+    run should_show_extra "auto" 85 50 0 "" ""
     [ "$status" -eq 0 ]
+}
+
+@test "should_show_extra: auto hides when 5h >= 80 but in recovery" {
+    run should_show_extra "auto" 85 50 0 900 ""
+    [ "$status" -eq 1 ]
+}
+
+@test "should_show_extra: auto shows when 7d >= 70 and reset distant" {
+    run should_show_extra "auto" 10 75 0 "" 86400
+    [ "$status" -eq 0 ]
+}
+
+@test "should_show_extra: auto hides when 7d >= 70 but in recovery" {
+    run should_show_extra "auto" 10 75 0 "" 3600
+    [ "$status" -eq 1 ]
 }
 
 @test "should_show_extra: auto shows when extra utilization >= 50%" {
-    run should_show_extra "auto" 10 10 50
+    run should_show_extra "auto" 10 10 50 "" ""
     [ "$status" -eq 0 ]
 }
 
 @test "should_show_extra: auto hides when all below threshold" {
-    run should_show_extra "auto" 50 40 49
+    run should_show_extra "auto" 50 40 49 "" ""
     [ "$status" -eq 1 ]
 }
 
-@test "should_show_extra: on-limit ignores extra_util" {
-    run should_show_extra "on-limit" 10 10 80
-    [ "$status" -eq 1 ]
+@test "should_show_extra: on-limit ignores recovery state" {
+    run should_show_extra "on-limit" 85 10 80 900 ""
+    [ "$status" -eq 0 ]
 }

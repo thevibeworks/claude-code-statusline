@@ -741,6 +741,7 @@ detect_session_boundary() {
 
 should_show_extra() {
     local mode="$1" five_int="${2:-0}" seven_int="${3:-0}" extra_util="${4:-0}"
+    local five_reset_secs="${5:-}" seven_reset_secs="${6:-}"
     case "$mode" in
         "off") return 1 ;;
         "on-limit")
@@ -748,8 +749,19 @@ should_show_extra() {
             return $?
             ;;
         "auto")
-            [ "$five_int" -ge 80 ] || [ "$seven_int" -ge 70 ] || [ "$extra_util" -ge $EXTRA_AUTO_UTIL_PCT ]
-            return $?
+            # Recovery suppresses pressure: if reset is imminent, quota isn't really "running out"
+            if [ "$five_int" -ge 80 ]; then
+                if [ -z "$five_reset_secs" ] || [ "$five_reset_secs" -gt $FIVE_HOUR_RECOVERY_SECS ] 2>/dev/null; then
+                    return 0
+                fi
+            fi
+            if [ "$seven_int" -ge 70 ]; then
+                if [ -z "$seven_reset_secs" ] || [ "$seven_reset_secs" -gt $SEVEN_DAY_RECOVERY_SECS ] 2>/dev/null; then
+                    return 0
+                fi
+            fi
+            [ "$extra_util" -ge $EXTRA_AUTO_UTIL_PCT ] && return 0
+            return 1
             ;;
         *) return 0 ;;
     esac
@@ -1541,7 +1553,12 @@ if [ -n "$session_id" ] && [ "$_may_have_oauth" = true ]; then
         extra_util_pct=$(printf '%.0f' "$extra_util_pct" 2>/dev/null || echo 0)
     fi
 
-    if ! should_show_extra "$extra_display_mode" "$five_int" "$seven_int_cache" "$extra_util_pct"; then
+    five_reset_secs=""
+    seven_reset_secs=""
+    [ -n "$rl_five_reset" ] && five_reset_secs=$(get_reset_seconds "$rl_five_reset")
+    [ -n "$rl_seven_reset" ] && seven_reset_secs=$(get_reset_seconds "$rl_seven_reset")
+
+    if ! should_show_extra "$extra_display_mode" "$five_int" "$seven_int_cache" "$extra_util_pct" "$five_reset_secs" "$seven_reset_secs"; then
         extra_component=""
     fi
 
