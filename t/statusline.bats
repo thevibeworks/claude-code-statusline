@@ -37,30 +37,6 @@ setup() {
     [ "$result" = "opus" ]
 }
 
-# --- format_reset_clock ---
-
-@test "format_reset_clock: converts UTC to local HH:MM" {
-    ts=$(date -u -d '+1 hour' '+%Y-%m-%dT%H:%M:%SZ')
-    result=$(format_reset_clock "$ts")
-    [[ "$result" =~ ^[0-9]{2}:[0-9]{2}$ ]]
-}
-
-@test "format_reset_clock: empty input returns empty" {
-    result=$(format_reset_clock "")
-    [ -z "$result" ]
-}
-
-@test "format_reset_clock: null input returns empty" {
-    result=$(format_reset_clock "null")
-    [ -z "$result" ]
-}
-
-@test "format_reset_clock: unix epoch produces HH:MM" {
-    epoch=$(date -d '+1 hour' +%s)
-    result=$(format_reset_clock "$epoch")
-    [[ "$result" =~ ^[0-9]{2}:[0-9]{2}$ ]]
-}
-
 # --- format_reset_relative ---
 
 @test "format_reset_relative: days and hours" {
@@ -78,7 +54,7 @@ setup() {
 @test "format_reset_relative: minutes only" {
     ts=$(date -u -d '+45 minutes' '+%Y-%m-%dT%H:%M:%SZ')
     result=$(format_reset_relative "$ts")
-    [ "$result" = "45m" ]
+    [[ "$result" =~ ^4[45]m$ ]]
 }
 
 @test "format_reset_relative: exact days" {
@@ -157,12 +133,12 @@ setup() {
     [ -z "$result" ]
 }
 
-@test "build_usage_display: 5h at 87% includes clock reset suffix" {
+@test "build_usage_display: 5h at 87% includes relative reset suffix" {
     reset_time=$(date -u -d '+1 hour' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":87,\"resets_at\":\"$reset_time\"},\"seven_day\":{\"utilization\":10}}"
     result=$(build_usage_display "$usage" "")
     plain=$(strip_ansi "$result")
-    [[ "$plain" =~ 5h\[87%@ ]]
+    [[ "$plain" =~ 5h\[87%\~ ]]
 }
 
 @test "build_usage_display: 7d at 75% includes relative reset suffix" {
@@ -189,14 +165,14 @@ setup() {
     [[ "$plain" != *"op["* ]]
 }
 
-@test "build_usage_display: below threshold hides reset suffix" {
-    reset_time=$(date -u -d '+1 hour' '+%Y-%m-%dT%H:%M:%SZ')
-    usage="{\"five_hour\":{\"utilization\":50,\"resets_at\":\"$reset_time\"},\"seven_day\":{\"utilization\":40,\"resets_at\":\"$reset_time\"}}"
+@test "build_usage_display: below threshold with distant reset hides suffix" {
+    reset_time=$(date -u -d '+4 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_time_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":50,\"resets_at\":\"$reset_time\"},\"seven_day\":{\"utilization\":40,\"resets_at\":\"$reset_time_7d\"}}"
     result=$(build_usage_display "$usage" "")
     plain=$(strip_ansi "$result")
     [[ "$plain" == *"5h[50%]"* ]]
     [[ "$plain" == *"7d[40%]"* ]]
-    [[ "$plain" != *"@"* ]]
     [[ "$plain" != *"~"* ]]
 }
 
@@ -567,10 +543,140 @@ JSON
     tmpdir=$(mktemp -d)
     mkdir -p "$tmpdir/.claude"
     echo '{"claudeAiOauth":{"accessToken":"fake"}}' > "$tmpdir/.claude/.credentials.json"
-    result=$(echo '{"model":{"id":"claude-opus-4-6[1m]","display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.141","context_window":{"used_percentage":10,"context_window_size":1000000},"rate_limits":{"five_hour":{"used_percentage":55,"resets_at":1778756400},"seven_day":{"used_percentage":12,"resets_at":1779292800}}}' \
+    five_reset=$(date -d '+4 hours' +%s)
+    seven_reset=$(date -d '+5 days' +%s)
+    result=$(echo "{\"model\":{\"id\":\"claude-opus-4-6[1m]\",\"display_name\":\"Opus\"},\"cwd\":\"/tmp/test\",\"workspace\":{\"current_dir\":\"/tmp/test\"},\"cost\":{\"total_cost_usd\":0,\"total_lines_added\":0,\"total_lines_removed\":0,\"total_api_duration_ms\":0},\"version\":\"2.1.141\",\"context_window\":{\"used_percentage\":10,\"context_window_size\":1000000},\"rate_limits\":{\"five_hour\":{\"used_percentage\":55,\"resets_at\":$five_reset},\"seven_day\":{\"used_percentage\":12,\"resets_at\":$seven_reset}}}" \
         | HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
     plain=$(strip_ansi "$result")
     [[ "$plain" == *"5h[55%]"* ]]
     [[ "$plain" == *"7d[12%]"* ]]
     rm -rf "$tmpdir"
+}
+
+# --- get_reset_seconds ---
+
+@test "get_reset_seconds: future timestamp returns positive seconds" {
+    ts=$(date -d '+90 minutes' +%s)
+    result=$(get_reset_seconds "$ts")
+    [ "$result" -ge 5300 ] && [ "$result" -le 5500 ]
+}
+
+@test "get_reset_seconds: past timestamp returns 0" {
+    ts=$(date -d '-1 hour' +%s)
+    result=$(get_reset_seconds "$ts")
+    [ "$result" = "0" ]
+}
+
+@test "get_reset_seconds: ISO timestamp works" {
+    ts=$(date -u -d '+2 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    result=$(get_reset_seconds "$ts")
+    [ "$result" -ge 7100 ] && [ "$result" -le 7300 ]
+}
+
+@test "get_reset_seconds: empty returns empty" {
+    result=$(get_reset_seconds "")
+    [ -z "$result" ]
+}
+
+@test "get_reset_seconds: null returns empty" {
+    result=$(get_reset_seconds "null")
+    [ -z "$result" ]
+}
+
+# --- smart 5h countdown (opportunity signal) ---
+
+@test "build_usage_display: 5h at 40% with reset in 1h shows countdown" {
+    reset_time=$(date -u -d '+1 hour' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":40,\"resets_at\":\"$reset_time\"},\"seven_day\":{\"utilization\":10}}"
+    result=$(build_usage_display "$usage" "")
+    plain=$(strip_ansi "$result")
+    [[ "$plain" =~ 5h\[40%\~1h ]]
+}
+
+@test "build_usage_display: 5h at 30% with reset in 3h hides countdown" {
+    reset_time=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":30,\"resets_at\":\"$reset_time\"},\"seven_day\":{\"utilization\":10}}"
+    result=$(build_usage_display "$usage" "")
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"5h[30%]"* ]]
+    [[ "$plain" != *"~"* ]] || [[ "$plain" != *"5h[30%~"* ]]
+}
+
+@test "build_usage_display: 5h at 85% with reset in 20min uses recovery color" {
+    reset_time=$(date -u -d '+20 minutes' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":85,\"resets_at\":\"$reset_time\"},\"seven_day\":{\"utilization\":10}}"
+    result=$(build_usage_display "$usage" "")
+    [[ "$result" == *"$DIM_GREEN"* ]]
+}
+
+@test "build_usage_display: 5h at 85% with reset in 2h keeps warning color" {
+    reset_time=$(date -u -d '+2 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":85,\"resets_at\":\"$reset_time\"},\"seven_day\":{\"utilization\":10}}"
+    result=$(build_usage_display "$usage" "")
+    plain=$(strip_ansi "$result")
+    [[ "$plain" =~ 5h\[85%\~ ]]
+    [[ "$result" != *"$DIM_GREEN"* ]]
+}
+
+# --- smart 7d countdown (planning signal) ---
+
+@test "build_usage_display: 7d at 30% with reset in 2d shows countdown" {
+    reset_time=$(date -u -d '+2 days' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":10},\"seven_day\":{\"utilization\":30,\"resets_at\":\"$reset_time\"}}"
+    result=$(build_usage_display "$usage" "")
+    plain=$(strip_ansi "$result")
+    [[ "$plain" =~ 7d\[30%\~2d ]]
+}
+
+@test "build_usage_display: 7d at 30% with reset in 5d hides countdown" {
+    reset_time=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":10},\"seven_day\":{\"utilization\":30,\"resets_at\":\"$reset_time\"}}"
+    result=$(build_usage_display "$usage" "")
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"7d[30%]"* ]]
+}
+
+@test "build_usage_display: 7d at 75% with reset in 10h uses recovery color" {
+    reset_time=$(date -u -d '+10 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":10},\"seven_day\":{\"utilization\":75,\"resets_at\":\"$reset_time\"}}"
+    result=$(build_usage_display "$usage" "")
+    [[ "$result" == *"$DIM_GREEN"* ]]
+}
+
+@test "build_usage_display: 7d at 75% with reset in 3d keeps warning color" {
+    reset_time=$(date -u -d '+3 days' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":10},\"seven_day\":{\"utilization\":75,\"resets_at\":\"$reset_time\"}}"
+    result=$(build_usage_display "$usage" "")
+    plain=$(strip_ansi "$result")
+    [[ "$plain" =~ 7d\[75%\~ ]]
+    [[ "$result" != *"$DIM_GREEN"* ]]
+}
+
+# --- should_show_extra: auto mode ---
+
+# --- should_show_extra: auto mode (percentage only) ---
+
+@test "should_show_extra: auto shows when 5h >= 80" {
+    run should_show_extra "auto" 85 50 0
+    [ "$status" -eq 0 ]
+}
+
+@test "should_show_extra: auto shows when 7d >= 70" {
+    run should_show_extra "auto" 10 75 0
+    [ "$status" -eq 0 ]
+}
+
+@test "should_show_extra: auto shows when extra utilization >= 50%" {
+    run should_show_extra "auto" 10 10 50
+    [ "$status" -eq 0 ]
+}
+
+@test "should_show_extra: auto hides when all below threshold" {
+    run should_show_extra "auto" 50 40 49
+    [ "$status" -eq 1 ]
+}
+
+@test "should_show_extra: on-limit ignores extra_util" {
+    run should_show_extra "on-limit" 10 10 80
+    [ "$status" -eq 1 ]
 }

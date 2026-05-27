@@ -1,0 +1,262 @@
+* [2026-05-26] Smart countdowns, information grouping, auto extra     :FEAT:ARCH:
+
+** Tension
+
+Three user complaints converged on the same problem: the statusline
+displayed information without regard to whether it was actionable.
+
+1. Extra usage section showed always, even at 10% utilization during
+   a calm session. Noise.
+
+2. Reset countdowns only appeared when quota was high (>= 80% for
+   5h, >= 70% for 7d). But the approaching reset itself is useful
+   information -- "5h resets in 90 minutes" means "burn freely,"
+   regardless of current percentage. Users wanted the opportunity
+   signal, not just the warning signal.
+
+3. Context bar =opus4.6[1m] [15%]= had a space between model and
+   context, visually treating them as independent stats. Context is a
+   property of the model session. The space was lying about the data
+   structure.
+
+Underneath all three: the statusline lacked a coherent information
+architecture. Each section was rendering its own data without asking
+"does this belong here?" and "is this actionable right now?"
+
+** Observation
+
+Worked from the shipped v0.3.x codebase (post =c0501c1=, stdin-first
+architecture). Traced the display logic through three functions:
+
+- =build_usage_display()= -- 5h/7d quota rendering. Used
+  =format_reset_clock()= for 5h (wall clock =@14:30=) and
+  =format_reset_relative()= for 7d (relative =~2d5h=). Inconsistent
+  format, and 5h clock time required mental math to interpret.
+
+- =should_show_extra()= -- gated extra display. Only supported
+  ="always"=, ="on-limit"=, and ="off"=. No smart default.
+
+- Component assembly (line ~1377) -- model and context were separate
+  components joined by =add_component()= which inserts a space.
+
+The countdown logic in =build_usage_display= was single-signal:
+percentage only. The reset timestamp was available (=resets_at= in
+the usage API / stdin =rate_limits=) but only consulted when the
+percentage was already in warning zone.
+
+** Decision
+
+*** Two-signal framework for countdowns
+
+Each countdown now responds to two independent triggers:
+
+| Signal    | 5h threshold     | 7d threshold      | Meaning                     |
+|-----------+------------------+-------------------+-----------------------------|
+| % usage   | >= 80            | >= 70             | warning: running out        |
+| time left | reset <= 2h      | reset <= 3d       | opportunity: burn before reset |
+
+Either signal alone is sufficient. A user at 40% with 90 minutes to
+reset sees =5h[40%~1h30m]= -- the countdown says "you have runway
+and a fresh window coming." A user at 85% with 4 hours to reset sees
+=5h[85%~4h]= -- the countdown says "you're hot and relief is distant."
+
+Switched 5h from wall-clock time (=@14:30=) to relative time
+(=~1h30m=) for consistency with 7d and because relative time is
+immediately actionable without timezone math.
+
+*** Recovery color
+
+Added DIM_GREEN (=\033[2;32m=) as a fourth color state. Triggers
+when usage is in warning zone BUT reset is imminent:
+
+- 5h: usage >= 80% AND reset <= 30min
+- 7d: usage >= 70% AND reset <= 12h
+
+Visually communicates "it was hot, it's cooling down" -- reduces
+false urgency. The color hierarchy: GREEN (healthy) -> YELLOW
+(warning) -> RED (critical) -> DIM_GREEN (recovering).
+
+*** Extra display: percentage only, not time
+
+This went through three iterations:
+
+1. First: ="auto"= mode = show when =used_credits > 0=. Too
+   sensitive -- any historical extra spend triggers it permanently.
+
+2. Second: added time-proximity as a second signal, mirroring the
+   countdown framework. =should_show_extra= accepted 6 parameters
+   including reset seconds. Logic: show when % pressure OR (time
+   proximity AND moderate usage >= 40%).
+
+3. Third (shipped): stripped time-proximity back out. Simplified to
+   =5h >= 80 OR 7d >= 70 OR extra_util >= 50=.
+
+The insight that killed iteration 2: countdown and extra answer
+*different questions*. Countdown answers "when does relief come?"
+-- both signals (pressure and proximity) are relevant. Extra answers
+"what happens if I overflow?" -- that question is triggered by
+running out of quota (percentage), not by time. When the window is
+about to reset, overflow is LESS likely, not more. The time signal
+was logically backwards for extra.
+
+The clean separation:
+- Countdown = two signals (what the user is spending + when it resets)
+- Extra = one signal (is quota running out?)
+
+*** Model + context merge
+
+Context bar is now concatenated directly onto =model_component=:
+
+#+begin_src bash
+model_component="${model_color}${model_text}${RESET}${model_suffix}${context_info}"
+context_component=""
+#+end_src
+
+Output: =opus4.6[1m][15%]= instead of =opus4.6[1m] [15%]=.
+
+Removed =context= from all theme =stat_order= strings. The
+=context= case still exists in the rendering loop for backward
+compatibility with custom user orders, but it renders empty now.
+
+Design principle: each display element belongs to its semantic owner.
+Context window utilization is a property of the model session, not an
+independent stat. Grouping them communicates the relationship.
+
+*** Named constants
+
+Extracted all threshold magic numbers into top-level variables:
+
+#+begin_src bash
+FIVE_HOUR_COUNTDOWN_SECS=7200    # show countdown when reset <= 2h
+FIVE_HOUR_RECOVERY_SECS=1800     # recovery color when reset <= 30min
+SEVEN_DAY_COUNTDOWN_SECS=259200  # show countdown when reset <= 3d
+SEVEN_DAY_RECOVERY_SECS=43200    # recovery color when reset <= 12h
+EXTRA_AUTO_UTIL_PCT=50           # show extra when utilization >= 50%
+#+end_src
+
+Duplicated in =t/helpers.bash= (bash has no cross-file constant
+mechanism; same pattern used for color constants). Consumed by
+=build_usage_display= and =should_show_extra= via =$VARNAME=
+references. Means tuning thresholds doesn't require hunting through
+function bodies.
+
+*** Dead code removal
+
+Deleted =format_reset_clock()= and its 4 bats tests. It was made
+dead when 5h switched from =@14:30= clock time to =~1h30m= relative
+time. No callers remained.
+
+** Tradeoff
+
+The 3-day threshold for 7d countdown means most users will see a
+countdown roughly 43% of the time (3 of 7 days). If this feels too
+noisy, the constant is tunable but not yet exposed as a CLI flag.
+
+Model+context merge removes the ability to position context
+independently in =stat_order=. The =detailed= theme previously put
+context after cost; it now follows model like all other themes. No
+user has complained about this -- the old separation was arbitrary.
+
+The =auto= extra mode at 50% utilization threshold is a judgment
+call. A user who spends exactly $99 of a $200 limit won't see the
+extra section; at $100 they will. The boundary is necessarily
+arbitrary. Chose 50% as "halfway through the budget is worth
+knowing."
+
+** Verification
+
+*** Test suite evolution
+
+Started at 81 tests (pre-change baseline). Each change was verified
+before moving to the next:
+
+| Iteration | Tests | Key change                                      |
+|-----------+-------+-------------------------------------------------|
+| Baseline  |    81 | All passing, pre-change                          |
+| +countdown|    99 | +18 new tests, 3 existing updated for new format |
+| +recovery |    99 | Fixed color matching (=$DIM_GREEN= var, not =$'\033...'=) |
+| +auto     |   100 | +time-proximity tests for should_show_extra       |
+| -simplify |    95 | Removed 5 time-proximity tests + 4 dead clock tests |
+
+Final: 95 statusline + 12 install = 107 total, all green.
+
+*** Isolated integration tests
+
+Used =tmpdir=$(mktemp -d)= with fake OAuth credentials to isolate
+from real session state. The statusline script runs with
+=HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/sessions"= to prevent
+cached API data from contaminating test output.
+
+Five scenarios tested end-to-end:
+
+1. Normal (low usage, distant resets) -- no countdowns, no extra
+2. Opportunity (5h 40%, reset 90min) -- 5h countdown, no extra
+3. Warning (5h 85%, 7d 75%, 3d reset) -- both countdowns, yellow
+4. Recovery (5h 92%, reset 15min) -- DIM_GREEN on 5h
+5. Planning (7d 50%, 2d reset) -- 7d countdown only
+
+*** Live session verification
+
+Deployed to =~/.claude/statusline.sh= with =--debug= flag active.
+Tailed =/tmp/claude-code-statusline.log= to verify the script was
+being called every ~3s with fresh stdin data. Confirmed:
+
+- =ctx_pct= parsed correctly from stdin (not transcript fallback)
+- =rate_limits.resets_at= timestamps were future-dated and valid
+- No errors in debug output
+
+Verified actual ANSI escape bytes via =od -c= to confirm recovery
+color (=\033[2;32m=) was emitted at the correct position in the
+output stream.
+
+*** Edge case probing
+
+Called =should_show_extra= directly from bash with boundary values:
+
+#+begin_src
+5h 39%/3600s (below 40% gate):  hide   -- now irrelevant, simplified
+5h 40%/7200s (at 2h boundary):  show   -- now irrelevant, simplified
+Extra at 50% (exact threshold): SHOW   -- still the live boundary
+5h 79% (just below 80):         hide
+5h 80% (at gate):               SHOW
+#+end_src
+
+The time-proximity edge cases from iteration 2 were probed, found
+correct, then removed when the design simplified. The probing was
+still valuable -- it confirmed the logic was right before we decided
+it was wrong for a different reason.
+
+** Next
+
+The named constants are tunable but only by editing =statusline.sh=
+directly. If users request it, expose them as =--countdown-5h-secs=
+/ =--countdown-7d-secs= CLI flags. For now, editing the file is
+sufficient -- the constants are at the top and well-commented.
+
+The recovery color (DIM_GREEN) is only tested via ANSI escape
+matching in bats, which is fragile (depends on how the terminal
+handles =printf '%b'= vs literal =\033=). A visual regression test
+(screenshot comparison) would be more robust but isn't worth the
+infrastructure cost yet.
+
+The =context= item in =stat_order= is now vestigial -- it renders
+empty. Could remove the case from the rendering loop entirely, but
+leaving it means custom orders that include =context= don't error.
+Low-priority cleanup.
+
+** Artifacts
+
+Files changed (+219/-59 lines):
+
+| File             | Lines | Change                                              |
+|------------------+-------+-----------------------------------------------------|
+| =statusline.sh=  |  1610 | countdown logic, recovery color, model+context merge |
+| =t/statusline.bats= | 682 | +14 new tests, updated existing, removed 8 dead      |
+| =t/helpers.bash= |    43 | threshold constants, removed =format_reset_clock=     |
+
+Functions added: =get_reset_seconds()=
+Functions removed: =format_reset_clock()=
+Constants added: =FIVE_HOUR_COUNTDOWN_SECS=, =FIVE_HOUR_RECOVERY_SECS=,
+=SEVEN_DAY_COUNTDOWN_SECS=, =SEVEN_DAY_RECOVERY_SECS=, =EXTRA_AUTO_UTIL_PCT=
+
+Deployed to =~/.claude/statusline.sh= and verified live.

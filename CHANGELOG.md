@@ -1,6 +1,61 @@
 # Changelog
 
-## Unreleased
+## v0.6.0 — 2026-05-26 — Smart Countdowns & Information Grouping
+
+Tested against Claude Code CLI v2.1.143 (MAX and PRO accounts).
+
+### Smart Countdown Display
+
+Reset countdowns now respond to two independent signals:
+
+- **Percentage pressure**: 5h >= 80% or 7d >= 70% (existing behavior)
+- **Time proximity**: 5h reset <= 2h or 7d reset <= 3d (new)
+
+Either signal triggers the countdown. A user at 40% with 90 minutes to reset
+sees `5h[40%~1h30m]` — the opportunity signal: "burn freely, fresh window
+coming." Switched 5h from wall-clock (`@14:30`) to relative time (`~1h30m`)
+for consistency with 7d.
+
+**Recovery color**: DIM_GREEN when usage is high but reset is imminent
+(5h: <= 30min, 7d: <= 12h). Communicates "it was hot, it's cooling down."
+
+### Model + Context Merge
+
+Context bar now attaches directly to the model: `opus4.6[1m][█░░░░░15%]`
+instead of `opus4.6[1m] [█░░░░░15%]`. Context is a property of the model
+session, not an independent stat.
+
+### Extra Usage: Auto Mode
+
+New default `--extra auto` replaces `always`. Shows the extra-usage section
+only when actionable:
+
+- 5h >= 80% or 7d >= 70% (quota running out)
+- Extra utilization >= 50% (budget pressure)
+
+Hides extra during calm sessions. `always`, `on-limit`, `off` still available.
+
+### Thresholds as Named Constants
+
+All auto-display thresholds extracted to top-level variables:
+
+```
+FIVE_HOUR_COUNTDOWN_SECS=7200    # 2h
+FIVE_HOUR_RECOVERY_SECS=1800     # 30min
+SEVEN_DAY_COUNTDOWN_SECS=259200  # 3d
+SEVEN_DAY_RECOVERY_SECS=43200    # 12h
+EXTRA_AUTO_UTIL_PCT=50           # 50%
+```
+
+### Cleanup
+
+- Removed dead `format_reset_clock()` (replaced by relative time)
+- Removed `context` from all theme `stat_order` strings (now part of model)
+- 95 bats tests (was 81)
+
+---
+
+## v0.5.0 — 2026-05-25 — Stdin-First Architecture & Extra Usage
 
 Tested against Claude Code CLI v2.1.141 (MAX and PRO accounts).
 
@@ -34,7 +89,7 @@ directly from the CLI's JSON input instead of computing independently.
 
 New `--extra` flag controls when the extra-usage component appears:
 
-- `always` (default) — show whenever extra usage is enabled
+- `always` — show whenever extra usage is enabled
 - `on-limit` — show only when 5h >= 80% or 7d >= 70% (quota under pressure)
 - `off` — never show
 
@@ -47,8 +102,6 @@ The `developer` theme defaults to `on-limit`; `minimal` defaults to `off`.
   flight, `!` when the last fetch failed and data may be stale. Extra usage
   has its own independent indicator (separate API call).
 - Duration shows hours for long sessions: `1h30m` instead of `90m`.
-- Added space between model suffix and context bar to prevent visual confusion:
-  `opus4.6[1m] [█░░░░░26%]` instead of `opus4.6[1m][█░░░░░26%]`.
 - Removed dead `add_component_no_space` and `format_usage_bar` functions.
 - Fixed `format_duration(0)` returning "1m" instead of "0m".
 - Fixed color variables used before definition (git info, path had no color).
@@ -60,11 +113,6 @@ The `developer` theme defaults to `on-limit`; `minimal` defaults to `off`.
 - Git branch: dirty=yellow (pops), clean=dim yellow (recedes).
 - Time: plain dim instead of dim cyan — less color noise.
 - User tier label gets color: MAX=green, PRO=cyan, ENT/TEAM=dim cyan.
-
-### Documentation
-
-- Documented the extra-usage component, API behavior, and updated README preview
-  signals.
 
 ---
 

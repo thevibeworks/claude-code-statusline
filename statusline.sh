@@ -3,19 +3,29 @@
 # Usage: statusline.sh [--style STYLE] [--order ORDER] [--theme THEME] [--path-display TYPE] [--alignment TYPE] [--extra MODE] [--test JSON] [--debug]
 # Themes: minimal, compact, detailed, developer, manager
 # Styles: single-block, unicode-blocks, bracketed-bars, filled-dots, square-blocks, line-segments, ascii-bars, percent-only, fraction-display
+# Extra modes: auto (default, shows when quota runs out or extra >= 50%), always, on-limit, off
 
 progress_bar_style="unicode-blocks"
-stat_order="activity,time,cost,model,context,user,quota,extra"
+stat_order="activity,time,cost,model,user,quota,extra"
 path_display="project" # project, cwd, full, relative
 alignment="left-right" # left-right, right-left, center
 theme=""
 # Context limit: auto-detected from model.id ([1m] suffix = 1M, default = 200k)
 # CLAUDE_CONTEXT_LIMIT env override still honored for manual tuning
 context_limit_override="${CLAUDE_CONTEXT_LIMIT:-}"
-extra_display_mode="always" # always, on-limit, off
+extra_display_mode="auto" # auto, always, on-limit, off
 test_mode=false
 test_data=""
 debug_mode=false
+
+# Auto-display thresholds: two signal types gate countdown and extra visibility
+#   Signal 1 — percentage: how much quota is consumed
+#   Signal 2 — time proximity: how close is the next reset window
+FIVE_HOUR_COUNTDOWN_SECS=7200    # show countdown when reset <= 2h
+FIVE_HOUR_RECOVERY_SECS=1800     # recovery color when reset <= 30min
+SEVEN_DAY_COUNTDOWN_SECS=259200  # show countdown when reset <= 3d
+SEVEN_DAY_RECOVERY_SECS=43200    # recovery color when reset <= 12h
+EXTRA_AUTO_UTIL_PCT=50           # show extra when its own utilization >= 50%
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -94,26 +104,26 @@ apply_theme() {
     case "$theme" in
     "minimal")
         progress_bar_style="single-block"
-        stat_order="model,context,user"
+        stat_order="model,user"
         path_display="project"
         alignment="left-right"
         extra_display_mode="off"
         ;;
     "compact")
         progress_bar_style="unicode-blocks"
-        stat_order="activity,time,cost,model,context,user,quota,extra"
+        stat_order="activity,time,cost,model,user,quota,extra"
         path_display="project"
         alignment="left-right"
         ;;
     "detailed")
         progress_bar_style="bracketed-bars"
-        stat_order="model,activity,time,cost,context,user,quota,extra"
+        stat_order="model,activity,time,cost,user,quota,extra"
         path_display="cwd"
         alignment="left-right"
         ;;
     "developer")
         progress_bar_style="filled-dots"
-        stat_order="activity,time,cost,model,context,user,quota,extra"
+        stat_order="activity,time,cost,model,user,quota,extra"
         path_display="full"
         alignment="right-left"
         extra_display_mode="on-limit"
@@ -730,11 +740,15 @@ detect_session_boundary() {
 }
 
 should_show_extra() {
-    local mode="$1" five_int="${2:-0}" seven_int="${3:-0}"
+    local mode="$1" five_int="${2:-0}" seven_int="${3:-0}" extra_util="${4:-0}"
     case "$mode" in
         "off") return 1 ;;
         "on-limit")
             [ "$five_int" -ge 80 ] || [ "$seven_int" -ge 70 ]
+            return $?
+            ;;
+        "auto")
+            [ "$five_int" -ge 80 ] || [ "$seven_int" -ge 70 ] || [ "$extra_util" -ge $EXTRA_AUTO_UTIL_PCT ]
             return $?
             ;;
         *) return 0 ;;
@@ -832,16 +846,6 @@ format_duration() {
     fi
 }
 
-format_reset_clock() {
-    local ts="$1"
-    [ -z "$ts" ] || [ "$ts" = "null" ] && return
-    if [[ "$ts" =~ ^[0-9]+$ ]]; then
-        date -d "@$ts" "+%H:%M" 2>/dev/null
-    else
-        date -d "$ts" "+%H:%M" 2>/dev/null
-    fi
-}
-
 format_reset_relative() {
     local ts="$1"
     [ -z "$ts" ] || [ "$ts" = "null" ] && return
@@ -870,6 +874,21 @@ format_reset_relative() {
     else
         echo "${mins}m"
     fi
+}
+
+get_reset_seconds() {
+    local ts="$1"
+    [ -z "$ts" ] || [ "$ts" = "null" ] && { echo ""; return; }
+    local reset_epoch now_epoch
+    if [[ "$ts" =~ ^[0-9]+$ ]]; then
+        reset_epoch="$ts"
+    else
+        reset_epoch=$(date -d "$ts" +%s 2>/dev/null) || { echo ""; return; }
+    fi
+    now_epoch=$(date +%s)
+    local delta=$((reset_epoch - now_epoch))
+    [ "$delta" -lt 0 ] && delta=0
+    echo "$delta"
 }
 
 get_usage_color() {
@@ -921,23 +940,45 @@ build_usage_display() {
     local parts=()
 
     # 5h quota (always show if >0)
-    # When >= 80% (yellow zone), show wall-clock reset time: 5h[87%@14:30]
+    # Countdown shown when: usage >= 80% (warning) OR reset <= 2h (opportunity)
+    # Recovery color (DIM_GREEN) when high usage + reset <= 30min
     if [ "$five_int" -gt 0 ] 2>/dev/null; then
         local color=$(get_usage_color "$five_int")
         local reset_suffix=""
-        if [ "$five_int" -ge 80 ] && [ -n "$five_reset" ]; then
-            local clock=$(format_reset_clock "$five_reset")
-            [ -n "$clock" ] && reset_suffix="${DIM}@${clock}${color}"
+        local reset_secs=""
+        [ -n "$five_reset" ] && reset_secs=$(get_reset_seconds "$five_reset")
+
+        local show_reset=false
+        [ "$five_int" -ge 80 ] && show_reset=true
+        [ -n "$reset_secs" ] && [ "$reset_secs" -le $FIVE_HOUR_COUNTDOWN_SECS ] 2>/dev/null && show_reset=true
+
+        if [ "$show_reset" = true ] && [ -n "$five_reset" ]; then
+            if [ "$five_int" -ge 80 ] && [ -n "$reset_secs" ] && [ "$reset_secs" -le $FIVE_HOUR_RECOVERY_SECS ] 2>/dev/null; then
+                color="$DIM_GREEN"
+            fi
+            local rel=$(format_reset_relative "$five_reset")
+            [ -n "$rel" ] && reset_suffix="${DIM}~${rel}${color}"
         fi
         parts+=("${DIM}5h${color}[${five_int}%${reset_suffix}]${RESET}")
     fi
 
     # 7d aggregate quota (if present and >0)
-    # When >= 70% (yellow zone), show relative countdown: 7d[75%~2d5h]
+    # Countdown shown when: usage >= 70% (warning) OR reset <= 3d (planning)
+    # Recovery color (DIM_GREEN) when high usage + reset <= 12h
     if [ "$seven_int" -gt 0 ] 2>/dev/null; then
         local color=$(get_seven_day_color "$seven_int")
         local reset_suffix=""
-        if [ "$seven_int" -ge 70 ] && [ -n "$seven_reset" ]; then
+        local reset_secs=""
+        [ -n "$seven_reset" ] && reset_secs=$(get_reset_seconds "$seven_reset")
+
+        local show_reset=false
+        [ "$seven_int" -ge 70 ] && show_reset=true
+        [ -n "$reset_secs" ] && [ "$reset_secs" -le $SEVEN_DAY_COUNTDOWN_SECS ] 2>/dev/null && show_reset=true
+
+        if [ "$show_reset" = true ] && [ -n "$seven_reset" ]; then
+            if [ "$seven_int" -ge 70 ] && [ -n "$reset_secs" ] && [ "$reset_secs" -le $SEVEN_DAY_RECOVERY_SECS ] 2>/dev/null; then
+                color="$DIM_GREEN"
+            fi
             local rel=$(format_reset_relative "$seven_reset")
             [ -n "$rel" ] && reset_suffix="${DIM}~${rel}${color}"
         fi
@@ -1333,11 +1374,11 @@ if [ "$fast_mode" = "true" ]; then
 elif [ -n "$effort_level" ] && [ "$effort_level" != "high" ]; then
     model_suffix=" ${DIM}${effort_level}${RESET}"
 fi
-model_component="${model_color}${model_text}${RESET}${model_suffix}"
+model_component="${model_color}${model_text}${RESET}${model_suffix}${context_info}"
 activity_component=""
 time_component=""
 cost_component=""
-context_component="${context_info}"
+context_component=""
 
 if [ "$lines_added" != "0" ] && [ "$lines_removed" != "0" ]; then
     activity_component="${DIM_GREEN}+${lines_added}${RESET}${DIM}/${DIM_RED}-${lines_removed}${RESET}"
@@ -1494,7 +1535,13 @@ if [ -n "$session_id" ] && [ "$_may_have_oauth" = true ]; then
         seven_int_cache=$(printf '%.0f' "${rl_seven_pct:-0}" 2>/dev/null || echo 0)
     fi
 
-    if ! should_show_extra "$extra_display_mode" "$five_int" "$seven_int_cache"; then
+    extra_util_pct=0
+    if [ -n "$usage_data" ]; then
+        extra_util_pct=$(echo "$usage_data" | jq -r '.extra_usage.utilization // 0' 2>/dev/null)
+        extra_util_pct=$(printf '%.0f' "$extra_util_pct" 2>/dev/null || echo 0)
+    fi
+
+    if ! should_show_extra "$extra_display_mode" "$five_int" "$seven_int_cache" "$extra_util_pct"; then
         extra_component=""
     fi
 

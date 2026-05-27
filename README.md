@@ -66,9 +66,9 @@ Then add to `~/.claude/settings.json`:
 ## What It Shows
 
 ```text
-project (main*)  +84/-14 1h30m $6.72 opus4.6[1m] [███░░░26%] [MAX|feast.t.] 5h[24%] 7d[100%~12h6m] ex[$16.29/$200 8% bal$4.66]
-   |       |       |      |     |       |           |            |           |          |                |
- path   branch   edits   time  cost   model       context       user      5h quota   7d quota       extra usage
+project (main*)  +84/-14 1h30m $6.72 opus4.6[1m][███░░░26%] [MAX|feast.t.] 5h[24%] 7d[100%~12h6m] ex[$16.29/$200 8% bal$4.66]
+   |       |       |      |     |       |                        |           |          |                |
+ path   branch   edits   time  cost   model+context             user      5h quota   7d quota       extra usage
 ```
 
 Every component earns its place:
@@ -79,10 +79,10 @@ Every component earns its place:
 | Activity | Session diff without opening git. |
 | Time and cost | Track long sessions. Hours format above 60m (`1h30m`). |
 | Model | Abbreviated. `claude-opus-4-6[1m]` becomes `opus4.6[1m]`. |
-| Context bar | Green / yellow / red by pressure. Matches `/context` formula. |
+| Context bar | Merged with model. Green / yellow / red by pressure. |
 | User tier | MAX is green, PRO is cyan. Truncated display name. |
-| Quota | Integer percentages. Reset countdown when 5h >= 80% or 7d >= 70%. |
-| Extra usage | Monthly spend, limit, prepaid balance. `--extra on-limit` to auto-hide. |
+| Quota | Integer percentages. Countdown on pressure (>= 80%/70%) or time proximity (<= 2h/3d). Recovery color when high usage + imminent reset. |
+| Extra usage | Monthly spend, limit, prepaid balance. `--extra auto` shows when quota runs out. |
 
 ## vs Built-in `/statusline`
 
@@ -98,7 +98,7 @@ Every component earns its place:
 | Tier display + model abbreviation | -- | Yes |
 | 5 themes, 9 bar styles | -- | Yes |
 | OAuth + macOS Keychain | -- | Yes |
-| 85 bats tests + CI | -- | Yes |
+| 95 bats tests + CI | -- | Yes |
 
 ## Configuration
 
@@ -112,10 +112,10 @@ Flags go in the command string in `~/.claude/settings.json`:
 |------|--------|---------|
 | `--theme` | `minimal`, `compact`, `detailed`, `developer`, `manager` | (none) |
 | `--style` | `unicode-blocks`, `single-block`, `bracketed-bars`, `filled-dots`, `square-blocks`, `line-segments`, `ascii-bars`, `percent-only`, `fraction-display` | `unicode-blocks` |
-| `--order` | Comma-separated: `activity,time,cost,model,context,user,quota,extra` | all |
+| `--order` | Comma-separated: `activity,time,cost,model,user,quota,extra` | all |
 | `--path-display` | `project`, `cwd`, `full`, `relative` | `project` |
 | `--alignment` | `left-right`, `right-left`, `center` | `left-right` |
-| `--extra` | `always`, `on-limit`, `off` | `always` |
+| `--extra` | `auto`, `always`, `on-limit`, `off` | `auto` |
 | `--debug` | Write logs to `/tmp/claude-code-statusline.log` | off |
 | `--test [json]` | Render with mock data | off |
 
@@ -132,14 +132,16 @@ Flags go in the command string in `~/.claude/settings.json`:
 ### Extra Usage Gating
 
 ```text
---extra always      5h[24%] 7d[10%] ex[$19.52/$200 10% bal$4.66]
---extra on-limit    5h[24%] 7d[10%]                                (quota OK, hidden)
---extra on-limit    5h[87%@14:30] 7d[10%] ex[$19.52/$200 10%]     (5h >= 80%, shown)
+--extra auto        5h[24%] 7d[10%]                                (calm, hidden)
+--extra auto        5h[87%~2h] 7d[10%] ex[$19.52/$200 10%]        (5h >= 80%, shown)
+--extra always      5h[24%] 7d[10%] ex[$19.52/$200 10% bal$4.66]  (always shown)
+--extra on-limit    5h[87%~2h] 7d[10%] ex[$19.52/$200 10%]        (same as auto minus extra_util gate)
 --extra off         5h[24%] 7d[10%]                                (always hidden)
 ```
 
-`on-limit` keeps the statusline compact until quota pressure makes extra-usage
-budget actionable.
+`auto` (default) shows extra when quota runs out (5h >= 80%, 7d >= 70%) or
+extra budget is pressured (utilization >= 50%). Compact by default, actionable
+when it matters.
 
 ### Quota Polling
 
