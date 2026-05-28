@@ -1,6 +1,6 @@
 #!/bin/bash
 # Claude Code statusline
-# Usage: statusline.sh [--style STYLE] [--order ORDER] [--theme THEME] [--path-display TYPE] [--alignment TYPE] [--extra MODE] [--test JSON] [--debug]
+# Usage: statusline.sh [--style STYLE] [--order ORDER] [--theme THEME] [--path-display TYPE] [--alignment TYPE] [--extra MODE] [--cache MODE] [--test JSON] [--debug]
 # Themes: minimal, compact, detailed, developer, manager
 # Styles: single-block, unicode-blocks, bracketed-bars, filled-dots, square-blocks, line-segments, ascii-bars, percent-only, fraction-display
 # Extra modes: auto (default, shows when quota runs out or extra >= 50%), always, on-limit, off
@@ -14,6 +14,7 @@ theme=""
 # CLAUDE_CONTEXT_LIMIT env override still honored for manual tuning
 context_limit_override="${CLAUDE_CONTEXT_LIMIT:-}"
 extra_display_mode="auto" # auto, always, on-limit, off
+cache_display_mode="auto" # auto, always, off
 test_mode=false
 test_data=""
 debug_mode=false
@@ -76,6 +77,10 @@ while [[ $# -gt 0 ]]; do
         ;;
     --extra)
         extra_display_mode="$2"
+        shift 2
+        ;;
+    --cache)
+        cache_display_mode="$2"
         shift 2
         ;;
     --test)
@@ -210,6 +215,8 @@ eval "$(echo "$input" | jq -r '
     @sh "rl_seven_reset=\(.rate_limits.seven_day.resets_at // "")",
     @sh "cache_read_tokens=\(.context_window.current_usage.cache_read_input_tokens // "")",
     @sh "cache_creation_tokens=\(.context_window.current_usage.cache_creation_input_tokens // "")",
+    @sh "cache_creation_1h_tokens=\(.context_window.current_usage.cache_creation.ephemeral_1h_input_tokens // .context_window.current_usage.cache_creation.ephemeral_1h // "")",
+    @sh "cache_creation_5m_tokens=\(.context_window.current_usage.cache_creation.ephemeral_5m_input_tokens // .context_window.current_usage.cache_creation.ephemeral_5m // "")",
     @sh "uncached_input_tokens=\(.context_window.current_usage.input_tokens // "")",
     @sh "stdin_session_id=\(.session_id // "")"
 ' 2>/dev/null)"
@@ -775,15 +782,19 @@ should_show_extra() {
 
 get_cache_health() {
     local cache_read="${1:-0}" cache_creation="${2:-0}" uncached="${3:-0}"
-    local state_file="${4:-}"
+    local state_file="${4:-}" ttl_class="${5:-}" cache_creation_1h="${6:-0}" cache_creation_5m="${7:-0}"
 
     [ -z "$cache_read" ] && cache_read=0
     [ -z "$cache_creation" ] && cache_creation=0
     [ -z "$uncached" ] && uncached=0
+    [ -z "$cache_creation_1h" ] && cache_creation_1h=0
+    [ -z "$cache_creation_5m" ] && cache_creation_5m=0
 
     cache_read=$(printf '%.0f' "$cache_read" 2>/dev/null) || cache_read=0
     cache_creation=$(printf '%.0f' "$cache_creation" 2>/dev/null) || cache_creation=0
     uncached=$(printf '%.0f' "$uncached" 2>/dev/null) || uncached=0
+    cache_creation_1h=$(printf '%.0f' "$cache_creation_1h" 2>/dev/null) || cache_creation_1h=0
+    cache_creation_5m=$(printf '%.0f' "$cache_creation_5m" 2>/dev/null) || cache_creation_5m=0
 
     local total=$((cache_read + cache_creation + uncached))
     if [ "$total" -le 0 ]; then
@@ -792,19 +803,66 @@ get_cache_health() {
     fi
 
     local prev_cache_read=""
-    [ -n "$state_file" ] && [ -f "$state_file" ] && prev_cache_read=$(cat "$state_file" 2>/dev/null)
+    local prev_ttl_class=""
+    local last_active_at=""
+    local now_epoch="${STATUSLINE_TEST_NOW_EPOCH:-$(date +%s)}"
+
+    if [ -n "$ttl_class" ] && [ "$ttl_class" != "5m" ] && [ "$ttl_class" != "1h" ]; then
+        ttl_class=""
+    fi
+
+    if [ "$cache_creation_1h" -gt 0 ]; then
+        ttl_class="1h"
+    elif [ "$cache_creation_5m" -gt 0 ]; then
+        ttl_class="5m"
+    fi
+
+    if [ -n "$state_file" ] && [ -f "$state_file" ]; then
+        if jq -e 'type == "object"' "$state_file" >/dev/null 2>&1; then
+            eval "$(jq -r '
+                @sh "prev_cache_read=\(.cache_read // "")",
+                @sh "prev_ttl_class=\(.ttl_class // "")",
+                @sh "last_active_at=\(.last_active_at // "")"
+            ' "$state_file" 2>/dev/null)"
+        else
+            prev_cache_read=$(cat "$state_file" 2>/dev/null)
+            [[ "$prev_cache_read" =~ ^[0-9]+$ ]] || prev_cache_read=""
+        fi
+    fi
+
+    [ -z "$ttl_class" ] && ttl_class="$prev_ttl_class"
+
+    if [ "$cache_read" -gt 0 ] || [ "$cache_creation" -gt 0 ]; then
+        last_active_at="$now_epoch"
+    fi
 
     if [ -n "$state_file" ]; then
         mkdir -p "$(dirname "$state_file")" 2>/dev/null
-        echo "$cache_read" > "$state_file" 2>/dev/null
+        local tmp_state="${state_file}.tmp.$$"
+        jq -n -c \
+            --argjson cache_read "$cache_read" \
+            --argjson cache_creation "$cache_creation" \
+            --argjson uncached "$uncached" \
+            --arg ttl "$ttl_class" \
+            --argjson last_active "${last_active_at:-0}" \
+            --argjson updated_at "$now_epoch" \
+            '{
+                cache_read: $cache_read,
+                cache_creation: $cache_creation,
+                uncached: $uncached,
+                ttl_class: (if $ttl == "" then null else $ttl end),
+                last_active_at: (if $last_active > 0 then $last_active else null end),
+                updated_at: $updated_at
+            }' > "$tmp_state" 2>/dev/null && mv -f "$tmp_state" "$state_file" 2>/dev/null
+        rm -f "$tmp_state" 2>/dev/null
     fi
 
     if [ -z "$prev_cache_read" ] || [ "$prev_cache_read" -le 0 ] 2>/dev/null; then
         if [ "$cache_read" -le 0 ] && [ "$cache_creation" -gt 0 ]; then
-            echo "building"
+            echo "building|${ttl_class}|${last_active_at}"
             return
         fi
-        echo "ok"
+        echo "ok|${ttl_class}|${last_active_at}"
         return
     fi
 
@@ -812,16 +870,71 @@ get_cache_health() {
     local threshold=$((prev_cache_read * (100 - CACHE_BREAK_DROP_PCT) / 100))
 
     if [ "$drop" -gt "$CACHE_BREAK_MIN_TOKENS" ] && [ "$cache_read" -lt "$threshold" ]; then
-        echo "break"
+        echo "break|${ttl_class}|${last_active_at}"
         return
     fi
 
     if [ "$cache_read" -le 0 ] && [ "$cache_creation" -gt "$CACHE_BREAK_MIN_TOKENS" ]; then
-        echo "building"
+        echo "building|${ttl_class}|${last_active_at}"
         return
     fi
 
-    echo "ok"
+    echo "ok|${ttl_class}|${last_active_at}"
+}
+
+infer_cache_ttl_class() {
+    local cache_creation_1h="${1:-0}" cache_creation_5m="${2:-0}"
+
+    [ -z "$cache_creation_1h" ] && cache_creation_1h=0
+    [ -z "$cache_creation_5m" ] && cache_creation_5m=0
+    cache_creation_1h=$(printf '%.0f' "$cache_creation_1h" 2>/dev/null) || cache_creation_1h=0
+    cache_creation_5m=$(printf '%.0f' "$cache_creation_5m" 2>/dev/null) || cache_creation_5m=0
+
+    if [ "$cache_creation_1h" -gt 0 ]; then
+        echo "1h"
+        return
+    fi
+    if [ "$cache_creation_5m" -gt 0 ]; then
+        echo "5m"
+        return
+    fi
+    echo ""
+}
+
+format_cache_active_time() {
+    local ts="${1:-}"
+    [ -z "$ts" ] || [ "$ts" = "null" ] || [ "$ts" = "0" ] && return
+    date -d "@$ts" +%H:%M 2>/dev/null
+}
+
+build_cache_indicator() {
+    local health_result="$1" mode="${2:-auto}"
+    local state ttl_class last_active_at active_time
+    IFS='|' read -r state ttl_class last_active_at <<<"$health_result"
+
+    case "$mode" in
+        "off") return ;;
+    esac
+
+    active_time=$(format_cache_active_time "$last_active_at")
+    local meta=""
+    if [ -n "$ttl_class" ]; then
+        meta=":${ttl_class}"
+        [ -n "$active_time" ] && meta="${meta}@${active_time}"
+    fi
+
+    case "$state" in
+        "break")
+            echo "${RED}cache!${RESET}"
+            ;;
+        "building")
+            echo "${DIM_YELLOW}cache${meta}~${RESET}"
+            ;;
+        "ok")
+            [ "$mode" = "always" ] && [ -n "$meta" ] && echo "${DIM}cache${meta}${RESET}"
+            ;;
+    esac
+    return 0
 }
 
 render_bar() {
@@ -1472,14 +1585,13 @@ elif [ -n "$effort_level" ] && [ "$effort_level" != "high" ]; then
 fi
 
 cache_indicator=""
-if [ -n "$cache_read_tokens" ] || [ -n "$cache_creation_tokens" ]; then
+if [ "$cache_display_mode" != "off" ] && { [ -n "$cache_read_tokens" ] || [ -n "$cache_creation_tokens" ]; }; then
     cache_state_file="$CLAUDE_CACHE_DIR/${stdin_session_id:-global}_cache_health"
-    cache_health=$(get_cache_health "$cache_read_tokens" "$cache_creation_tokens" "$uncached_input_tokens" "$cache_state_file")
-    debug_log "CACHE HEALTH: state=$cache_health read=$cache_read_tokens creation=$cache_creation_tokens uncached=$uncached_input_tokens"
-    case "$cache_health" in
-        "break")    cache_indicator=" ${RED}cache!${RESET}" ;;
-        "building") cache_indicator=" ${DIM_YELLOW}cache~${RESET}" ;;
-    esac
+    cache_ttl_class=$(infer_cache_ttl_class "$cache_creation_1h_tokens" "$cache_creation_5m_tokens")
+    cache_health=$(get_cache_health "$cache_read_tokens" "$cache_creation_tokens" "$uncached_input_tokens" "$cache_state_file" "$cache_ttl_class" "$cache_creation_1h_tokens" "$cache_creation_5m_tokens")
+    debug_log "CACHE HEALTH: state=$cache_health read=$cache_read_tokens creation=$cache_creation_tokens uncached=$uncached_input_tokens ttl=$cache_ttl_class"
+    cache_indicator_text=$(build_cache_indicator "$cache_health" "$cache_display_mode")
+    [ -n "$cache_indicator_text" ] && cache_indicator=" ${cache_indicator_text}"
 fi
 
 model_component="${model_color}${model_text}${RESET}${model_suffix}${context_info}${cache_indicator}"

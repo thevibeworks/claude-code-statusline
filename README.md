@@ -14,7 +14,7 @@
 
 One Bash file that plugs into the official `statusLine` command hook. Shows
 what matters: active model, context window, session cost, 5h / 7d quota with
-reset countdowns, extra-usage spend, git activity, and subscription tier.
+reset times, prompt-cache health, extra-usage spend, git activity, and subscription tier.
 No daemon, no telemetry, no npm.
 
 ## Install
@@ -66,9 +66,9 @@ Then add to `~/.claude/settings.json`:
 ## What It Shows
 
 ```text
-project (main*)  +84/-14 1h30m $6.72 opus4.6[1m][███░░░26%] [MAX|feast.t.] 5h[87%@14:30] 7d[75%@Mon] ex[$16.29/$200 8% bal$4.66]
-   |       |       |      |     |       |                        |              |             |              |
- path   branch   edits   time  cost   model+context             user         5h quota      7d quota      extra usage
+project (main*)  +84/-14 1h30m $6.72 opus4.6[1m][███░░░26%] cache:1h@14:20~ [MAX|feast.t.] 5h[87%@14:30] 7d[75%@Mon] ex[$16.29/$200 8% bal$4.66]
+   |       |       |      |     |       |                        |                 |              |             |              |
+ path   branch   edits   time  cost   model+context             cache             user         5h quota      7d quota      extra usage
 ```
 
 Every component earns its place:
@@ -83,7 +83,7 @@ Every component earns its place:
 | User tier | MAX is green, PRO is cyan. Truncated display name. |
 | Quota | Integer percentages. Absolute reset time on pressure (>= 80%/70%) or time proximity (<= 2h/3d). `5h[87%@14:30]` `7d[75%@Mon]`. Recovery color when imminent. |
 | Extra usage | Monthly spend, limit, prepaid balance. `--extra auto` shows when quota runs out. |
-| Cache health | Detects prompt cache invalidation. `cache!` on break, `cache~` when building. Hidden when healthy. |
+| Cache health | Detects observed prompt-cache rebuilds and cache-read drops. `cache!` on break, `cache~` when building. If a future Claude Code stdin includes TTL breakdown, `--cache always` can show `cache:1h@14:20`; current stdin usually exposes aggregate cache tokens only. Hidden when healthy by default. |
 
 ## vs Built-in `/statusline`
 
@@ -92,7 +92,7 @@ Every component earns its place:
 | Context bar, cost, git | Yes | Yes |
 | Live 5h / 7d quota | -- | Yes |
 | Extra usage + prepaid balance | -- | Yes |
-| Quota reset countdown | -- | Yes |
+| Quota reset time | -- | Yes |
 | Adaptive polling (30s -- 5min) | -- | Yes |
 | Refresh `~` / error `!` indicator | -- | Yes |
 | `--extra` display gating | -- | Yes |
@@ -100,7 +100,7 @@ Every component earns its place:
 | 5 themes, 9 bar styles | -- | Yes |
 | Prompt cache break detection | -- | Yes |
 | OAuth + macOS Keychain | -- | Yes |
-| 132 bats tests + CI | -- | Yes |
+| 145 bats tests + CI | -- | Yes |
 
 ## Configuration
 
@@ -118,6 +118,7 @@ Flags go in the command string in `~/.claude/settings.json`:
 | `--path-display` | `project`, `cwd`, `full`, `relative` | `project` |
 | `--alignment` | `left-right`, `right-left`, `center` | `left-right` |
 | `--extra` | `auto`, `always`, `on-limit`, `off` | `auto` |
+| `--cache` | `auto`, `always`, `off` | `auto` |
 | `--debug` | Write logs to `/tmp/claude-code-statusline.log` | off |
 | `--test [json]` | Render with mock data | off |
 
@@ -144,6 +145,27 @@ Flags go in the command string in `~/.claude/settings.json`:
 `auto` (default) shows extra when quota runs out (5h >= 80%, 7d >= 70%) or
 extra budget is pressured (utilization >= 50%). Compact by default, actionable
 when it matters.
+
+### Prompt Cache
+
+```text
+--cache auto        opus4.6[1m][21%]                      (healthy, hidden)
+--cache auto        opus4.6[1m][21%] cache~               (cache is rebuilding)
+--cache auto        opus4.6[1m][21%] cache!               (cache-read collapse observed)
+--cache always      opus4.6[1m][21%] cache:1h@14:20       (when TTL breakdown exists)
+--cache off         opus4.6[1m][21%]                      (disabled; no state writes)
+```
+
+Cache state is based on Claude Code's per-turn usage tokens:
+`cache_read_input_tokens`, `cache_creation_input_tokens`, and `input_tokens`.
+The statusline can prove that a cache was read, rebuilt, or likely broke after a
+turn. It cannot know server-side `expire_at` before the next request, so it shows
+absolute last-observed cache activity (`@14:20`) rather than a live countdown.
+Current Claude Code statusline stdin usually exposes aggregate cache tokens only,
+not `cache_creation.ephemeral_1h_input_tokens` / `ephemeral_5m_input_tokens`.
+The script accepts those fields for forward compatibility, but TTL class
+(`5m` / `1h`) is shown only when observed in actual usage breakdown. Local
+environment variables are intent, not proof of what the server accepted.
 
 ### Quota Polling
 
@@ -200,13 +222,13 @@ and prepaid balance data.
 npm exec --yes bats -- t/
 ```
 
-132 tests across `t/statusline.bats` (120 unit + integration) and
+145 tests across `t/statusline.bats` (133 unit + integration) and
 `t/install.bats` (12 installer). CI runs on push and PR to `main`.
 
 ## Project Structure
 
 ```text
-statusline.sh                Main script (one file, ~1500 lines)
+statusline.sh                Main script (one file, ~1700 lines)
 install.sh                   One-line installer
 t/statusline.bats            Unit and integration tests
 t/install.bats               Installer tests (mock curl, isolated $HOME)

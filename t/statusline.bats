@@ -749,7 +749,7 @@ JSON
     tmpdir=$(mktemp -d)
     echo "200000" > "$tmpdir/cache_health"
     result=$(get_cache_health 210000 173 1 "$tmpdir/cache_health")
-    [ "$result" = "ok" ]
+    [[ "$result" == ok\|* ]]
     rm -rf "$tmpdir"
 }
 
@@ -757,7 +757,7 @@ JSON
     tmpdir=$(mktemp -d)
     echo "200000" > "$tmpdir/cache_health"
     result=$(get_cache_health 0 200100 1 "$tmpdir/cache_health")
-    [ "$result" = "break" ]
+    [[ "$result" == break\|* ]]
     rm -rf "$tmpdir"
 }
 
@@ -765,21 +765,21 @@ JSON
     tmpdir=$(mktemp -d)
     echo "200000" > "$tmpdir/cache_health"
     result=$(get_cache_health 199000 500 1 "$tmpdir/cache_health")
-    [ "$result" = "ok" ]
+    [[ "$result" == ok\|* ]]
     rm -rf "$tmpdir"
 }
 
 @test "get_cache_health: first turn with no state file returns ok" {
     tmpdir=$(mktemp -d)
     result=$(get_cache_health 50000 173 1 "$tmpdir/cache_health")
-    [ "$result" = "ok" ]
+    [[ "$result" == ok\|* ]]
     rm -rf "$tmpdir"
 }
 
 @test "get_cache_health: first turn with zero cache_read is building" {
     tmpdir=$(mktemp -d)
     result=$(get_cache_health 0 50000 1 "$tmpdir/cache_health")
-    [ "$result" = "building" ]
+    [[ "$result" == building\|* ]]
     rm -rf "$tmpdir"
 }
 
@@ -797,7 +797,7 @@ JSON
     tmpdir=$(mktemp -d)
     echo "0" > "$tmpdir/cache_health"
     result=$(get_cache_health 50000 200 1 "$tmpdir/cache_health")
-    [ "$result" = "ok" ]
+    [[ "$result" == ok\|* ]]
     rm -rf "$tmpdir"
 }
 
@@ -805,8 +805,17 @@ JSON
     tmpdir=$(mktemp -d)
     echo "100000" > "$tmpdir/cache_health"
     get_cache_health 150000 200 1 "$tmpdir/cache_health" >/dev/null
-    stored=$(cat "$tmpdir/cache_health")
+    stored=$(jq -r '.cache_read' "$tmpdir/cache_health")
     [ "$stored" = "150000" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_cache_health: corrupt legacy state does not break arithmetic" {
+    tmpdir=$(mktemp -d)
+    echo "not-a-number" > "$tmpdir/cache_health"
+    result=$(get_cache_health 0 50000 1 "$tmpdir/cache_health")
+    [[ "$result" == building\|* ]]
+    [ "$(jq -r '.cache_read' "$tmpdir/cache_health")" = "0" ]
     rm -rf "$tmpdir"
 }
 
@@ -814,7 +823,7 @@ JSON
     tmpdir=$(mktemp -d)
     echo "0" > "$tmpdir/cache_health"
     result=$(get_cache_health 0 50000 1 "$tmpdir/cache_health")
-    [ "$result" = "building" ]
+    [[ "$result" == building\|* ]]
     rm -rf "$tmpdir"
 }
 
@@ -822,24 +831,91 @@ JSON
     tmpdir=$(mktemp -d)
     echo "3000" > "$tmpdir/cache_health"
     result=$(get_cache_health 1500 500 1 "$tmpdir/cache_health")
-    [ "$result" = "ok" ]
+    [[ "$result" == ok\|* ]]
     rm -rf "$tmpdir"
 }
 
 @test "get_cache_health: no state file path still works" {
     result=$(get_cache_health 50000 200 1 "")
-    [ "$result" = "ok" ]
+    [[ "$result" == ok\|* ]]
 }
 
 @test "get_cache_health: creates parent directory for state file" {
     tmpdir=$(mktemp -d)
     nonexist="$tmpdir/no-such-dir/cache_health"
     result=$(get_cache_health 200000 200 1 "$nonexist")
-    [ "$result" = "ok" ]
+    [[ "$result" == ok\|* ]]
     [ -f "$nonexist" ]
     result=$(get_cache_health 0 200100 1 "$nonexist")
-    [ "$result" = "break" ]
+    [[ "$result" == break\|* ]]
     rm -rf "$tmpdir"
+}
+
+@test "get_cache_health: preserves ttl class and last active time" {
+    tmpdir=$(mktemp -d)
+    STATUSLINE_TEST_NOW_EPOCH=1778728000
+    export STATUSLINE_TEST_NOW_EPOCH
+    result=$(get_cache_health 200000 0 1 "$tmpdir/cache_health" "1h")
+    [[ "$result" == "ok|1h|1778728000" ]]
+    [ "$(jq -r '.ttl_class' "$tmpdir/cache_health")" = "1h" ]
+    [ "$(jq -r '.last_active_at' "$tmpdir/cache_health")" = "1778728000" ]
+    unset STATUSLINE_TEST_NOW_EPOCH
+    rm -rf "$tmpdir"
+}
+
+@test "get_cache_health: creation breakdown overrides ttl class" {
+    tmpdir=$(mktemp -d)
+    result=$(get_cache_health 0 50000 1 "$tmpdir/cache_health" "" 50000 0)
+    [[ "$result" == building\|1h\|* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "get_cache_health: keeps last active time when current turn has no cache activity" {
+    tmpdir=$(mktemp -d)
+    cat > "$tmpdir/cache_health" <<'JSON'
+{"cache_read":200000,"ttl_class":"5m","last_active_at":1000}
+JSON
+    STATUSLINE_TEST_NOW_EPOCH=1740
+    export STATUSLINE_TEST_NOW_EPOCH
+    result=$(get_cache_health 0 0 1 "$tmpdir/cache_health")
+    [[ "$result" == "break|5m|1000" ]]
+    unset STATUSLINE_TEST_NOW_EPOCH
+    rm -rf "$tmpdir"
+}
+
+@test "infer_cache_ttl_class: creation breakdown reports 1h" {
+    result=$(infer_cache_ttl_class 100 0)
+    [ "$result" = "1h" ]
+}
+
+@test "infer_cache_ttl_class: env vars alone are not proof" {
+    FORCE_PROMPT_CACHING_5M=1 ENABLE_PROMPT_CACHING_1H=1 result=$(infer_cache_ttl_class 0 0)
+    [ -z "$result" ]
+}
+
+@test "get_cache_health: partial cache-read drop is still a break signal" {
+    tmpdir=$(mktemp -d)
+    echo "200000" > "$tmpdir/cache_health"
+    result=$(get_cache_health 180000 5000 1 "$tmpdir/cache_health")
+    [[ "$result" == break\|* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "build_cache_indicator: auto hides healthy ttl metadata" {
+    result=$(build_cache_indicator "ok|1h|1778728000" "auto")
+    [ -z "$result" ]
+}
+
+@test "build_cache_indicator: always shows ttl and observed time" {
+    result=$(build_cache_indicator "ok|1h|1778728000" "always")
+    plain=$(strip_ansi "$result")
+    [[ "$plain" =~ ^cache:1h@[0-9]{2}:[0-9]{2}$ ]]
+}
+
+@test "build_cache_indicator: building shows ttl metadata" {
+    result=$(build_cache_indicator "building|5m|1778728000" "auto")
+    plain=$(strip_ansi "$result")
+    [[ "$plain" =~ ^cache:5m@[0-9]{2}:[0-9]{2}~$ ]]
 }
 
 # --- integration: cache health indicator ---
@@ -874,5 +950,41 @@ JSON
         | CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
     plain=$(strip_ansi "$result")
     [[ "$plain" == *"cache~"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: first turn building with 1h breakdown shows ttl class" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/sessions"
+    result=$(echo '{"model":{"id":"claude-opus-4-6[1m]","display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.150","context_window":{"used_percentage":5,"context_window_size":1000000,"current_usage":{"input_tokens":1,"output_tokens":10,"cache_creation_input_tokens":50000,"cache_creation":{"ephemeral_1h_input_tokens":50000,"ephemeral_5m_input_tokens":0},"cache_read_input_tokens":0}}}' \
+        | CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"cache:1h@"* ]]
+    [[ "$plain" == *"~"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: --cache always shows healthy ttl metadata" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/sessions"
+    cat > "$tmpdir/sessions/test-session-id_cache_health" <<'JSON'
+{"cache_read":200000,"ttl_class":"1h","last_active_at":1778728000}
+JSON
+    result=$(echo '{"model":{"id":"claude-opus-4-6[1m]","display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.150","context_window":{"used_percentage":21,"context_window_size":1000000,"current_usage":{"input_tokens":1,"output_tokens":58,"cache_creation_input_tokens":173,"cache_read_input_tokens":209703}}}' \
+        | CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test --cache always)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"cache:1h@"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: --cache off hides cache break" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/sessions"
+    echo "200000" > "$tmpdir/sessions/test-session-id_cache_health"
+    result=$(echo '{"model":{"id":"claude-opus-4-6[1m]","display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.150","context_window":{"used_percentage":21,"context_window_size":1000000,"current_usage":{"input_tokens":1,"output_tokens":58,"cache_creation_input_tokens":200100,"cache_read_input_tokens":0}}}' \
+        | CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test --cache off)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" != *"cache!"* ]]
+    [ "$(cat "$tmpdir/sessions/test-session-id_cache_health")" = "200000" ]
     rm -rf "$tmpdir"
 }

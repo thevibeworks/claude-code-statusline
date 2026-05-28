@@ -7,25 +7,34 @@ Tested against Claude Code CLI v2.1.150 (MAX and PRO accounts).
 ### Cache Health Indicator
 
 Detects prompt cache invalidation from per-turn token data already in
-the CLI's stdin JSON. Uses the same detection logic as Claude Code's
+the CLI's stdin JSON. Uses the same token-drop threshold as Claude Code's
 internal `promptCacheBreakDetection.ts`: flags a break when
 `cache_read_input_tokens` drops >5% and >2000 tokens from the
 previous turn.
 
-- `cache!` (red) — cache break detected, this turn was fully uncached
+- `cache!` (red) — cache-read drop detected; full or partial rebuild likely
 - `cache~` (dim yellow) — cache building, first turn or post-break rebuild
-- Hidden when healthy — zero noise during normal operation
+- `cache:1h@14:20` / `cache:5m@14:20` — TTL class plus last observed
+  cache activity when future/current stdin provides TTL breakdown
+- Hidden when healthy by default — zero noise during normal operation
+- `--cache auto|always|off` controls cache display
 
 Display appears after the context bar:
 
 ```
 opus4.6[1m][███░░26%]              (healthy — no indicator)
-opus4.6[1m][███░░26%] cache~       (building — first turn)
+opus4.6[1m][███░░26%] cache:1h@14:20~ (building — first turn)
 opus4.6[1m][███░░26%] cache!       (break — full rebuild)
 ```
 
-State tracked in `$CLAUDE_CACHE_DIR/cache_health` (one number: previous
-turn's `cache_read_input_tokens`).
+State tracked in `${session_id}_cache_health` as JSON. Older one-number
+state files are still accepted and upgraded on the next render.
+
+No cache expiry countdown is shown. Claude Code does not expose a
+pre-request server `expire_at`; the statusline records observed cache
+activity and, when observed in usage breakdown, the 5m/1h TTL class.
+Current Claude Code statusline stdin usually exposes aggregate cache tokens
+only, so TTL class display is forward-compatible rather than guaranteed.
 
 ### Why It Matters
 
@@ -37,15 +46,18 @@ a cached turn. For subscription users, that's quota burn equivalent to
 
 - `get_cache_health()` function with four return states: `ok`, `break`,
   `building`, `none`
+- `infer_cache_ttl_class()`, `format_cache_active_time()`, and
+  `build_cache_indicator()` helpers
 - `CACHE_BREAK_MIN_TOKENS` (2000) and `CACHE_BREAK_DROP_PCT` (5)
   threshold constants
 - Extracts `cache_read_input_tokens`, `cache_creation_input_tokens`,
-  `input_tokens` from stdin `context_window.current_usage`
+  `input_tokens`, and optional `cache_creation.ephemeral_1h_input_tokens`
+  / `cache_creation.ephemeral_5m_input_tokens` from stdin
 - Per-session state file (`${session_id}_cache_health`) prevents false
   positives when running concurrent Claude Code sessions
-- `mkdir -p` before state file write ensures detection works for API key
-  users where `$CLAUDE_CACHE_DIR` may not exist yet
-- 16 new tests (13 unit + 3 integration)
+- `mkdir -p` plus atomic state-file replacement ensures detection works for
+  API key users where `$CLAUDE_CACHE_DIR` may not exist yet
+- 28 new tests (22 unit + 6 integration)
 
 ### Absolute Reset Times
 
@@ -67,7 +79,7 @@ realtime refresh.
 `format_reset_absolute()` function with `short` (HH:MM) and `day`
 (day-of-week, falls back to HH:MM for same day) modes.
 
-132 total tests across both suites.
+145 total tests across both suites.
 
 ---
 
