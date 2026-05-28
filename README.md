@@ -83,6 +83,7 @@ Every component earns its place:
 | User tier | MAX is green, PRO is cyan. Truncated display name. |
 | Quota | Integer percentages. Countdown on pressure (>= 80%/70%) or time proximity (<= 2h/3d). Recovery color when high usage + imminent reset. |
 | Extra usage | Monthly spend, limit, prepaid balance. `--extra auto` shows when quota runs out. |
+| Cache health | Detects prompt cache invalidation. `cache!` on break, `cache~` when building. Hidden when healthy. |
 
 ## vs Built-in `/statusline`
 
@@ -97,8 +98,9 @@ Every component earns its place:
 | `--extra` display gating | -- | Yes |
 | Tier display + model abbreviation | -- | Yes |
 | 5 themes, 9 bar styles | -- | Yes |
+| Prompt cache break detection | -- | Yes |
 | OAuth + macOS Keychain | -- | Yes |
-| 95 bats tests + CI | -- | Yes |
+| 126 bats tests + CI | -- | Yes |
 
 ## Configuration
 
@@ -198,7 +200,7 @@ and prepaid balance data.
 npm exec --yes bats -- t/
 ```
 
-85 tests across `t/statusline.bats` (72 unit + integration) and
+126 tests across `t/statusline.bats` (114 unit + integration) and
 `t/install.bats` (12 installer). CI runs on push and PR to `main`.
 
 ## Project Structure

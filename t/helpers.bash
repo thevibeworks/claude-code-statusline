@@ -25,6 +25,8 @@ FIVE_HOUR_RECOVERY_SECS=1800
 SEVEN_DAY_COUNTDOWN_SECS=259200
 SEVEN_DAY_RECOVERY_SECS=43200
 EXTRA_AUTO_UTIL_PCT=50
+CACHE_BREAK_MIN_TOKENS=2000
+CACHE_BREAK_DROP_PCT=5
 
 debug_log() {
     :
@@ -33,7 +35,7 @@ debug_log() {
 # Source individual functions by extracting them from statusline.sh.
 # This is deliberate: we test the actual production code, not copies.
 eval "$(awk '
-    /^(abbreviate_model_id|format_reset_relative|get_reset_seconds|format_duration|should_show_extra|get_usage_color|get_seven_day_color|get_adaptive_ttl|render_bar|format_money_minor|oauth_token_expired|refresh_oauth_credentials_file|get_context_limit|is_1m_model|build_display_path|build_usage_display|build_extra_usage_display|build_user_info|get_user_tier)\(\)/ { capture=1 }
+    /^(abbreviate_model_id|format_reset_relative|get_reset_seconds|format_duration|should_show_extra|get_cache_health|get_usage_color|get_seven_day_color|get_adaptive_ttl|render_bar|format_money_minor|oauth_token_expired|refresh_oauth_credentials_file|get_context_limit|is_1m_model|build_display_path|build_usage_display|build_extra_usage_display|build_user_info|get_user_tier)\(\)/ { capture=1 }
     capture { print }
     capture && /^}$/ { capture=0 }
 ' "$SCRIPT_DIR/statusline.sh")"

@@ -26,6 +26,8 @@ FIVE_HOUR_RECOVERY_SECS=1800     # recovery color when reset <= 30min
 SEVEN_DAY_COUNTDOWN_SECS=259200  # show countdown when reset <= 3d
 SEVEN_DAY_RECOVERY_SECS=43200    # recovery color when reset <= 12h
 EXTRA_AUTO_UTIL_PCT=50           # show extra when its own utilization >= 50%
+CACHE_BREAK_MIN_TOKENS=2000      # ignore cache drops below this (noise)
+CACHE_BREAK_DROP_PCT=5           # cache read must drop >5% to count as break
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -205,7 +207,11 @@ eval "$(echo "$input" | jq -r '
     @sh "rl_five_pct=\(.rate_limits.five_hour.used_percentage // "")",
     @sh "rl_five_reset=\(.rate_limits.five_hour.resets_at // "")",
     @sh "rl_seven_pct=\(.rate_limits.seven_day.used_percentage // "")",
-    @sh "rl_seven_reset=\(.rate_limits.seven_day.resets_at // "")"
+    @sh "rl_seven_reset=\(.rate_limits.seven_day.resets_at // "")",
+    @sh "cache_read_tokens=\(.context_window.current_usage.cache_read_input_tokens // "")",
+    @sh "cache_creation_tokens=\(.context_window.current_usage.cache_creation_input_tokens // "")",
+    @sh "uncached_input_tokens=\(.context_window.current_usage.input_tokens // "")",
+    @sh "stdin_session_id=\(.session_id // "")"
 ' 2>/dev/null)"
 
 # Detect context window from model ID:
@@ -765,6 +771,57 @@ should_show_extra() {
             ;;
         *) return 0 ;;
     esac
+}
+
+get_cache_health() {
+    local cache_read="${1:-0}" cache_creation="${2:-0}" uncached="${3:-0}"
+    local state_file="${4:-}"
+
+    [ -z "$cache_read" ] && cache_read=0
+    [ -z "$cache_creation" ] && cache_creation=0
+    [ -z "$uncached" ] && uncached=0
+
+    cache_read=$(printf '%.0f' "$cache_read" 2>/dev/null) || cache_read=0
+    cache_creation=$(printf '%.0f' "$cache_creation" 2>/dev/null) || cache_creation=0
+    uncached=$(printf '%.0f' "$uncached" 2>/dev/null) || uncached=0
+
+    local total=$((cache_read + cache_creation + uncached))
+    if [ "$total" -le 0 ]; then
+        echo "none"
+        return
+    fi
+
+    local prev_cache_read=""
+    [ -n "$state_file" ] && [ -f "$state_file" ] && prev_cache_read=$(cat "$state_file" 2>/dev/null)
+
+    if [ -n "$state_file" ]; then
+        mkdir -p "$(dirname "$state_file")" 2>/dev/null
+        echo "$cache_read" > "$state_file" 2>/dev/null
+    fi
+
+    if [ -z "$prev_cache_read" ] || [ "$prev_cache_read" -le 0 ] 2>/dev/null; then
+        if [ "$cache_read" -le 0 ] && [ "$cache_creation" -gt 0 ]; then
+            echo "building"
+            return
+        fi
+        echo "ok"
+        return
+    fi
+
+    local drop=$((prev_cache_read - cache_read))
+    local threshold=$((prev_cache_read * (100 - CACHE_BREAK_DROP_PCT) / 100))
+
+    if [ "$drop" -gt "$CACHE_BREAK_MIN_TOKENS" ] && [ "$cache_read" -lt "$threshold" ]; then
+        echo "break"
+        return
+    fi
+
+    if [ "$cache_read" -le 0 ] && [ "$cache_creation" -gt "$CACHE_BREAK_MIN_TOKENS" ]; then
+        echo "building"
+        return
+    fi
+
+    echo "ok"
 }
 
 render_bar() {
@@ -1386,7 +1443,19 @@ if [ "$fast_mode" = "true" ]; then
 elif [ -n "$effort_level" ] && [ "$effort_level" != "high" ]; then
     model_suffix=" ${DIM}${effort_level}${RESET}"
 fi
-model_component="${model_color}${model_text}${RESET}${model_suffix}${context_info}"
+
+cache_indicator=""
+if [ -n "$cache_read_tokens" ] || [ -n "$cache_creation_tokens" ]; then
+    cache_state_file="$CLAUDE_CACHE_DIR/${stdin_session_id:-global}_cache_health"
+    cache_health=$(get_cache_health "$cache_read_tokens" "$cache_creation_tokens" "$uncached_input_tokens" "$cache_state_file")
+    debug_log "CACHE HEALTH: state=$cache_health read=$cache_read_tokens creation=$cache_creation_tokens uncached=$uncached_input_tokens"
+    case "$cache_health" in
+        "break")    cache_indicator=" ${RED}cache!${RESET}" ;;
+        "building") cache_indicator=" ${DIM_YELLOW}cache~${RESET}" ;;
+    esac
+fi
+
+model_component="${model_color}${model_text}${RESET}${model_suffix}${context_info}${cache_indicator}"
 activity_component=""
 time_component=""
 cost_component=""

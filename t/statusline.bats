@@ -695,3 +695,137 @@ JSON
     run should_show_extra "on-limit" 85 10 80 900 ""
     [ "$status" -eq 0 ]
 }
+
+# --- get_cache_health ---
+
+@test "get_cache_health: healthy session returns ok" {
+    tmpdir=$(mktemp -d)
+    echo "200000" > "$tmpdir/cache_health"
+    result=$(get_cache_health 210000 173 1 "$tmpdir/cache_health")
+    [ "$result" = "ok" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_cache_health: cache break detected on large drop" {
+    tmpdir=$(mktemp -d)
+    echo "200000" > "$tmpdir/cache_health"
+    result=$(get_cache_health 0 200100 1 "$tmpdir/cache_health")
+    [ "$result" = "break" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_cache_health: small drop is not a break" {
+    tmpdir=$(mktemp -d)
+    echo "200000" > "$tmpdir/cache_health"
+    result=$(get_cache_health 199000 500 1 "$tmpdir/cache_health")
+    [ "$result" = "ok" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_cache_health: first turn with no state file returns ok" {
+    tmpdir=$(mktemp -d)
+    result=$(get_cache_health 50000 173 1 "$tmpdir/cache_health")
+    [ "$result" = "ok" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_cache_health: first turn with zero cache_read is building" {
+    tmpdir=$(mktemp -d)
+    result=$(get_cache_health 0 50000 1 "$tmpdir/cache_health")
+    [ "$result" = "building" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_cache_health: no tokens at all returns none" {
+    result=$(get_cache_health 0 0 0 "")
+    [ "$result" = "none" ]
+}
+
+@test "get_cache_health: empty strings treated as zero" {
+    result=$(get_cache_health "" "" "" "")
+    [ "$result" = "none" ]
+}
+
+@test "get_cache_health: previous zero baseline does not false-positive" {
+    tmpdir=$(mktemp -d)
+    echo "0" > "$tmpdir/cache_health"
+    result=$(get_cache_health 50000 200 1 "$tmpdir/cache_health")
+    [ "$result" = "ok" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_cache_health: state file is updated after check" {
+    tmpdir=$(mktemp -d)
+    echo "100000" > "$tmpdir/cache_health"
+    get_cache_health 150000 200 1 "$tmpdir/cache_health" >/dev/null
+    stored=$(cat "$tmpdir/cache_health")
+    [ "$stored" = "150000" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_cache_health: rebuilding after break (creation high, read zero)" {
+    tmpdir=$(mktemp -d)
+    echo "0" > "$tmpdir/cache_health"
+    result=$(get_cache_health 0 50000 1 "$tmpdir/cache_health")
+    [ "$result" = "building" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_cache_health: drop below MIN_TOKENS threshold is not break" {
+    tmpdir=$(mktemp -d)
+    echo "3000" > "$tmpdir/cache_health"
+    result=$(get_cache_health 1500 500 1 "$tmpdir/cache_health")
+    [ "$result" = "ok" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_cache_health: no state file path still works" {
+    result=$(get_cache_health 50000 200 1 "")
+    [ "$result" = "ok" ]
+}
+
+@test "get_cache_health: creates parent directory for state file" {
+    tmpdir=$(mktemp -d)
+    nonexist="$tmpdir/no-such-dir/cache_health"
+    result=$(get_cache_health 200000 200 1 "$nonexist")
+    [ "$result" = "ok" ]
+    [ -f "$nonexist" ]
+    result=$(get_cache_health 0 200100 1 "$nonexist")
+    [ "$result" = "break" ]
+    rm -rf "$tmpdir"
+}
+
+# --- integration: cache health indicator ---
+
+@test "integration: cache break shows cache! indicator" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/sessions"
+    echo "200000" > "$tmpdir/sessions/test-session-id_cache_health"
+    result=$(echo '{"model":{"id":"claude-opus-4-6[1m]","display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.150","context_window":{"used_percentage":21,"context_window_size":1000000,"current_usage":{"input_tokens":1,"output_tokens":58,"cache_creation_input_tokens":200100,"cache_read_input_tokens":0}}}' \
+        | CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"cache!"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: healthy cache shows no indicator" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/sessions"
+    echo "200000" > "$tmpdir/sessions/test-session-id_cache_health"
+    result=$(echo '{"model":{"id":"claude-opus-4-6[1m]","display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.150","context_window":{"used_percentage":21,"context_window_size":1000000,"current_usage":{"input_tokens":1,"output_tokens":58,"cache_creation_input_tokens":173,"cache_read_input_tokens":209703}}}' \
+        | CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" != *"cache!"* ]]
+    [[ "$plain" != *"cache~"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: first turn building shows cache~" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/sessions"
+    result=$(echo '{"model":{"id":"claude-opus-4-6[1m]","display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.150","context_window":{"used_percentage":5,"context_window_size":1000000,"current_usage":{"input_tokens":1,"output_tokens":10,"cache_creation_input_tokens":50000,"cache_read_input_tokens":0}}}' \
+        | CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"cache~"* ]]
+    rm -rf "$tmpdir"
+}

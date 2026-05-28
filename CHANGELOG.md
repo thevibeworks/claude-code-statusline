@@ -1,5 +1,54 @@
 # Changelog
 
+## v0.7.0 — 2026-05-27 — Prompt Cache Health Indicator
+
+Tested against Claude Code CLI v2.1.150 (MAX and PRO accounts).
+
+### Cache Health Indicator
+
+Detects prompt cache invalidation from per-turn token data already in
+the CLI's stdin JSON. Uses the same detection logic as Claude Code's
+internal `promptCacheBreakDetection.ts`: flags a break when
+`cache_read_input_tokens` drops >5% and >2000 tokens from the
+previous turn.
+
+- `cache!` (red) — cache break detected, this turn was fully uncached
+- `cache~` (dim yellow) — cache building, first turn or post-break rebuild
+- Hidden when healthy — zero noise during normal operation
+
+Display appears after the context bar:
+
+```
+opus4.6[1m][███░░26%]              (healthy — no indicator)
+opus4.6[1m][███░░26%] cache~       (building — first turn)
+opus4.6[1m][███░░26%] cache!       (break — full rebuild)
+```
+
+State tracked in `$CLAUDE_CACHE_DIR/cache_health` (one number: previous
+turn's `cache_read_input_tokens`).
+
+### Why It Matters
+
+A single cache break on a 1M-context Opus session costs ~22x more than
+a cached turn. For subscription users, that's quota burn equivalent to
+20+ normal turns. The indicator makes this invisible cost visible.
+
+### Added
+
+- `get_cache_health()` function with four return states: `ok`, `break`,
+  `building`, `none`
+- `CACHE_BREAK_MIN_TOKENS` (2000) and `CACHE_BREAK_DROP_PCT` (5)
+  threshold constants
+- Extracts `cache_read_input_tokens`, `cache_creation_input_tokens`,
+  `input_tokens` from stdin `context_window.current_usage`
+- Per-session state file (`${session_id}_cache_health`) prevents false
+  positives when running concurrent Claude Code sessions
+- `mkdir -p` before state file write ensures detection works for API key
+  users where `$CLAUDE_CACHE_DIR` may not exist yet
+- 16 new tests (13 unit + 3 integration), 126 total across both suites
+
+---
+
 ## v0.6.0 — 2026-05-26 — Smart Countdowns & Information Grouping
 
 Tested against Claude Code CLI v2.1.143 (MAX and PRO accounts).

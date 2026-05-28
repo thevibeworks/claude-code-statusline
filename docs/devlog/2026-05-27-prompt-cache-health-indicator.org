@@ -1,0 +1,308 @@
+* [2026-05-27] Prompt cache health indicator                     :PROPOSAL:FEAT:
+
+** Problem
+
+A single prompt cache invalidation on a 1M-context Opus session
+costs ~22x more than a normal cached turn. Users have no visibility
+into this. They don't know when the cache broke, why it broke, or
+that resuming after 6 minutes of idle costs 22x more than after 4
+minutes.
+
+The data to detect this is already in our stdin. We're not using it.
+
+** The cost reality
+
+Opus 4.7 pricing (per MTok):
+
+| Token type        |   Rate | Relative |
+|-------------------+--------+----------|
+| Normal input      |  $5.00 |       1x |
+| Cache read (hit)  |  $0.50 |    0.10x |
+| Cache write (5m)  |  $6.25 |    1.25x |
+| Cache write (1h)  | $10.00 |    2.00x |
+
+Concrete scenario — 1M session at 210k tokens used:
+
+| Scenario              | Cost/turn | vs cached |
+|-----------------------+-----------+-----------|
+| Cache hit             |     $0.10 |        1x |
+| Cache miss + rebuild  |     $2.36 |      ~22x |
+
+At 800k tokens (deep session):
+
+| Scenario              | Cost/turn | vs cached |
+|-----------------------+-----------+-----------|
+| Cache hit             |     $0.40 |        1x |
+| Cache miss + rebuild  |     $9.00 |      ~22x |
+
+For subscription users the cost is quota burn rate, not dollars. But
+the effect is the same: one cache break eats the quota equivalent of
+20+ normal turns.
+
+** What's in our stdin
+
+=context_window.current_usage= already provides per-turn cache tokens:
+
+#+begin_src json
+{
+  "context_window": {
+    "current_usage": {
+      "input_tokens": 1,
+      "output_tokens": 58,
+      "cache_creation_input_tokens": 173,
+      "cache_read_input_tokens": 209703
+    }
+  }
+}
+#+end_src
+
+The cache hit rate for this turn:
+
+  hit_rate = cache_read / (cache_read + cache_creation + input)
+           = 209703 / (209703 + 173 + 1)
+           = 99.9%
+
+A cache break would look like:
+
+  hit_rate = 0 / (0 + 209877 + 1)
+           = 0.0%
+
+** How Claude Code detects cache breaks internally
+
+Source: =cc2188/src/services/api/promptCacheBreakDetection.ts=
+
+Two-phase detection:
+
+1. *Pre-call (recordPromptState):* hash system prompt, tools, model,
+   effort, cache_control scope/TTL, betas, fast mode,
+   globalCacheStrategy. Store as =previousState=.
+
+2. *Post-call (checkResponseForCacheBreak):* if =cache_read_input_tokens=
+   dropped >5% from previous turn AND absolute drop >2000 tokens,
+   flag as cache break.
+
+Explanation is built from pending changes:
+- system prompt hash changed
+- tool schemas changed (+ per-tool diff showing WHICH tool)
+- model changed
+- effort changed
+- fast mode toggled
+- cache_control changed (scope global<->org, TTL 1h<->5m)
+- betas changed (+ diff showing which headers)
+- globalCacheStrategy changed (MCP tool_based<->system_prompt<->none)
+- auto mode toggled
+- overage state changed
+- cached microcompact toggled
+- extra body params changed
+
+If none of the above, checks time since last assistant message:
+- >1h gap: "possible 1h TTL expiry"
+- >5min gap: "possible 5min TTL expiry"
+- <5min gap: "likely server-side (prompt unchanged)"
+
+Fires =tengu_prompt_cache_break= analytics event. Writes diff file
+for debugging. None of this reaches the statusline.
+
+** Cache diagnostics API (beta)
+
+Header: =cache-diagnosis-2026-04-07=
+Endpoint: =/v1/messages= (same endpoint, extra field)
+
+Pass =diagnostics.previous_message_id= on each request. API stores
+lightweight fingerprint (hashes only, no prompt content) and compares
+consecutive requests.
+
+Response =cache_miss_reason= types:
+- =model_changed=
+- =system_changed=
+- =tools_changed=
+- =messages_changed=
+- =previous_message_not_found=
+- =unavailable=
+
+Each =*_changed= type includes =cache_missed_input_tokens= estimate.
+
+This is a server-side API. We cannot call it from the statusline (we
+don't make API calls to the messages endpoint). Claude Code may adopt
+it internally. If it does, and if the result surfaces in stdin, we
+could display it. Until then, it's informational only.
+
+** What invalidates the cache
+
+From source code and official docs:
+
+*** User-initiated (avoidable mid-session)
+- Model switch (=/model=)
+- Effort level change (=/effort=)
+- Fast mode toggle (=/fast=)
+- Tool deny rule, bare name (=/permissions= → =Bash=)
+- =/compact=
+
+*** Automatic (partially avoidable)
+- MCP server connect/disconnect (stdio exit, HTTP timeout, reconnect)
+- Claude Code upgrade (on restart, not mid-session)
+- 5min TTL expiry (idle >5min without 1h TTL)
+- 1h TTL expiry (idle >1h)
+- Server-side eviction (unpredictable)
+
+*** Internal (not user-visible)
+- =cache_control= scope/TTL flip (now latched to prevent mid-session)
+- Beta header additions/removals
+- Overage state change (now latched session-stable)
+- =CLAUDE_CODE_EXTRA_BODY= changes
+
+** What we can build
+
+*** Data available per render
+
+From stdin =context_window.current_usage=:
+- =cache_read_input_tokens=: tokens served from cache this turn
+- =cache_creation_input_tokens=: tokens written to cache this turn
+- =input_tokens=: new (uncached) input tokens this turn
+
+*** Detection algorithm
+
+Same as Claude Code's internal detector, simplified:
+
+#+begin_src bash
+prev_cache_read=$(cat "$state_file" 2>/dev/null)
+current_cache_read=$cache_read_input_tokens
+
+if [ -n "$prev_cache_read" ] && [ "$prev_cache_read" -gt 2000 ]; then
+  drop=$((prev_cache_read - current_cache_read))
+  if [ "$drop" -gt 2000 ] && [ "$current_cache_read" -lt $((prev_cache_read * 95 / 100)) ]; then
+    cache_broke=true
+  fi
+fi
+
+echo "$current_cache_read" > "$state_file"
+#+end_src
+
+*** Display options
+
+*Option A: Break-only indicator (minimal)*
+
+Show nothing when healthy. Flash indicator on break:
+
+#+begin_example
+opus4.6[1m][███░░26%]              (normal — no indicator)
+opus4.6[1m][███░░26%] CACHE!       (cache break detected)
+#+end_example
+
+Pros: zero noise. Cons: no ongoing visibility.
+
+*Option B: Cache efficiency near context bar*
+
+Always show hit rate, highlight on break:
+
+#+begin_example
+opus4.6[1m][███░░26% c99]          (merged with context bar)
+opus4.6[1m][███░░26% c0!]          (break — red, exclamation)
+#+end_example
+
+Pros: continuous feedback. Cons: extra width, possibly noisy.
+
+*Option C: Auto-gated (like extra-usage)*
+
+Show only when unhealthy or noteworthy:
+
+#+begin_example
+opus4.6[1m][███░░26%]              (healthy — hidden)
+opus4.6[1m][███░░26%] cache~       (rebuilding — yellow ~)
+opus4.6[1m][███░░26%] cache!       (broke — red !)
+#+end_example
+
+Where:
+- Hidden when =cache_read / total >= 0.90= (healthy)
+- Yellow =~= when =cache_creation > cache_read= (rebuilding/first turn)
+- Red =!= when previous =cache_read > 2000= and current drops >5%
+
+Pros: shows only when actionable. Cons: slightly more state tracking.
+
+*** Recommended: Option C
+
+Follows our =--extra auto= principle: invisible during calm operation,
+visible when something costs you. The =cache!= indicator is the
+equivalent of the =~= / =!= refresh indicators — tells you something
+happened without demanding action.
+
+*** Idle-gap warning (stretch goal)
+
+Track time between statusline renders. If gap > TTL threshold (5min
+or 1h depending on subscription), show a preemptive warning:
+
+#+begin_example
+opus4.6[1m][███░░26%] cache:cold   (resumed after >TTL idle)
+#+end_example
+
+This would require knowing the user's cache TTL. Subscription users
+get 1h; API key users get 5min. We know the auth method from whether
+OAuth credentials exist. Feasible but adds complexity.
+
+** Scope for v0.7.0
+
+1. Extract =cache_read_input_tokens= and =cache_creation_input_tokens=
+   from stdin (add to existing batched jq call)
+2. State file: =$CLAUDE_CACHE_DIR/cache_health= — stores previous
+   turn's =cache_read_input_tokens=
+3. =get_cache_health()= function: computes hit rate, detects break
+4. Display: auto-gated (Option C) — show only when unhealthy
+5. Tests: cache break detection, healthy state, first-turn behavior,
+   edge cases (null values, zero tokens)
+
+Estimated: ~60 lines in statusline.sh, ~15 lines in jq parsing,
+~20 test cases.
+
+** Not in scope
+
+- Cache diagnostics API integration (requires Claude Code adoption)
+- Idle-gap preemptive warning (needs TTL awareness, adds complexity)
+- Per-trigger attribution ("cache broke because you changed model") —
+  would need to track model/effort/tool state across renders
+- Cost estimation display ("this turn cost $2.36 instead of $0.10")
+
+These are possible future additions once the basic indicator proves
+useful.
+
+** Sources
+
+- =worktree/cc2188/src/services/api/promptCacheBreakDetection.ts=:
+  Claude Code's internal two-phase cache break detector
+- =worktree/cc2188/src/tools/AgentTool/built-in/statuslineSetup.ts=:
+  Stdin JSON schema including =current_usage= with cache tokens
+- =worktree/cc2188/src/cost-tracker.ts=:
+  Session-level cache token aggregation
+- =worktree/cc2188/src/utils/tokens.ts=:
+  Token counting: total = input + cache_creation + cache_read + output
+- =worktree/cc2188/src/utils/forkedAgent.ts=:
+  CacheSafeParams — subagents share parent's cache via identical prefix
+- =worktree/cc2188/src/services/api/claude.ts=:
+  getCacheControl(), should1hCacheTTL(), cache disable env vars
+- =reference/claude-code-docs/content/en/build-with-claude/cache-diagnostics.md=:
+  Beta cache diagnostics API (cache-diagnosis-2026-04-07)
+- =reference/claude-code-docs/content/en/docs/claude-code/prompt-caching.md=:
+  Official Claude Code caching guide — layers, invalidation triggers,
+  TTL, scope, check performance section
+- =reference/claude-code-docs/content/en/build-with-claude/prompt-caching.md=:
+  Underlying API mechanism, pricing, TTLs (5min/1h)
+- =worktree/claude-code-reverse/context-usage-algorithm.md=:
+  Token usage breakdown with cache metrics from session JSONL
+- =worktree/claude-code-reverse/claude-code-env-vars.md=:
+  DISABLE_PROMPT_CACHING_*, ENABLE_PROMPT_CACHING_1H_BEDROCK
+
+** Open questions
+
+1. Should the indicator persist for N renders after a break, or clear
+   immediately on the next healthy turn? Persisting makes the break
+   more visible; clearing keeps the display accurate.
+
+2. Should we show cache hit rate as a number (=c99=, =c0=) or only
+   as state indicators (=cache~=, =cache!=)? Numbers give more info
+   but use more width.
+
+3. Should this be gated behind =--cache= flag or always on? Given
+   the auto-gating (hidden when healthy), always-on seems right.
+
+4. First-turn behavior: =cache_creation > 0= and =cache_read = 0= is
+   normal on the first API call of a session. Should we suppress the
+   indicator entirely for call #1, or show =cache~= (building)?
