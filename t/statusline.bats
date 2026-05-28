@@ -80,6 +80,51 @@ setup() {
     [ -z "$result" ]
 }
 
+# --- format_reset_absolute ---
+
+@test "format_reset_absolute: short mode returns HH:MM" {
+    ts=$(date -d '+2 hours' +%s)
+    result=$(format_reset_absolute "$ts" "short")
+    [[ "$result" =~ ^[0-9]{2}:[0-9]{2}$ ]]
+}
+
+@test "format_reset_absolute: day mode returns day name for future day" {
+    ts=$(date -d '+2 days' +%s)
+    expected=$(date -d '+2 days' +%a)
+    result=$(format_reset_absolute "$ts" "day")
+    [ "$result" = "$expected" ]
+}
+
+@test "format_reset_absolute: day mode returns HH:MM when reset is today" {
+    ts=$(date -d '+2 hours' +%s)
+    reset_day=$(date -d "@$ts" +%a)
+    today=$(date +%a)
+    if [ "$reset_day" = "$today" ]; then
+        result=$(format_reset_absolute "$ts" "day")
+        [[ "$result" =~ ^[0-9]{2}:[0-9]{2}$ ]]
+    else
+        result=$(format_reset_absolute "$ts" "day")
+        [ "$result" = "$reset_day" ]
+    fi
+}
+
+@test "format_reset_absolute: past timestamp returns now" {
+    ts=$(date -d '-1 hour' +%s)
+    result=$(format_reset_absolute "$ts" "short")
+    [ "$result" = "now" ]
+}
+
+@test "format_reset_absolute: empty returns empty" {
+    result=$(format_reset_absolute "" "short")
+    [ -z "$result" ]
+}
+
+@test "format_reset_absolute: ISO timestamp works" {
+    ts=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    result=$(format_reset_absolute "$ts" "short")
+    [[ "$result" =~ ^[0-9]{2}:[0-9]{2}$ ]]
+}
+
 # --- format_duration ---
 
 @test "format_duration: zero returns 0m" {
@@ -133,20 +178,20 @@ setup() {
     [ -z "$result" ]
 }
 
-@test "build_usage_display: 5h at 87% includes relative reset suffix" {
+@test "build_usage_display: 5h at 87% includes absolute reset time" {
     reset_time=$(date -u -d '+1 hour' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":87,\"resets_at\":\"$reset_time\"},\"seven_day\":{\"utilization\":10}}"
     result=$(build_usage_display "$usage" "")
     plain=$(strip_ansi "$result")
-    [[ "$plain" =~ 5h\[87%\~ ]]
+    [[ "$plain" =~ 5h\[87%@ ]]
 }
 
-@test "build_usage_display: 7d at 75% includes relative reset suffix" {
+@test "build_usage_display: 7d at 75% includes absolute reset time" {
     reset_time=$(date -u -d '+2 days 5 hours' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":10},\"seven_day\":{\"utilization\":75,\"resets_at\":\"$reset_time\"}}"
     result=$(build_usage_display "$usage" "")
     plain=$(strip_ansi "$result")
-    [[ "$plain" =~ 7d\[75%\~ ]]
+    [[ "$plain" =~ 7d\[75%@ ]]
 }
 
 @test "build_usage_display: MAX tier shows opus model quota" {
@@ -583,23 +628,24 @@ JSON
     [ -z "$result" ]
 }
 
-# --- smart 5h countdown (opportunity signal) ---
+# --- smart 5h reset time (absolute) ---
 
-@test "build_usage_display: 5h at 40% with reset in 1h shows countdown" {
+@test "build_usage_display: 5h at 40% with reset in 1h shows wall clock" {
     reset_time=$(date -u -d '+1 hour' '+%Y-%m-%dT%H:%M:%SZ')
+    expected_clock=$(date -d '+1 hour' +%H:%M)
     usage="{\"five_hour\":{\"utilization\":40,\"resets_at\":\"$reset_time\"},\"seven_day\":{\"utilization\":10}}"
     result=$(build_usage_display "$usage" "")
     plain=$(strip_ansi "$result")
-    [[ "$plain" =~ 5h\[40%\~1h ]]
+    [[ "$plain" == *"5h[40%@${expected_clock}]"* ]]
 }
 
-@test "build_usage_display: 5h at 30% with reset in 3h hides countdown" {
+@test "build_usage_display: 5h at 30% with reset in 3h hides reset" {
     reset_time=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":30,\"resets_at\":\"$reset_time\"},\"seven_day\":{\"utilization\":10}}"
     result=$(build_usage_display "$usage" "")
     plain=$(strip_ansi "$result")
     [[ "$plain" == *"5h[30%]"* ]]
-    [[ "$plain" != *"~"* ]] || [[ "$plain" != *"5h[30%~"* ]]
+    [[ "$plain" != *"@"* ]] || [[ "$plain" != *"5h[30%@"* ]]
 }
 
 @test "build_usage_display: 5h at 85% with reset in 20min uses recovery color" {
@@ -609,26 +655,27 @@ JSON
     [[ "$result" == *"$DIM_GREEN"* ]]
 }
 
-@test "build_usage_display: 5h at 85% with reset in 2h keeps warning color" {
+@test "build_usage_display: 5h at 85% with reset in 2h shows @ and warning color" {
     reset_time=$(date -u -d '+2 hours' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":85,\"resets_at\":\"$reset_time\"},\"seven_day\":{\"utilization\":10}}"
     result=$(build_usage_display "$usage" "")
     plain=$(strip_ansi "$result")
-    [[ "$plain" =~ 5h\[85%\~ ]]
+    [[ "$plain" =~ 5h\[85%@ ]]
     [[ "$result" != *"$DIM_GREEN"* ]]
 }
 
-# --- smart 7d countdown (planning signal) ---
+# --- smart 7d reset time (absolute, day-of-week) ---
 
-@test "build_usage_display: 7d at 30% with reset in 2d shows countdown" {
+@test "build_usage_display: 7d at 30% with reset in 2d shows day of week" {
     reset_time=$(date -u -d '+2 days' '+%Y-%m-%dT%H:%M:%SZ')
+    expected_day=$(date -d '+2 days' +%a)
     usage="{\"five_hour\":{\"utilization\":10},\"seven_day\":{\"utilization\":30,\"resets_at\":\"$reset_time\"}}"
     result=$(build_usage_display "$usage" "")
     plain=$(strip_ansi "$result")
-    [[ "$plain" =~ 7d\[30%\~2d ]]
+    [[ "$plain" == *"7d[30%@${expected_day}]"* ]]
 }
 
-@test "build_usage_display: 7d at 30% with reset in 5d hides countdown" {
+@test "build_usage_display: 7d at 30% with reset in 5d hides reset" {
     reset_time=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":10},\"seven_day\":{\"utilization\":30,\"resets_at\":\"$reset_time\"}}"
     result=$(build_usage_display "$usage" "")
@@ -648,7 +695,7 @@ JSON
     usage="{\"five_hour\":{\"utilization\":10},\"seven_day\":{\"utilization\":75,\"resets_at\":\"$reset_time\"}}"
     result=$(build_usage_display "$usage" "")
     plain=$(strip_ansi "$result")
-    [[ "$plain" =~ 7d\[75%\~ ]]
+    [[ "$plain" =~ 7d\[75%@ ]]
     [[ "$result" != *"$DIM_GREEN"* ]]
 }
 

@@ -945,6 +945,33 @@ format_reset_relative() {
     fi
 }
 
+format_reset_absolute() {
+    local ts="$1" kind="${2:-short}"
+    [ -z "$ts" ] || [ "$ts" = "null" ] && return
+    local reset_epoch
+    if [[ "$ts" =~ ^[0-9]+$ ]]; then
+        reset_epoch="$ts"
+    else
+        reset_epoch=$(date -d "$ts" +%s 2>/dev/null) || return
+    fi
+
+    local now_epoch=$(date +%s)
+    local delta=$((reset_epoch - now_epoch))
+    [ "$delta" -le 0 ] && { echo "now"; return; }
+
+    if [ "$kind" = "day" ]; then
+        local reset_day=$(date -d "@$reset_epoch" +%a 2>/dev/null) || return
+        local today=$(date +%a)
+        if [ "$reset_day" = "$today" ]; then
+            date -d "@$reset_epoch" +%H:%M 2>/dev/null
+        else
+            echo "$reset_day"
+        fi
+    else
+        date -d "@$reset_epoch" +%H:%M 2>/dev/null
+    fi
+}
+
 get_reset_seconds() {
     local ts="$1"
     [ -z "$ts" ] || [ "$ts" = "null" ] && { echo ""; return; }
@@ -1025,8 +1052,8 @@ build_usage_display() {
             if [ "$five_int" -ge 80 ] && [ -n "$reset_secs" ] && [ "$reset_secs" -le $FIVE_HOUR_RECOVERY_SECS ] 2>/dev/null; then
                 color="$DIM_GREEN"
             fi
-            local rel=$(format_reset_relative "$five_reset")
-            [ -n "$rel" ] && reset_suffix="${DIM}~${rel}${color}"
+            local abs=$(format_reset_absolute "$five_reset" "short")
+            [ -n "$abs" ] && reset_suffix="${DIM}@${abs}${color}"
         fi
         parts+=("${DIM}5h${color}[${five_int}%${reset_suffix}]${RESET}")
     fi
@@ -1048,8 +1075,8 @@ build_usage_display() {
             if [ "$seven_int" -ge 70 ] && [ -n "$reset_secs" ] && [ "$reset_secs" -le $SEVEN_DAY_RECOVERY_SECS ] 2>/dev/null; then
                 color="$DIM_GREEN"
             fi
-            local rel=$(format_reset_relative "$seven_reset")
-            [ -n "$rel" ] && reset_suffix="${DIM}~${rel}${color}"
+            local abs=$(format_reset_absolute "$seven_reset" "day")
+            [ -n "$abs" ] && reset_suffix="${DIM}@${abs}${color}"
         fi
         parts+=("${DIM}7d${color}[${seven_int}%${reset_suffix}]${RESET}")
     fi

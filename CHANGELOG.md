@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.7.0 — 2026-05-27 — Prompt Cache Health Indicator
+## v0.7.0 — 2026-05-27 — Prompt Cache Health & Absolute Reset Times
 
 Tested against Claude Code CLI v2.1.150 (MAX and PRO accounts).
 
@@ -45,7 +45,29 @@ a cached turn. For subscription users, that's quota burn equivalent to
   positives when running concurrent Claude Code sessions
 - `mkdir -p` before state file write ensures detection works for API key
   users where `$CLAUDE_CACHE_DIR` may not exist yet
-- 16 new tests (13 unit + 3 integration), 126 total across both suites
+- 16 new tests (13 unit + 3 integration)
+
+### Absolute Reset Times
+
+Quota reset display changed from relative countdown to absolute time:
+
+- **Before**: `5h[87%~1h30m]` `7d[75%~2d5h]`
+- **After**: `5h[87%@14:30]` `7d[75%@Mon]`
+
+Relative time (`~1h30m`) is only true at render time. Claude Code
+controls statusline refresh, so a countdown can become stale while
+still visible. Absolute time (`@14:30`, `@Mon`) stays true without
+realtime refresh.
+
+- 5h uses wall-clock time (`@HH:MM`) — answers "when can I resume?"
+- 7d uses day-of-week (`@Mon`) — answers "which day does it reset?"
+- Same-day 7d reset falls back to wall-clock
+- `@now` when reset is past
+
+`format_reset_absolute()` function with `short` (HH:MM) and `day`
+(day-of-week, falls back to HH:MM for same day) modes.
+
+132 total tests across both suites.
 
 ---
 

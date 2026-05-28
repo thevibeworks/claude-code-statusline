@@ -66,9 +66,9 @@ Then add to `~/.claude/settings.json`:
 ## What It Shows
 
 ```text
-project (main*)  +84/-14 1h30m $6.72 opus4.6[1m][███░░░26%] [MAX|feast.t.] 5h[24%] 7d[100%~12h6m] ex[$16.29/$200 8% bal$4.66]
-   |       |       |      |     |       |                        |           |          |                |
- path   branch   edits   time  cost   model+context             user      5h quota   7d quota       extra usage
+project (main*)  +84/-14 1h30m $6.72 opus4.6[1m][███░░░26%] [MAX|feast.t.] 5h[87%@14:30] 7d[75%@Mon] ex[$16.29/$200 8% bal$4.66]
+   |       |       |      |     |       |                        |              |             |              |
+ path   branch   edits   time  cost   model+context             user         5h quota      7d quota      extra usage
 ```
 
 Every component earns its place:
@@ -81,7 +81,7 @@ Every component earns its place:
 | Model | Abbreviated. `claude-opus-4-6[1m]` becomes `opus4.6[1m]`. |
 | Context bar | Merged with model. Green / yellow / red by pressure. |
 | User tier | MAX is green, PRO is cyan. Truncated display name. |
-| Quota | Integer percentages. Countdown on pressure (>= 80%/70%) or time proximity (<= 2h/3d). Recovery color when high usage + imminent reset. |
+| Quota | Integer percentages. Absolute reset time on pressure (>= 80%/70%) or time proximity (<= 2h/3d). `5h[87%@14:30]` `7d[75%@Mon]`. Recovery color when imminent. |
 | Extra usage | Monthly spend, limit, prepaid balance. `--extra auto` shows when quota runs out. |
 | Cache health | Detects prompt cache invalidation. `cache!` on break, `cache~` when building. Hidden when healthy. |
 
@@ -100,7 +100,7 @@ Every component earns its place:
 | 5 themes, 9 bar styles | -- | Yes |
 | Prompt cache break detection | -- | Yes |
 | OAuth + macOS Keychain | -- | Yes |
-| 126 bats tests + CI | -- | Yes |
+| 132 bats tests + CI | -- | Yes |
 
 ## Configuration
 
@@ -134,11 +134,11 @@ Flags go in the command string in `~/.claude/settings.json`:
 ### Extra Usage Gating
 
 ```text
---extra auto        5h[24%] 7d[10%]                                (calm, hidden)
---extra auto        5h[87%~2h] 7d[10%] ex[$19.52/$200 10%]        (5h >= 80%, shown)
---extra always      5h[24%] 7d[10%] ex[$19.52/$200 10% bal$4.66]  (always shown)
---extra on-limit    5h[87%~2h] 7d[10%] ex[$19.52/$200 10%]        (same as auto minus extra_util gate)
---extra off         5h[24%] 7d[10%]                                (always hidden)
+--extra auto        5h[24%] 7d[10%]                                  (calm, hidden)
+--extra auto        5h[87%@14:30] 7d[10%] ex[$19.52/$200 10%]       (5h >= 80%, shown)
+--extra always      5h[24%] 7d[10%] ex[$19.52/$200 10% bal$4.66]    (always shown)
+--extra on-limit    5h[87%@14:30] 7d[10%] ex[$19.52/$200 10%]       (same as auto minus extra_util gate)
+--extra off         5h[24%] 7d[10%]                                  (always hidden)
 ```
 
 `auto` (default) shows extra when quota runs out (5h >= 80%, 7d >= 70%) or
@@ -200,7 +200,7 @@ and prepaid balance data.
 npm exec --yes bats -- t/
 ```
 
-126 tests across `t/statusline.bats` (114 unit + integration) and
+132 tests across `t/statusline.bats` (120 unit + integration) and
 `t/install.bats` (12 installer). CI runs on push and PR to `main`.
 
 ## Project Structure
