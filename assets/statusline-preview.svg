@@ -37,7 +37,7 @@
   <rect x="1011" y="139" width="17" height="16" rx="3" fill="#334155"/>
   <text x="1036" y="155" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17" fill="#d1d5db">26%</text>
 
-  <text x="112" y="220" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="24" fill="#94a3b8">[MAX|feast.t.]</text>
+  <text x="112" y="220" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="24" fill="#94a3b8">[MAX|you]</text>
   <text x="345" y="220" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="24" fill="#22c55e">5h[24%]</text>
   <text x="480" y="220" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="24" fill="#f97316">7d[100%~12h6m]</text>
   <text x="760" y="220" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="24" fill="#38bdf8">ex[$16.29/$200 8%]</text>

@@ -66,7 +66,7 @@ Then add to `~/.claude/settings.json`:
 ## What It Shows
 
 ```text
-project (main*)  +84/-14 1h30m $6.72 opus4.6[1m][███░░░26%] cache:1h@14:20~ [MAX|feast.t.] 5h[87%@14:30] 7d[75%@Mon] ex[$16.29/$200 8% bal$4.66]
+project (main*)  +84/-14 1h30m $6.72 opus4.8[1m][███░░░26%] cache:1h@14:20~ [MAX|you] 5h[87%@14:30] 7d[75%@Mon] ex[$16.29/$200 8% bal$4.66]
    |       |       |      |     |       |                        |                 |              |             |              |
  path   branch   edits   time  cost   model+context             cache             user         5h quota      7d quota      extra usage
 ```
@@ -78,10 +78,11 @@ Every component earns its place:
 | Path and branch | Know where Claude Code is writing. Dirty branch is bright yellow. |
 | Activity | Session diff without opening git. |
 | Time and cost | Track long sessions. Hours format above 60m (`1h30m`). |
-| Model | Abbreviated. `claude-opus-4-6[1m]` becomes `opus4.6[1m]`. |
+| Model | Abbreviated. `claude-opus-4-8[1m]` becomes `opus4.8[1m]`, `claude-fable-5` becomes `fabl5`. On a 1M-context model, crossing 200k (the premium input-pricing band) shows absolute context in a warning color: `fabl5[1m:300k]`. |
+| Effort | Compact reasoning-effort badge: `L` / `M` / `XH` / `MAX` / `ULTRA` / `AUTO` (`high` is the default and stays hidden). `MAX` / `ULTRA` are highlighted as expensive modes; `fast` shows in fast mode. |
 | Context bar | Merged with model. Green / yellow / red by pressure. |
 | User tier | MAX is green, PRO is cyan. Truncated display name. |
-| Quota | Integer percentages. Absolute reset time on pressure (>= 80%/70%) or time proximity (<= 2h/3d). `5h[87%@14:30]` `7d[75%@Mon]`. Recovery color when imminent. |
+| Quota | Integer percentages. 5h shows its reset on pressure (>= 80%) or imminent reset (<= 2h); 7d shows its reset only near the weekly cap (>= 70%). `5h[87%@14:30]` `7d[75%@Mon]`. Recovery color when imminent. |
 | Extra usage | Monthly spend, limit, prepaid balance. `--extra auto` shows when quota runs out. |
 | Cache health | Detects observed prompt-cache rebuilds and cache-read drops. `cache!` on break, `cache~` when building. If a future Claude Code stdin includes TTL breakdown, `--cache always` can show `cache:1h@14:20`; current stdin usually exposes aggregate cache tokens only. Hidden when healthy by default. |
 
@@ -100,7 +101,7 @@ Every component earns its place:
 | 5 themes, 9 bar styles | -- | Yes |
 | Prompt cache break detection | -- | Yes |
 | OAuth + macOS Keychain | -- | Yes |
-| 145 bats tests + CI | -- | Yes |
+| 172 bats tests + CI | -- | Yes |
 
 ## Configuration
 
@@ -119,7 +120,7 @@ Flags go in the command string in `~/.claude/settings.json`:
 | `--alignment` | `left-right`, `right-left`, `center` | `left-right` |
 | `--extra` | `auto`, `always`, `on-limit`, `off` | `auto` |
 | `--cache` | `auto`, `always`, `off` | `auto` |
-| `--debug` | Write logs to `/tmp/claude-code-statusline.log` | off |
+| `--debug` | Write logs to `~/.claude/statusline/logs/statusline.log` | off |
 | `--test [json]` | Render with mock data | off |
 
 ### Themes
@@ -149,11 +150,11 @@ when it matters.
 ### Prompt Cache
 
 ```text
---cache auto        opus4.6[1m][21%]                      (healthy, hidden)
---cache auto        opus4.6[1m][21%] cache~               (cache is rebuilding)
---cache auto        opus4.6[1m][21%] cache!               (cache-read collapse observed)
---cache always      opus4.6[1m][21%] cache:1h@14:20       (when TTL breakdown exists)
---cache off         opus4.6[1m][21%]                      (disabled; no state writes)
+--cache auto        opus4.8[1m][21%]                      (healthy, hidden)
+--cache auto        opus4.8[1m][21%] cache~               (cache is rebuilding)
+--cache auto        opus4.8[1m][21%] cache!               (cache-read collapse observed)
+--cache always      opus4.8[1m][21%] cache:1h@14:20       (when TTL breakdown exists)
+--cache off         opus4.8[1m][21%]                      (disabled; no state writes)
 ```
 
 Cache state is based on Claude Code's per-turn usage tokens:
@@ -183,9 +184,43 @@ Indicators: `~` after quota = refresh in flight. `!` = last fetch failed.
 ### Try It Locally
 
 ```bash
-echo '{"model":{"id":"claude-opus-4-6[1m]","display_name":"Opus"},"cwd":"/tmp/project","workspace":{"current_dir":"/tmp/project"},"cost":{"total_cost_usd":6.72,"total_lines_added":84,"total_lines_removed":14,"total_api_duration_ms":5400000},"version":"2.1.139"}' \
+echo '{"model":{"id":"claude-opus-4-8[1m]","display_name":"Opus"},"cwd":"/tmp/project","workspace":{"current_dir":"/tmp/project"},"cost":{"total_cost_usd":6.72,"total_lines_added":84,"total_lines_removed":14,"total_api_duration_ms":5400000},"version":"2.1.139"}' \
   | bash statusline.sh --test
 ```
+
+## claude-watch
+
+`claude-watch.sh` is a standalone companion that watches one session's usage in
+real time -- a "top"-style full-screen view, where the statusline is a single
+prompt line.
+
+```text
+━━ claude-watch ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+model  opus4.8  turns 412  2026-06-09T11:42:08Z
+
+last turn  $0.67  in 319  out 21,274  c-read 132,952  c-make 10,960
+session   $4.91  in 9,044  out 72,837  c-read 6,062,353  c-make 1,879,467
+
+quota  5h 36%  7d 15%  extra $16.29/$200 8%  (12s ago)
+```
+
+It reads three things, all read-only: the session transcript (per-turn token
+usage), the shared account usage cache (5h / 7d / extra quota), and
+`usage.jsonl`. By default it picks the most recently modified transcript for the
+current directory's project.
+
+```bash
+bash claude-watch.sh                 # auto-pick newest session in this project
+bash claude-watch.sh --session ID    # watch a specific session
+bash claude-watch.sh --once          # one snapshot, no watch loop
+bash claude-watch.sh --interval 5    # refresh every 5s (default 3s)
+bash claude-watch.sh --help
+```
+
+Cost is an **estimate** from public per-million list pricing; fast-mode
+surcharges are not modeled. Quota requires `statusline.sh` to have populated
+the shared usage cache. `claude-fable-5` is priced in the Opus 4.5+ capability
+tier.
 
 <details><summary>OAuth and API behavior</summary>
 
@@ -202,6 +237,13 @@ resolves the real Linux home directory via `getent passwd`.
 The script never writes to Anthropic endpoints -- it only reads usage, profile,
 and prepaid balance data.
 
+**Account-scoped cache (one fetch, all sessions).** Quota / profile / prepaid
+data is identical for every session on the account, so it's cached once in a
+shared dir -- `~/.claude/statusline/` -- and a single fetch serves all
+concurrent sessions. Per-session prompt-cache-health state stays under
+`~/.claude/statusline/sessions/`. Old `$SCRIPT_DIR` state is migrated on first
+run. Setting only `CLAUDE_CACHE_DIR` keeps the legacy single-dir behavior.
+
 </details>
 
 <details><summary>Environment variables</summary>
@@ -209,8 +251,10 @@ and prepaid balance data.
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `CLAUDE_CONTEXT_LIMIT` | auto | Override context token limit |
-| `CLAUDE_DATA_DIR` | script dir | Usage log location |
-| `CLAUDE_CACHE_DIR` | `$CLAUDE_DATA_DIR/sessions` | Quota and profile cache |
+| `CLAUDE_DATA_DIR` | `~/.claude/statusline` | Account-scoped cache + usage log location |
+| `CLAUDE_CACHE_DIR` | `$CLAUDE_DATA_DIR/sessions` | Per-session cache-health state |
+| `DEBUG_LOG` | `~/.claude/statusline/logs/statusline.log` | Debug log path |
+| `DEBUG_LOG_MAX_BYTES` | `1048576` | Debug log size cap before rotation |
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | `32000` | Output token reserve |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Claude config directory |
 
@@ -222,13 +266,14 @@ and prepaid balance data.
 npm exec --yes bats -- t/
 ```
 
-145 tests across `t/statusline.bats` (133 unit + integration) and
+172 tests across `t/statusline.bats` (160 statusline + integration) and
 `t/install.bats` (12 installer). CI runs on push and PR to `main`.
 
 ## Project Structure
 
 ```text
-statusline.sh                Main script (one file, ~1700 lines)
+statusline.sh                Main script (one file, ~1950 lines)
+claude-watch.sh              Live usage/cost watcher (standalone companion)
 install.sh                   One-line installer
 t/statusline.bats            Unit and integration tests
 t/install.bats               Installer tests (mock curl, isolated $HOME)

@@ -1,5 +1,140 @@
 # Changelog
 
+## v0.8.0 — 2026-06-10 — Shared Account Cache, fabl5, claude-watch, quota freshness
+
+Tested against Claude Code CLI v2.1.170 (MAX and PRO accounts), Fable 5, and
+the 20x Max plan.
+
+### Quota freshness — the "5h stuck at 100%" fix
+
+The 5h/7d number could stay frozen (e.g. stuck at 100% after a plan upgrade or
+a window reset) even though the account was no longer rate-limited.
+
+- **Prefer the CLI's stdin `rate_limits` for 5h/7d.** Claude Code passes
+  current-plan, current-window quota numbers in stdin on every render. We now
+  overlay those onto the cached usage data, so the displayed 5h/7d are always
+  fresh and zero-cost. This self-heals plan upgrades (utilization is relative to
+  the plan limit), window resets, and a stale/frozen cache. `extra_usage` and
+  per-model 7d breakdowns (not in stdin) still come from the cache. New
+  `merge_stdin_rate_limits()`.
+- **Reap stale fetch locks.** The fetch gate skipped launching while a `*.lock`
+  existed but never reaped it, so one orphaned lock (from a fetch that died
+  mid-flight) could freeze the cache indefinitely. New `reap_stale_lock()`.
+- **7d reset shown only near the cap.** A reset time is irrelevant at low usage,
+  and a bare clock on a 7-day metric (`7d[1%@09:00]`) was confusing — the
+  `@time` now appears only at >=70% utilization.
+
+### Model display — fabl5, premium-band cue, effort badge
+
+- `claude-fable-5` abbreviates to **`fabl5`** (4-char family + version).
+- **`[1m:NNNk]`** — on a 1M-context model, once you pass 200k tokens (the
+  premium input-pricing band) the tag shows absolute context in a warning
+  color, e.g. `fabl5[1m:300k]`. Below 200k it stays `[1m]`.
+- **Effort badge** — `low/medium/xhigh/max/ultracode/auto` render as compact
+  `L/M/XH/MAX/ULTRA/AUTO` (`high` is the default and stays hidden). The
+  expensive modes (`MAX`, `ULTRA`) use a warning color; the rest stay dim.
+
+### Robustness & security
+
+- **macOS portability**: every reset/countdown path now falls back from GNU
+  `date -d` to BSD `date -j`/`-r`, so these no longer silently vanish on macOS.
+- **Clean degradation**: empty/malformed stdin no longer prints fabricated
+  `+/- 0m $0` — activity/time/cost are gated numerically, and sub-cent costs are
+  no longer shown as `$0`.
+- **`umask 077`**: caches and the debug log (which hold account PII) are written
+  owner-only — important on a shared bind-mounted `~/.claude`.
+
+### Account-Level Usage Cache (fewer API calls)
+
+Quota data from `/api/oauth/usage` (5h / 7d / extra) is **account-scoped** —
+it's identical for every session on the account. Previous versions cached it
+per `session_id`, so each new session refetched the same data and N concurrent
+sessions meant N redundant API calls (rate-limit risk).
+
+Account-scoped state now lives in a single shared directory and one fetch
+serves all concurrent sessions:
+
+```
+~/.claude/statusline/                  account-scoped (shared)
+  usage.cache  profile.cache  prepaid_credits.cache  usage.jsonl
+~/.claude/statusline/sessions/         per-session (cache-health only)
+  <session_id>_cache_health
+```
+
+- Per-session prompt-cache-health state is unchanged (it legitimately tracks
+  one context window) and stays under `sessions/`.
+- Adaptive TTL, error backoff, and lock-file behavior are preserved; locks are
+  now shared so concurrent sessions coordinate a single in-flight fetch.
+- Graceful migration: if the old `$SCRIPT_DIR` layout exists and the new
+  shared dir is empty, `usage.cache` / `profile.cache` /
+  `prepaid_credits.cache` / `usage.jsonl` and the `sessions/` dir are moved
+  over on first run (best-effort; falls back to a fresh fetch).
+- `CLAUDE_DATA_DIR` / `CLAUDE_CACHE_DIR` overrides still work. Setting only
+  `CLAUDE_CACHE_DIR` keeps the old single-dir behavior (account data lives
+  alongside it).
+
+### Debug Logs Out of /tmp
+
+Debug logs default to `~/.claude/statusline/logs/statusline.log` instead of
+`/tmp`. Safe for many concurrent statusline processes — across containers —
+sharing one mounted `~/.claude`:
+
+- Append-mode writes (`echo >>`) are atomic for the small lines we emit, so
+  interleaving never corrupts a line. Each line is tagged with `[pid:N]`.
+- A 1 MiB size cap rotates the file (single `.1` backup) using an atomic
+  `mkdir` lock so concurrent processes don't all rotate at once.
+- `DEBUG_LOG` env override still wins; `DEBUG_LOG_MAX_BYTES` tunes the cap.
+
+### claude-fable-5 Support
+
+`claude-fable-5` renders consistently with the opus / sonnet / haiku branches:
+
+- Abbreviates to `fabl5` (single-component version, no `major.minor` split).
+- Bright-magenta color (`95`), keeping it in Opus's capability-group hue while
+  staying distinct from `opus`'s magenta.
+- `[1m]` context suffix handled like every other model (`fabl5[1m]`).
+
+### claude-watch.sh — Live Usage Watcher
+
+New standalone companion. A "top"-style full-screen view of one session:
+
+- **Per-turn**: estimated cost + input / output / cache-read / cache-create
+  tokens for the latest assistant message.
+- **Session totals**: cumulative tokens and estimated cost across the
+  transcript (each turn priced at its own model's rate).
+- **Quota**: 5h / 7d (and extra, when present) read from the shared
+  `usage.cache` statusline.sh maintains.
+
+Reads the transcript, the account usage cache, and `usage.jsonl` — all
+read-only. Cost is an estimate from public per-million list pricing (mirrors
+the `ccx` tool's pricing tiers); fast-mode surcharges are not modeled.
+Resilient streaming parse tolerates malformed/oversized transcript lines and
+renders a 27 MB / 4500-turn transcript in ~0.2s. `--help`, `--once`,
+`--interval`, `--session`, `--transcript`, `--no-color`.
+
+### Added
+
+- Shared `usage.cache` / `usage.lock` / `usage.err` under the account dir;
+  `fetch_usage_for_session` writes once for all sessions
+- `migrate_legacy_state()` for graceful one-time migration from `$SCRIPT_DIR`
+- `rotate_debug_log()` with size-capped, lock-guarded rotation
+- `claude-fable-5` branches in `get_runtime_model`, `abbreviate_model_id`, and
+  both model-color code paths
+- `claude-watch.sh` (installed by `install.sh` alongside `statusline.sh`)
+- `merge_stdin_rate_limits()`, `reap_stale_lock()`, `build_1m_tag()`,
+  `abbrev_effort()`, `effort_color()`, and portable `_epoch_from_ts()` /
+  `_fmt_epoch()` date helpers
+- Test suite grew from 145 to 172 (fabl5, premium-band cue, effort badge,
+  stdin-overlay precedence, stale-lock reaping, portable date helpers,
+  clean-degradation on empty/sub-cent input)
+
+### Changed
+
+- Debug log default moved from `/tmp/claude-code-statusline.log` to
+  `~/.claude/statusline/logs/statusline.log`
+- Account-scoped caches (`usage`, `profile`, `prepaid_credits`, `usage.jsonl`)
+  default to `~/.claude/statusline/` instead of `$SCRIPT_DIR`
+
 ## v0.7.0 — 2026-05-27 — Prompt Cache Health & Absolute Reset Times
 
 Tested against Claude Code CLI v2.1.150 (MAX and PRO accounts).

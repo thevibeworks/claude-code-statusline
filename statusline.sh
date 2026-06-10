@@ -30,6 +30,11 @@ EXTRA_AUTO_UTIL_PCT=50           # show extra when its own utilization >= 50%
 CACHE_BREAK_MIN_TOKENS=2000      # ignore cache drops below this (noise)
 CACHE_BREAK_DROP_PCT=5           # cache read must drop >5% to count as break
 
+# Owner-only by default: caches and the debug log hold account PII (email,
+# uuid, org, paths). umask 077 keeps every file/dir we create unreadable to
+# other UIDs — important when ~/.claude is a shared bind-mount across containers.
+umask 077
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Resolve claude home — OrbStack sets $HOME to macOS host path,
@@ -40,15 +45,107 @@ if [ ! -d "$CLAUDE_HOME/.claude" ]; then
     [ -n "$_real_home" ] && [ -d "$_real_home/.claude" ] && CLAUDE_HOME="$_real_home"
 fi
 
-CLAUDE_DATA_DIR="${CLAUDE_DATA_DIR:-$SCRIPT_DIR}"
-CLAUDE_CACHE_DIR="${CLAUDE_CACHE_DIR:-$SCRIPT_DIR/sessions}"
+# Shared statusline state under the resolved claude home. Account-scoped
+# data (usage/profile/prepaid + usage.jsonl) lives at the top level so a
+# single fetch serves all concurrent sessions instead of one fetch per
+# session. Per-session cache-health state lives under sessions/.
+#
+#   ~/.claude/statusline/                  <- CLAUDE_DATA_DIR  (account-scoped)
+#     usage.cache, profile.cache, prepaid_credits.cache, usage.jsonl
+#   ~/.claude/statusline/sessions/         <- CLAUDE_CACHE_DIR (per-session)
+#     <session_id>_cache_health
+#
+# CLAUDE_DATA_DIR / CLAUDE_CACHE_DIR env overrides are still honored for
+# back-compat. When unset, they default into ~/.claude/statusline.
+STATUSLINE_HOME="$CLAUDE_HOME/.claude/statusline"
+CLAUDE_DATA_DIR_OVERRIDDEN=""
+_data_dir_set=""
+_cache_dir_set=""
+[ -n "${CLAUDE_DATA_DIR:-}" ] && { CLAUDE_DATA_DIR_OVERRIDDEN=1; _data_dir_set=1; }
+[ -n "${CLAUDE_CACHE_DIR:-}" ] && { CLAUDE_DATA_DIR_OVERRIDDEN=1; _cache_dir_set=1; }
+CLAUDE_DATA_DIR="${CLAUDE_DATA_DIR:-$STATUSLINE_HOME}"
+CLAUDE_CACHE_DIR="${CLAUDE_CACHE_DIR:-$CLAUDE_DATA_DIR/sessions}"
 
-# Debug helper
-DEBUG_LOG="${DEBUG_LOG:-/tmp/claude-code-statusline.log}"
+# Account-scoped data (shared usage/profile/prepaid caches + usage.jsonl)
+# anchors on the data dir by default. Back-compat: if the caller overrode
+# only CLAUDE_CACHE_DIR (the old single-dir layout where everything lived
+# together), keep account data alongside it so the override still works.
+if [ -n "$_cache_dir_set" ] && [ -z "$_data_dir_set" ]; then
+    CLAUDE_ACCOUNT_DIR="$CLAUDE_CACHE_DIR"
+else
+    CLAUDE_ACCOUNT_DIR="$CLAUDE_DATA_DIR"
+fi
+
+# One-time graceful migration: older versions wrote account-scoped caches
+# and the usage log under $SCRIPT_DIR (and per-session data under
+# $SCRIPT_DIR/sessions). If that legacy layout exists and the new shared
+# dir has not been populated yet, move it over so history/credentials are
+# preserved. Best-effort only — failures fall through to a fresh fetch.
+migrate_legacy_state() {
+    local legacy_data="$SCRIPT_DIR"
+    local legacy_sessions="$SCRIPT_DIR/sessions"
+
+    # Skip when caller pinned custom dirs or legacy == new (no-op).
+    [ -n "${CLAUDE_DATA_DIR_OVERRIDDEN:-}" ] && return 0
+    [ "$legacy_data" = "$CLAUDE_ACCOUNT_DIR" ] && return 0
+
+    local moved=false
+    if [ ! -d "$CLAUDE_ACCOUNT_DIR" ]; then
+        local f found=false
+        for f in usage.cache profile.cache prepaid_credits.cache usage.jsonl; do
+            [ -e "$legacy_data/$f" ] && found=true && break
+        done
+        [ -d "$legacy_sessions" ] && found=true
+        [ "$found" = true ] || return 0
+
+        mkdir -p "$CLAUDE_ACCOUNT_DIR" 2>/dev/null || return 0
+        for f in usage.cache profile.cache prepaid_credits.cache usage.jsonl; do
+            if [ -e "$legacy_data/$f" ] && [ ! -e "$CLAUDE_ACCOUNT_DIR/$f" ]; then
+                mv -f "$legacy_data/$f" "$CLAUDE_ACCOUNT_DIR/$f" 2>/dev/null && moved=true
+            fi
+        done
+        if [ -d "$legacy_sessions" ] && [ ! -d "$CLAUDE_CACHE_DIR" ]; then
+            mkdir -p "$(dirname "$CLAUDE_CACHE_DIR")" 2>/dev/null
+            mv -f "$legacy_sessions" "$CLAUDE_CACHE_DIR" 2>/dev/null && moved=true
+        fi
+        [ "$moved" = true ] && debug_log "migrate_legacy_state: moved legacy state from $SCRIPT_DIR -> $CLAUDE_ACCOUNT_DIR"
+    fi
+    return 0
+}
+
+# Debug log location: under the shared statusline dir by default so logs
+# don't litter /tmp. DEBUG_LOG env override still wins. Writes use append
+# mode (echo >> is atomic for small lines), making it safe for many
+# concurrent statusline processes — across containers — sharing one
+# mounted ~/.claude. A size cap rotates the file so it can't grow forever.
+DEBUG_LOG="${DEBUG_LOG:-$STATUSLINE_HOME/logs/statusline.log}"
+DEBUG_LOG_MAX_BYTES="${DEBUG_LOG_MAX_BYTES:-1048576}"  # 1 MiB cap
+
+# Rotate the debug log when it exceeds the cap. Keeps a single .1 backup.
+# Uses a short-lived lock so concurrent processes don't all rotate at once.
+rotate_debug_log() {
+    local f="$1"
+    [ -f "$f" ] || return 0
+    local size
+    size=$(stat -c %s "$f" 2>/dev/null || stat -f %z "$f" 2>/dev/null || echo 0)
+    [ "$size" -lt "$DEBUG_LOG_MAX_BYTES" ] 2>/dev/null && return 0
+
+    local rot_lock="${f}.rotate.lock"
+    # mkdir is atomic: only one process wins the rotation.
+    if mkdir "$rot_lock" 2>/dev/null; then
+        mv -f "$f" "${f}.1" 2>/dev/null
+        rmdir "$rot_lock" 2>/dev/null
+    fi
+}
+
 debug_log() {
     if [ "$debug_mode" = true ]; then
-        local msg="[$(date '+%Y-%m-%d %H:%M:%S')] DEBUG: $*"
+        local msg="[$(date '+%Y-%m-%d %H:%M:%S')] [pid:$$] DEBUG: $*"
         echo "$msg" >&2
+        mkdir -p "$(dirname "$DEBUG_LOG")" 2>/dev/null
+        rotate_debug_log "$DEBUG_LOG"
+        # O_APPEND: each small write is atomic, so interleaving across
+        # concurrent processes never corrupts a line.
         echo "$msg" >> "$DEBUG_LOG" 2>/dev/null
     fi
 }
@@ -104,6 +201,8 @@ done
 
 debug_log "Script started with: style=$progress_bar_style order=$stat_order theme=$theme"
 debug_log "SCRIPT_DIR=$SCRIPT_DIR CLAUDE_DATA_DIR=$CLAUDE_DATA_DIR CLAUDE_CACHE_DIR=$CLAUDE_CACHE_DIR"
+
+migrate_legacy_state
 
 command -v jq >/dev/null 2>&1 || { echo "statusline: jq required" >&2; exit 1; }
 
@@ -278,8 +377,8 @@ refresh_oauth_credentials_file() {
     refresh_token=$(jq -r '.claudeAiOauth.refreshToken // empty' "$cred_file" 2>/dev/null)
     [ -n "$refresh_token" ] || return 1
 
-    mkdir -p "$CLAUDE_CACHE_DIR"
-    local lock_file="$CLAUDE_CACHE_DIR/oauth_refresh.lock"
+    mkdir -p "$CLAUDE_ACCOUNT_DIR"
+    local lock_file="$CLAUDE_ACCOUNT_DIR/oauth_refresh.lock"
     if [ -f "$lock_file" ]; then
         local lock_age=$(($(date +%s) - $(stat -c %Y "$lock_file" 2>/dev/null || stat -f %m "$lock_file" 2>/dev/null || echo 0)))
         [ "$lock_age" -lt 30 ] && return 1
@@ -402,7 +501,7 @@ get_oauth_token() {
 
 get_user_profile() {
     local token="$1"
-    local profile_cache="$CLAUDE_CACHE_DIR/profile.cache"
+    local profile_cache="$CLAUDE_ACCOUNT_DIR/profile.cache"
     debug_log "get_user_profile: starting (cache: $profile_cache)"
 
     if [ -f "$profile_cache" ]; then
@@ -415,7 +514,7 @@ get_user_profile() {
         fi
     fi
 
-    mkdir -p "$CLAUDE_CACHE_DIR"
+    mkdir -p "$CLAUDE_ACCOUNT_DIR"
 
     debug_log "get_user_profile: fetching from API..."
 
@@ -443,14 +542,19 @@ get_user_profile() {
     fi
 }
 
+# Usage quota is ACCOUNT-scoped (the /api/oauth/usage endpoint returns the
+# same 5h/7d/extra data regardless of session). Cache it once in a shared
+# file so N concurrent sessions share one fetch instead of issuing N
+# redundant calls. session_id is still threaded through for the usage.jsonl
+# snapshot and session-boundary detection.
 fetch_usage_for_session() {
     local session_id="$1"
-    local cache_file="$CLAUDE_CACHE_DIR/${session_id}.cache"
-    local lock_file="$CLAUDE_CACHE_DIR/${session_id}.lock"
-    local err_file="$CLAUDE_CACHE_DIR/${session_id}.err"
+    local cache_file="$CLAUDE_ACCOUNT_DIR/usage.cache"
+    local lock_file="$CLAUDE_ACCOUNT_DIR/usage.lock"
+    local err_file="$CLAUDE_ACCOUNT_DIR/usage.err"
 
-    mkdir -p "$CLAUDE_CACHE_DIR"
-    debug_log "fetch_usage_for_session: session=$session_id"
+    mkdir -p "$CLAUDE_ACCOUNT_DIR"
+    debug_log "fetch_usage_for_session: session=$session_id (shared usage.cache)"
 
     if [ -f "$cache_file" ]; then
         local fetched_at=$(jq -r '.fetched_at // 0' "$cache_file" 2>/dev/null)
@@ -500,7 +604,7 @@ fetch_usage_for_session() {
     touch "$lock_file"
 
     # Use CLI version from input for User-Agent, fall back to generic
-    local ua="claude-code/${cli_version:-2.1.76}"
+    local ua="claude-code/${cli_version:-2.1.170}"
 
     debug_log "fetch_usage_for_session: fetching (User-Agent: $ua)..."
 
@@ -538,7 +642,7 @@ fetch_usage_for_session() {
 }
 
 get_cached_org_uuid() {
-    local profile_cache="$CLAUDE_CACHE_DIR/profile.cache"
+    local profile_cache="$CLAUDE_ACCOUNT_DIR/profile.cache"
     if [ -f "$profile_cache" ]; then
         jq -r '.organization.uuid // empty' "$profile_cache" 2>/dev/null
     fi
@@ -546,13 +650,13 @@ get_cached_org_uuid() {
 
 fetch_prepaid_balance() {
     local org_uuid="$1"
-    local cache_file="$CLAUDE_CACHE_DIR/prepaid_credits.cache"
-    local lock_file="$CLAUDE_CACHE_DIR/prepaid_credits.lock"
-    local err_file="$CLAUDE_CACHE_DIR/prepaid_credits.err"
+    local cache_file="$CLAUDE_ACCOUNT_DIR/prepaid_credits.cache"
+    local lock_file="$CLAUDE_ACCOUNT_DIR/prepaid_credits.lock"
+    local err_file="$CLAUDE_ACCOUNT_DIR/prepaid_credits.err"
 
     [ -n "$org_uuid" ] || return 1
 
-    mkdir -p "$CLAUDE_CACHE_DIR"
+    mkdir -p "$CLAUDE_ACCOUNT_DIR"
     debug_log "fetch_prepaid_balance: org=$org_uuid"
 
     if [ -f "$cache_file" ]; then
@@ -592,7 +696,7 @@ fetch_prepaid_balance() {
 
     touch "$lock_file"
 
-    local ua="claude-code/${cli_version:-2.1.76}"
+    local ua="claude-code/${cli_version:-2.1.170}"
     local response=$(curl -s -w "\n%{http_code}" -X GET \
         "https://api.anthropic.com/api/oauth/organizations/${org_uuid}/prepaid/credits" \
         -H "Authorization: Bearer $token" \
@@ -629,8 +733,8 @@ log_usage_snapshot() {
     local usage_data="$2"
     local token="$3"
 
-    mkdir -p "$CLAUDE_DATA_DIR"
-    local usage_log="$CLAUDE_DATA_DIR/usage.jsonl"
+    mkdir -p "$CLAUDE_ACCOUNT_DIR"
+    local usage_log="$CLAUDE_ACCOUNT_DIR/usage.jsonl"
     debug_log "log_usage_snapshot: session=$session_id"
 
     detect_session_boundary "$session_id" "$usage_data"
@@ -715,7 +819,7 @@ log_usage_snapshot() {
 detect_session_boundary() {
     local session_id="$1"
     local usage_data="$2"
-    local usage_log="$CLAUDE_DATA_DIR/usage.jsonl"
+    local usage_log="$CLAUDE_ACCOUNT_DIR/usage.jsonl"
 
     local current_five_hour_reset=$(echo "$usage_data" | jq -r '.five_hour.resets_at // empty' 2>/dev/null)
     local current_seven_day_reset=$(echo "$usage_data" | jq -r '.seven_day.resets_at // empty' 2>/dev/null)
@@ -901,10 +1005,36 @@ infer_cache_ttl_class() {
     echo ""
 }
 
+# Portable date helpers. GNU `date -d` does not exist on BSD/macOS (a supported
+# target), so every reset/countdown render must fall back to BSD syntax or it
+# silently disappears. These try GNU first, then BSD, and echo "" on failure.
+
+# ISO-8601 string or epoch -> epoch seconds.
+_epoch_from_ts() {
+    local ts="$1"
+    [ -z "$ts" ] || [ "$ts" = "null" ] && return 0
+    if [[ "$ts" =~ ^[0-9]+$ ]]; then printf '%s' "$ts"; return 0; fi
+    local out
+    out=$(date -d "$ts" +%s 2>/dev/null) && { printf '%s' "$out"; return 0; }
+    # BSD: needs an explicit format and no fractional seconds / timezone.
+    local clean="${ts%%.*}"; clean="${clean%%+*}"; clean="${clean%Z}"
+    out=$(date -j -f '%Y-%m-%dT%H:%M:%S' "$clean" +%s 2>/dev/null) && printf '%s' "$out"
+    return 0
+}
+
+# epoch seconds + strftime format -> formatted string.
+_fmt_epoch() {
+    local epoch="$1" fmt="$2" out
+    [ -z "$epoch" ] && return 0
+    out=$(date -d "@$epoch" +"$fmt" 2>/dev/null) && { printf '%s' "$out"; return 0; }
+    out=$(date -r "$epoch" +"$fmt" 2>/dev/null) && printf '%s' "$out"
+    return 0
+}
+
 format_cache_active_time() {
     local ts="${1:-}"
     [ -z "$ts" ] || [ "$ts" = "null" ] || [ "$ts" = "0" ] && return
-    date -d "@$ts" +%H:%M 2>/dev/null
+    _fmt_epoch "$ts" '%H:%M'
 }
 
 build_cache_indicator() {
@@ -1010,6 +1140,39 @@ get_adaptive_ttl() {
     fi
 }
 
+# Remove a lock left behind by a fetch that died before cleanup. Without this,
+# a single orphaned *.lock permanently freezes the cache (the fetch gate skips
+# launching while the lock exists, and never reaps it). $2 = max age seconds.
+reap_stale_lock() {
+    local lock_file="$1" max_age="${2:-15}"
+    [ -f "$lock_file" ] || return 0
+    local mtime now age
+    mtime=$(stat -c %Y "$lock_file" 2>/dev/null || stat -f %m "$lock_file" 2>/dev/null || echo 0)
+    now=$(date +%s)
+    age=$((now - mtime))
+    [ "$age" -ge "$max_age" ] && rm -f "$lock_file"
+    return 0
+}
+
+# Overlay the CLI's fresh stdin rate_limits onto cached usage JSON. The CLI
+# passes current-plan, current-window 5h/7d numbers on every render, so this is
+# the freshest, zero-cost source — preferring it self-heals plan upgrades,
+# window resets, and a stale/frozen cache. Fields stdin lacks (extra_usage,
+# model breakdowns) are left untouched so the cache still enriches them.
+# Args: <usage_json> <five_pct> <five_reset> <seven_pct> <seven_reset>
+merge_stdin_rate_limits() {
+    local usage="$1" fp="$2" fr="$3" sp="$4" sr="$5"
+    echo "$usage" | jq \
+        --argjson fp "${fp:-null}" --arg fr "$fr" \
+        --argjson sp "${sp:-null}" --arg sr "$sr" \
+        '(.five_hour //= {}) | (.seven_day //= {})
+         | (if $fp != null then .five_hour.utilization = $fp
+              | .five_hour.resets_at = (if $fr == "" then null else $fr end) else . end)
+         | (if $sp != null then .seven_day.utilization = $sp
+              | .seven_day.resets_at = (if $sr == "" then null else $sr end) else . end)' \
+        2>/dev/null
+}
+
 format_duration() {
     local ms=${1:-0}
     [ "$ms" -le 0 ] 2>/dev/null && { echo "0m"; return; }
@@ -1032,11 +1195,8 @@ format_reset_relative() {
     local ts="$1"
     [ -z "$ts" ] || [ "$ts" = "null" ] && return
     local reset_epoch now_epoch delta
-    if [[ "$ts" =~ ^[0-9]+$ ]]; then
-        reset_epoch="$ts"
-    else
-        reset_epoch=$(date -d "$ts" +%s 2>/dev/null) || return
-    fi
+    reset_epoch=$(_epoch_from_ts "$ts")
+    [ -z "$reset_epoch" ] && return
     now_epoch=$(date +%s)
     delta=$((reset_epoch - now_epoch))
     [ "$delta" -le 0 ] && { echo "now"; return; }
@@ -1062,26 +1222,23 @@ format_reset_absolute() {
     local ts="$1" kind="${2:-short}"
     [ -z "$ts" ] || [ "$ts" = "null" ] && return
     local reset_epoch
-    if [[ "$ts" =~ ^[0-9]+$ ]]; then
-        reset_epoch="$ts"
-    else
-        reset_epoch=$(date -d "$ts" +%s 2>/dev/null) || return
-    fi
+    reset_epoch=$(_epoch_from_ts "$ts")
+    [ -z "$reset_epoch" ] && return
 
     local now_epoch=$(date +%s)
     local delta=$((reset_epoch - now_epoch))
     [ "$delta" -le 0 ] && { echo "now"; return; }
 
     if [ "$kind" = "day" ]; then
-        local reset_day=$(date -d "@$reset_epoch" +%a 2>/dev/null) || return
+        local reset_day=$(_fmt_epoch "$reset_epoch" '%a')
         local today=$(date +%a)
         if [ "$reset_day" = "$today" ]; then
-            date -d "@$reset_epoch" +%H:%M 2>/dev/null
+            _fmt_epoch "$reset_epoch" '%H:%M'
         else
             echo "$reset_day"
         fi
     else
-        date -d "@$reset_epoch" +%H:%M 2>/dev/null
+        _fmt_epoch "$reset_epoch" '%H:%M'
     fi
 }
 
@@ -1089,11 +1246,8 @@ get_reset_seconds() {
     local ts="$1"
     [ -z "$ts" ] || [ "$ts" = "null" ] && { echo ""; return; }
     local reset_epoch now_epoch
-    if [[ "$ts" =~ ^[0-9]+$ ]]; then
-        reset_epoch="$ts"
-    else
-        reset_epoch=$(date -d "$ts" +%s 2>/dev/null) || { echo ""; return; }
-    fi
+    reset_epoch=$(_epoch_from_ts "$ts")
+    [ -z "$reset_epoch" ] && { echo ""; return; }
     now_epoch=$(date +%s)
     local delta=$((reset_epoch - now_epoch))
     [ "$delta" -lt 0 ] && delta=0
@@ -1180,9 +1334,12 @@ build_usage_display() {
         local reset_secs=""
         [ -n "$seven_reset" ] && reset_secs=$(get_reset_seconds "$seven_reset")
 
+        # Only surface the 7d reset when you're actually near the weekly cap.
+        # A reset time is irrelevant at low usage, and a bare clock time on a
+        # 7-day metric (e.g. "@09:00") is meaningless noise — so we gate it on
+        # utilization, not mere reset proximity.
         local show_reset=false
         [ "$seven_int" -ge 70 ] && show_reset=true
-        [ -n "$reset_secs" ] && [ "$reset_secs" -le $SEVEN_DAY_COUNTDOWN_SECS ] 2>/dev/null && show_reset=true
 
         if [ "$show_reset" = true ] && [ -n "$seven_reset" ]; then
             if [ "$seven_int" -ge 70 ] && [ -n "$reset_secs" ] && [ "$reset_secs" -le $SEVEN_DAY_RECOVERY_SECS ] 2>/dev/null; then
@@ -1287,7 +1444,7 @@ build_extra_usage_display() {
 
 get_user_tier() {
     local tier=""
-    local profile_cache="$CLAUDE_CACHE_DIR/profile.cache"
+    local profile_cache="${CLAUDE_ACCOUNT_DIR:-$CLAUDE_CACHE_DIR}/profile.cache"
     if [ -f "$profile_cache" ]; then
         local org_type=$(jq -r '.organization.organization_type // empty' "$profile_cache" 2>/dev/null)
         case "$org_type" in
@@ -1316,7 +1473,7 @@ build_user_info() {
     local tier="$1"
     local name=""
 
-    local profile_cache="$CLAUDE_CACHE_DIR/profile.cache"
+    local profile_cache="${CLAUDE_ACCOUNT_DIR:-$CLAUDE_CACHE_DIR}/profile.cache"
     if [ -f "$profile_cache" ]; then
         name=$(jq -r '.account.display_name // empty' "$profile_cache" 2>/dev/null)
     fi
@@ -1407,6 +1564,7 @@ get_runtime_model() {
     *"opus"*)  echo "opus" ;;
     *"sonnet"*) echo "sonnet" ;;
     *"haiku"*) echo "haiku" ;;
+    *"fable"*) echo "fable" ;;
     *)         echo "unknown" ;;
     esac
 }
@@ -1414,6 +1572,24 @@ get_runtime_model() {
 # Detect if this is a 1M context model
 is_1m_model() {
     [[ "$model_id" == *"[1m]"* ]]
+}
+
+# Build the [1m] context tag. Above 200k tokens a 1M-window model enters the
+# premium (higher input rate) pricing band, so surface the absolute context in
+# a warning color as a cost cue: [1m] under 200k, [1m:240k] (yellow) over it.
+# $1 = the model's base color, so the bracket restores after the warning span.
+build_1m_tag() {
+    local mcolor="$1"
+    local size="${ctx_size:-1000000}"
+    if [ -n "$context_pct" ] && [ "$size" -gt 0 ] 2>/dev/null; then
+        local abs=$(( context_pct * size / 100 ))
+        if [ "$abs" -gt 200000 ]; then
+            local k=$(( (abs + 500) / 1000 ))
+            echo "[1m:${YELLOW}${k}k${mcolor}]"
+            return
+        fi
+    fi
+    echo "[1m]"
 }
 
 runtime_model=$(get_runtime_model "$model_id")
@@ -1429,6 +1605,13 @@ abbreviate_model_id() {
         rest="${rest#*-}"
         local minor="${rest%%-*}"
         echo "${family}${major}.${minor}"
+        ;;
+    claude-fable-*)
+        # Fable uses single-component versioning (claude-fable-5) — no
+        # major.minor split — so abbreviate to a 4-char family + version: fabl5.
+        local rest="${m#claude-fable-}"
+        local major="${rest%%-*}"
+        echo "fabl${major}"
         ;;
     *) echo "$m" ;;
     esac
@@ -1465,14 +1648,21 @@ if [ -n "$configured_model" ]; then
             model_text=$(abbreviate_model_id "$local_cfg")
         fi
         ;;
+    "fable"|claude-fable-*)
+        # Fable shares Opus's capability group; bright magenta keeps it in
+        # the same hue family while staying distinct from opus's 0;35.
+        model_color='\033[0;95m'
+        if [ "$local_cfg" = "fable" ]; then
+            model_text="fable"
+        else
+            model_text=$(abbreviate_model_id "$local_cfg")
+        fi
+        ;;
     *)
         model_text="$local_cfg"
         model_color='\033[0;37m'
         ;;
     esac
-    if is_1m_model; then
-        model_text="${model_text}[1m]"
-    fi
 else
     base_id="${model_id%%\[*\]}"
     abbreviated=$(abbreviate_model_id "$base_id")
@@ -1480,9 +1670,6 @@ else
         model_text="$abbreviated"
     else
         model_text="$runtime_model"
-    fi
-    if is_1m_model; then
-        model_text="${model_text}[1m]"
     fi
     case "$runtime_model" in
     "opus")
@@ -1493,6 +1680,9 @@ else
         ;;
     "haiku")
         model_color='\033[2;34m'
+        ;;
+    "fable")
+        model_color='\033[2;95m'
         ;;
     *)
         model_color='\033[2;37m'
@@ -1524,6 +1714,12 @@ elif [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
             [ "$context_pct" -gt 100 ] && context_pct=100
         fi
     fi
+fi
+
+# Append the 1M-context tag now that context_pct is known, so the tag can flag
+# the >200k premium pricing band (see build_1m_tag).
+if is_1m_model; then
+    model_text="${model_text}$(build_1m_tag "$model_color")"
 fi
 
 if [ -n "$context_pct" ] && [ "$context_pct" -gt 0 ] 2>/dev/null; then
@@ -1577,11 +1773,35 @@ if [ -n "$context_pct" ] && [ "$context_pct" -gt 0 ] 2>/dev/null; then
     esac
 fi
 
+# Compact effort badge: L / M / XH / MAX / ULTRA / AUTO. 'high' is the default
+# and stays hidden to avoid clutter. Visual weight tracks cost — the expensive
+# modes (max, ultracode) render in a warning color so you notice you're
+# spending hard; the rest stay dim like the secondary metadata they are.
+abbrev_effort() {
+    case "$1" in
+        low) echo "L" ;;  medium) echo "M" ;;  high) echo "H" ;;
+        xhigh) echo "XH" ;;  max) echo "MAX" ;;
+        ultracode) echo "ULTRA" ;;  auto) echo "AUTO" ;;
+        *) echo "$1" ;;
+    esac
+}
+effort_color() {
+    case "$1" in
+        max|ultracode) printf '%s' "$YELLOW" ;;
+        *) printf '%s' "$DIM" ;;
+    esac
+}
+
 model_suffix=""
+# Attach the effort/fast tag directly when the model already ends in a ']'
+# bracket (e.g. fabl5[1m]) — the bracket is the visual separator, so
+# fabl5[1m]XH reads clean. Otherwise keep a space (opus4.8 XH).
+suffix_sep=" "
+[[ "$model_text" == *"]" ]] && suffix_sep=""
 if [ "$fast_mode" = "true" ]; then
-    model_suffix=" ${DIM}fast${RESET}"
+    model_suffix="${suffix_sep}${DIM}fast${RESET}"
 elif [ -n "$effort_level" ] && [ "$effort_level" != "high" ]; then
-    model_suffix=" ${DIM}${effort_level}${RESET}"
+    model_suffix="${suffix_sep}$(effort_color "$effort_level")$(abbrev_effort "$effort_level")${RESET}"
 fi
 
 cache_indicator=""
@@ -1600,20 +1820,26 @@ time_component=""
 cost_component=""
 context_component=""
 
-if [ "$lines_added" != "0" ] && [ "$lines_removed" != "0" ]; then
+# Numeric gates (not string `!= "0"`): empty/malformed stdin leaves these unset,
+# and "" != "0" is true — which printed fake +/- , 0m and $0. Default to 0 and
+# compare numerically; the `2>/dev/null` swallows non-numeric input as false.
+if [ "${lines_added:-0}" -gt 0 ] 2>/dev/null && [ "${lines_removed:-0}" -gt 0 ] 2>/dev/null; then
     activity_component="${DIM_GREEN}+${lines_added}${RESET}${DIM}/${DIM_RED}-${lines_removed}${RESET}"
-elif [ "$lines_added" != "0" ]; then
+elif [ "${lines_added:-0}" -gt 0 ] 2>/dev/null; then
     activity_component="${DIM_GREEN}+${lines_added}${RESET}"
-elif [ "$lines_removed" != "0" ]; then
+elif [ "${lines_removed:-0}" -gt 0 ] 2>/dev/null; then
     activity_component="${DIM_RED}-${lines_removed}${RESET}"
 fi
 
-if [ "$api_duration_ms" != "0" ]; then
+if [ "${api_duration_ms:-0}" -gt 0 ] 2>/dev/null; then
     time_text=$(format_duration "$api_duration_ms")
     time_component="${DIM}${time_text}${RESET}"
 fi
 
-if [ "$cost_usd" != "0" ] && [ "$cost_usd" != "0.00" ]; then
+# Render cost only when it rounds to >= $0.01. A string blocklist ("0"/"0.00")
+# let 0.0 and sub-cent values through as "$0". `-v` keeps the (untrusted) value
+# as awk data, never program text.
+if awk -v c="${cost_usd:-0}" 'BEGIN{exit !((c+0)>=0.005)}' 2>/dev/null; then
     cost_formatted=$(printf "%.2f" "$cost_usd" | sed 's/\.00$//')
     cost_component="${DIM_YELLOW}\$${cost_formatted}${RESET}"
 fi
@@ -1654,9 +1880,10 @@ if [ -n "$session_id" ] && [ "$_may_have_oauth" = true ]; then
     user_tier=$(get_user_tier)
 
     # Quota component (needs tier to decide opus vs sonnet)
-    cache_file="$CLAUDE_CACHE_DIR/${session_id}.cache"
-    lock_file="$CLAUDE_CACHE_DIR/${session_id}.lock"
-    err_file="$CLAUDE_CACHE_DIR/${session_id}.err"
+    # Account-scoped: one shared usage.cache serves all concurrent sessions.
+    cache_file="$CLAUDE_ACCOUNT_DIR/usage.cache"
+    lock_file="$CLAUDE_ACCOUNT_DIR/usage.lock"
+    err_file="$CLAUDE_ACCOUNT_DIR/usage.err"
 
     five_int=0
     seven_int_cache=0
@@ -1683,12 +1910,26 @@ if [ -n "$session_id" ] && [ "$_may_have_oauth" = true ]; then
         [ $err_age -lt 120 ] && should_fetch=false
     fi
 
-    if [ "$should_fetch" = true ] && [ ! -f "$lock_file" ]; then
-        (fetch_usage_for_session "$session_id" >/dev/null 2>&1 &)
+    if [ "$should_fetch" = true ]; then
+        reap_stale_lock "$lock_file" 15
+        [ ! -f "$lock_file" ] && (fetch_usage_for_session "$session_id" >/dev/null 2>&1 &)
     fi
 
     if [ -f "$cache_file" ]; then
         usage_data=$(cat "$cache_file" 2>/dev/null)
+
+        # Prefer the CLI's fresh stdin rate_limits over the cached 5h/7d.
+        # Claude Code passes current-plan, current-window numbers on every
+        # render, so overlaying them self-heals plan upgrades, window resets,
+        # and a frozen/stale cache. extra_usage and model breakdowns (which
+        # stdin does not carry) still come from the cache.
+        if [ -n "$rl_five_pct" ] || [ -n "$rl_seven_pct" ]; then
+            merged=$(merge_stdin_rate_limits "$usage_data" "$rl_five_pct" "$rl_five_reset" "$rl_seven_pct" "$rl_seven_reset")
+            [ -n "$merged" ] && usage_data="$merged"
+            [ -n "$rl_five_pct" ] && five_int=$(printf '%.0f' "$rl_five_pct" 2>/dev/null || echo "$five_int")
+            [ -n "$rl_seven_pct" ] && seven_int_cache=$(printf '%.0f' "$rl_seven_pct" 2>/dev/null || echo "$seven_int_cache")
+        fi
+
         quota_display=$(build_usage_display "$usage_data" "$user_tier")
         [ -n "$quota_display" ] && quota_component="$quota_display"
 
@@ -1704,9 +1945,9 @@ if [ -n "$session_id" ] && [ "$_may_have_oauth" = true ]; then
         prepaid_data=""
         if [ "$extra_usage_enabled" = "true" ]; then
             org_uuid=$(get_cached_org_uuid)
-            prepaid_cache="$CLAUDE_CACHE_DIR/prepaid_credits.cache"
-            prepaid_lock="$CLAUDE_CACHE_DIR/prepaid_credits.lock"
-            prepaid_err="$CLAUDE_CACHE_DIR/prepaid_credits.err"
+            prepaid_cache="$CLAUDE_ACCOUNT_DIR/prepaid_credits.cache"
+            prepaid_lock="$CLAUDE_ACCOUNT_DIR/prepaid_credits.lock"
+            prepaid_err="$CLAUDE_ACCOUNT_DIR/prepaid_credits.err"
             should_fetch_prepaid=false
 
             if [ -n "$org_uuid" ]; then
@@ -1724,8 +1965,9 @@ if [ -n "$session_id" ] && [ "$_may_have_oauth" = true ]; then
                     [ $prepaid_err_age -lt 120 ] && should_fetch_prepaid=false
                 fi
 
-                if [ "$should_fetch_prepaid" = true ] && [ ! -f "$prepaid_lock" ]; then
-                    (fetch_prepaid_balance "$org_uuid" >/dev/null 2>&1 &)
+                if [ "$should_fetch_prepaid" = true ]; then
+                    reap_stale_lock "$prepaid_lock" 30
+                    [ ! -f "$prepaid_lock" ] && (fetch_prepaid_balance "$org_uuid" >/dev/null 2>&1 &)
                 fi
 
                 [ -f "$prepaid_cache" ] && prepaid_data=$(cat "$prepaid_cache" 2>/dev/null)

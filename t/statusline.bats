@@ -27,6 +27,16 @@ setup() {
     [ "$result" = "haiku4.5" ]
 }
 
+@test "abbreviate_model_id: fable-5 -> fabl5 (4-char family + version)" {
+    result=$(abbreviate_model_id "claude-fable-5")
+    [ "$result" = "fabl5" ]
+}
+
+@test "abbreviate_model_id: fable-5 with date suffix -> fabl5" {
+    result=$(abbreviate_model_id "claude-fable-5-20260115")
+    [ "$result" = "fabl5" ]
+}
+
 @test "abbreviate_model_id: unknown model passes through" {
     result=$(abbreviate_model_id "gpt-4o-mini")
     [ "$result" = "gpt-4o-mini" ]
@@ -35,6 +45,54 @@ setup() {
 @test "abbreviate_model_id: short alias passes through" {
     result=$(abbreviate_model_id "opus")
     [ "$result" = "opus" ]
+}
+
+# --- get_runtime_model ---
+
+@test "get_runtime_model: fable family detected" {
+    result=$(get_runtime_model "claude-fable-5[1m]")
+    [ "$result" = "fable" ]
+}
+
+@test "get_runtime_model: opus family detected" {
+    result=$(get_runtime_model "claude-opus-4-8")
+    [ "$result" = "opus" ]
+}
+
+@test "get_runtime_model: unknown falls through" {
+    result=$(get_runtime_model "gpt-5.4")
+    [ "$result" = "unknown" ]
+}
+
+# --- rotate_debug_log ---
+
+@test "rotate_debug_log: rotates when over cap" {
+    tmpdir=$(mktemp -d)
+    log="$tmpdir/statusline.log"
+    DEBUG_LOG_MAX_BYTES=100
+    head -c 200 /dev/zero | tr '\0' 'x' > "$log"
+    rotate_debug_log "$log"
+    [ ! -f "$log" ]
+    [ -f "$log.1" ]
+    rm -rf "$tmpdir"
+}
+
+@test "rotate_debug_log: keeps file under cap" {
+    tmpdir=$(mktemp -d)
+    log="$tmpdir/statusline.log"
+    DEBUG_LOG_MAX_BYTES=1048576
+    echo "small" > "$log"
+    rotate_debug_log "$log"
+    [ -f "$log" ]
+    [ ! -f "$log.1" ]
+    rm -rf "$tmpdir"
+}
+
+@test "rotate_debug_log: no-op on missing file" {
+    tmpdir=$(mktemp -d)
+    run rotate_debug_log "$tmpdir/nope.log"
+    [ "$status" -eq 0 ]
+    rm -rf "$tmpdir"
 }
 
 # --- format_reset_relative ---
@@ -253,10 +311,10 @@ setup() {
 @test "build_user_info: MAX with name shows tier and truncated name" {
     tmpdir=$(mktemp -d)
     CLAUDE_CACHE_DIR="$tmpdir"
-    echo '{"account":{"display_name":"feast.tablet"}}' > "$tmpdir/profile.cache"
+    echo '{"account":{"display_name":"examplename"}}' > "$tmpdir/profile.cache"
     result=$(build_user_info "MAX")
     plain=$(strip_ansi "$result")
-    [ "$plain" = "[MAX|feast.t.]" ]
+    [ "$plain" = "[MAX|example.]" ]
     rm -rf "$tmpdir"
 }
 
@@ -529,10 +587,41 @@ JSON
 }
 
 @test "integration: --test shows model" {
+    # Isolate HOME so a real ~/.claude/settings.json "model" override does
+    # not shadow the stdin model.id (configured_model wins by design).
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
     result=$(echo '{"model":{"id":"claude-opus-4-6[1m]","display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.139"}' \
-        | bash "$SCRIPT_DIR/statusline.sh" --test)
+        | HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
     plain=$(strip_ansi "$result")
     [[ "$plain" == *"opus4.6[1m]"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: --test renders fabl5[1m] under 200k context" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    result=$(echo '{"model":{"id":"claude-fable-5[1m]","display_name":"Fable 5 (1M context)"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.170","context_window":{"used_percentage":15,"context_window_size":1000000}}' \
+        | HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"fabl5[1m]"* ]]
+    [[ "$plain" != *"[1m:"* ]]
+    # Bright-magenta family color (95) applied to fable.
+    [[ "$result" == *$'\033[2;95m'* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: --test flags premium band as [1m:NNNk] over 200k" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    # 30% of a 1M window = 300k tokens, past the 200k premium boundary.
+    result=$(echo '{"model":{"id":"claude-fable-5[1m]","display_name":"Fable 5 (1M context)"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.170","context_window":{"used_percentage":30,"context_window_size":1000000}}' \
+        | HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"fabl5[1m:300k]"* ]]
+    # Premium cue carries the warning (yellow 0;33) color.
+    [[ "$result" == *$'\033[0;33m'*"300k"* ]]
+    rm -rf "$tmpdir"
 }
 
 @test "integration: --test shows cost" {
@@ -556,11 +645,11 @@ JSON
     [[ "$plain" == *"42%"* ]]
 }
 
-@test "integration: --test shows effort max" {
+@test "integration: --test shows effort max as MAX badge" {
     result=$(echo '{"model":{"id":"claude-opus-4-6[1m]","display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.141","effort":{"level":"max"}}' \
         | bash "$SCRIPT_DIR/statusline.sh" --test)
     plain=$(strip_ansi "$result")
-    [[ "$plain" == *"max"* ]]
+    [[ "$plain" == *"MAX"* ]]
 }
 
 @test "integration: --test hides default effort high" {
@@ -584,6 +673,47 @@ JSON
     [[ "$plain" == *"78%"* ]]
 }
 
+@test "integration: account usage.cache is read regardless of session_id" {
+    # The shared account cache (not a per-session file) drives the quota
+    # display. Two different session_ids hitting the same account dir must
+    # both render the same cached quota.
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude/statusline"
+    echo '{"claudeAiOauth":{"accessToken":"fake"}}' > "$tmpdir/.claude/.credentials.json"
+    cat > "$tmpdir/.claude/statusline/usage.cache" <<JSON
+{"fetched_at":$(date +%s),"five_hour":{"utilization":42},"seven_day":{"utilization":17}}
+JSON
+    result=$(echo '{"session_id":"sess-A","model":{"id":"claude-opus-4-8","display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.170","context_window":{"used_percentage":10,"context_window_size":200000}}' \
+        | HOME="$tmpdir" CLAUDE_DATA_DIR="$tmpdir/.claude/statusline" CLAUDE_CACHE_DIR="$tmpdir/.claude/statusline/sessions" bash "$SCRIPT_DIR/statusline.sh")
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"5h[42%]"* ]]
+    [[ "$plain" == *"7d[17%]"* ]]
+    # No per-session cache file should have been created.
+    [ ! -f "$tmpdir/.claude/statusline/sessions/sess-A.cache" ]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: migrates legacy SCRIPT_DIR usage.jsonl into shared dir" {
+    # Simulate the old layout where the usage log lived next to the script.
+    # On first run the script should migrate it into ~/.claude/statusline.
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    workdir=$(mktemp -d)
+    cp "$SCRIPT_DIR/statusline.sh" "$workdir/statusline.sh"
+    echo '{"type":"usage","session_id":"legacy"}' > "$workdir/usage.jsonl"
+    echo '{"organization":{"organization_type":"claude_max"}}' > "$workdir/profile.cache"
+
+    # Unset the data/cache dir overrides so the default ~/.claude/statusline
+    # layout is used and migration from SCRIPT_DIR ($workdir) can trigger.
+    echo '{"session_id":"sess-X","model":{"id":"claude-opus-4-8","display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.170"}' \
+        | env -u CLAUDE_DATA_DIR -u CLAUDE_CACHE_DIR HOME="$tmpdir" bash "$workdir/statusline.sh" >/dev/null
+
+    [ -f "$tmpdir/.claude/statusline/usage.jsonl" ]
+    [ -f "$tmpdir/.claude/statusline/profile.cache" ]
+    [ ! -f "$workdir/usage.jsonl" ]
+    rm -rf "$tmpdir" "$workdir"
+}
+
 @test "integration: stdin rate_limits fallback without OAuth cache" {
     tmpdir=$(mktemp -d)
     mkdir -p "$tmpdir/.claude"
@@ -591,7 +721,7 @@ JSON
     five_reset=$(date -d '+4 hours' +%s)
     seven_reset=$(date -d '+5 days' +%s)
     result=$(echo "{\"model\":{\"id\":\"claude-opus-4-6[1m]\",\"display_name\":\"Opus\"},\"cwd\":\"/tmp/test\",\"workspace\":{\"current_dir\":\"/tmp/test\"},\"cost\":{\"total_cost_usd\":0,\"total_lines_added\":0,\"total_lines_removed\":0,\"total_api_duration_ms\":0},\"version\":\"2.1.141\",\"context_window\":{\"used_percentage\":10,\"context_window_size\":1000000},\"rate_limits\":{\"five_hour\":{\"used_percentage\":55,\"resets_at\":$five_reset},\"seven_day\":{\"used_percentage\":12,\"resets_at\":$seven_reset}}}" \
-        | HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
+        | HOME="$tmpdir" CLAUDE_DATA_DIR="$tmpdir/.claude/statusline" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
     plain=$(strip_ansi "$result")
     [[ "$plain" == *"5h[55%]"* ]]
     [[ "$plain" == *"7d[12%]"* ]]
@@ -666,13 +796,12 @@ JSON
 
 # --- smart 7d reset time (absolute, day-of-week) ---
 
-@test "build_usage_display: 7d at 30% with reset in 2d shows day of week" {
-    reset_time=$(date -u -d '+2 days' '+%Y-%m-%dT%H:%M:%SZ')
-    expected_day=$(date -d '+2 days' +%a)
+@test "build_usage_display: 7d at 30% hides reset even when imminent (gated on usage)" {
+    reset_time=$(date -u -d '+2 days' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -v+2d '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":10},\"seven_day\":{\"utilization\":30,\"resets_at\":\"$reset_time\"}}"
-    result=$(build_usage_display "$usage" "")
-    plain=$(strip_ansi "$result")
-    [[ "$plain" == *"7d[30%@${expected_day}]"* ]]
+    plain=$(strip_ansi "$(build_usage_display "$usage" "")")
+    [[ "$plain" == *"7d[30%]"* ]]
+    [[ "$plain" != *"7d[30%@"* ]]
 }
 
 @test "build_usage_display: 7d at 30% with reset in 5d hides reset" {
@@ -987,4 +1116,128 @@ JSON
     [[ "$plain" != *"cache!"* ]]
     [ "$(cat "$tmpdir/sessions/test-session-id_cache_health")" = "200000" ]
     rm -rf "$tmpdir"
+}
+
+# --- fresh-stdin-preferred quota + stale-lock reaping ----------------------
+
+@test "merge_stdin_rate_limits: fresh stdin overrides stale cached 5h/7d" {
+    stale='{"five_hour":{"utilization":100,"resets_at":"2026-06-10T11:00:00+00:00"},"seven_day":{"utilization":21}}'
+    merged=$(merge_stdin_rate_limits "$stale" 4 1781097000 1 1781107200)
+    [ "$(echo "$merged" | jq -r '.five_hour.utilization')" = "4" ]
+    [ "$(echo "$merged" | jq -r '.seven_day.utilization')" = "1" ]
+    [ "$(echo "$merged" | jq -r '.five_hour.resets_at')" = "1781097000" ]
+}
+
+@test "merge_stdin_rate_limits: preserves cache-only fields (extra_usage, opus)" {
+    stale='{"five_hour":{"utilization":100},"seven_day":{"utilization":21},"extra_usage":{"is_enabled":true,"utilization":12},"seven_day_opus":{"utilization":9}}'
+    merged=$(merge_stdin_rate_limits "$stale" 4 "" 1 "")
+    [ "$(echo "$merged" | jq -r '.extra_usage.utilization')" = "12" ]
+    [ "$(echo "$merged" | jq -r '.seven_day_opus.utilization')" = "9" ]
+}
+
+@test "merge_stdin_rate_limits: missing stdin value leaves that window untouched" {
+    stale='{"five_hour":{"utilization":100},"seven_day":{"utilization":21}}'
+    # only 5h provided; 7d should keep the cached value
+    merged=$(merge_stdin_rate_limits "$stale" 4 1781097000 "" "")
+    [ "$(echo "$merged" | jq -r '.five_hour.utilization')" = "4" ]
+    [ "$(echo "$merged" | jq -r '.seven_day.utilization')" = "21" ]
+}
+
+@test "reap_stale_lock: removes a lock older than max age" {
+    tmpdir=$(mktemp -d)
+    lock="$tmpdir/usage.lock"
+    touch "$lock"
+    touch -d '@1' "$lock" 2>/dev/null || touch -t 200001010000 "$lock"
+    reap_stale_lock "$lock" 15
+    [ ! -f "$lock" ]
+    rm -rf "$tmpdir"
+}
+
+@test "reap_stale_lock: keeps a fresh lock (fetch genuinely in flight)" {
+    tmpdir=$(mktemp -d)
+    lock="$tmpdir/usage.lock"
+    touch "$lock"
+    reap_stale_lock "$lock" 15
+    [ -f "$lock" ]
+    rm -rf "$tmpdir"
+}
+
+# --- effort badge ----------------------------------------------------------
+
+@test "abbrev_effort: levels map to compact badges" {
+    [ "$(abbrev_effort low)" = "L" ]
+    [ "$(abbrev_effort medium)" = "M" ]
+    [ "$(abbrev_effort xhigh)" = "XH" ]
+    [ "$(abbrev_effort max)" = "MAX" ]
+    [ "$(abbrev_effort ultracode)" = "ULTRA" ]
+    [ "$(abbrev_effort auto)" = "AUTO" ]
+}
+
+@test "effort_color: expensive modes warn, others dim" {
+    [ "$(effort_color max)" = "$YELLOW" ]
+    [ "$(effort_color ultracode)" = "$YELLOW" ]
+    [ "$(effort_color xhigh)" = "$DIM" ]
+    [ "$(effort_color low)" = "$DIM" ]
+}
+
+@test "integration: --test renders effort badge XH, hides default high" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    xh=$(echo '{"model":{"id":"claude-fable-5","display_name":"F"},"cwd":"/t","workspace":{"current_dir":"/t"},"version":"2.1.170","effort":{"level":"xhigh"}}' \
+        | HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
+    [[ "$(strip_ansi "$xh")" == *"fabl5 XH"* ]]
+    hi=$(echo '{"model":{"id":"claude-fable-5","display_name":"F"},"cwd":"/t","workspace":{"current_dir":"/t"},"version":"2.1.170","effort":{"level":"high"}}' \
+        | HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
+    [[ "$(strip_ansi "$hi")" != *" H"* ]]
+    rm -rf "$tmpdir"
+}
+
+# --- portable date helpers (GNU + BSD fallback) ----------------------------
+
+@test "_epoch_from_ts: passes through a bare epoch" {
+    [ "$(_epoch_from_ts 1781097000)" = "1781097000" ]
+}
+
+@test "_epoch_from_ts: parses an ISO-8601 timestamp to epoch" {
+    result=$(_epoch_from_ts "2026-06-10T13:10:01+00:00")
+    [[ "$result" =~ ^[0-9]+$ ]]
+    [ "$result" -gt 1700000000 ]
+}
+
+@test "_epoch_from_ts: empty/null yields empty" {
+    [ -z "$(_epoch_from_ts "")" ]
+    [ -z "$(_epoch_from_ts null)" ]
+}
+
+@test "_fmt_epoch: formats an epoch with a strftime pattern" {
+    result=$(_fmt_epoch 1781097000 '%H:%M')
+    [[ "$result" =~ ^[0-9]{2}:[0-9]{2}$ ]]
+}
+
+# --- 7d reset gating -------------------------------------------------------
+
+@test "build_usage_display: 7d reset hidden at low usage (no @time noise)" {
+    reset_time=$(date -u -d '+2 days' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -v+2d '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":10},\"seven_day\":{\"utilization\":1,\"resets_at\":\"$reset_time\"}}"
+    plain=$(strip_ansi "$(build_usage_display "$usage" "")")
+    [[ "$plain" == *"7d[1%]"* ]]
+    [[ "$plain" != *"7d[1%@"* ]]
+}
+
+# --- malformed-stdin degrades cleanly --------------------------------------
+
+@test "integration: empty stdin does not fabricate +/- 0m \$0" {
+    tmpdir=$(mktemp -d)
+    out=$(printf '' | HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/s" bash "$SCRIPT_DIR/statusline.sh" 2>/dev/null)
+    plain=$(strip_ansi "$out")
+    [[ "$plain" != *'$0'* ]]
+    [[ "$plain" != *'0m'* ]]
+    [[ "$plain" != *'+/-'* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: sub-cent cost is not shown as \$0" {
+    out=$(echo '{"model":{"id":"claude-fable-5","display_name":"F"},"cwd":"/t","workspace":{"current_dir":"/t"},"version":"2.1.170","cost":{"total_cost_usd":0.004}}' \
+        | bash "$SCRIPT_DIR/statusline.sh" --test)
+    [[ "$(strip_ansi "$out")" != *'$0'* ]]
 }
