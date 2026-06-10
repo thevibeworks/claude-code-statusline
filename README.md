@@ -75,16 +75,22 @@ Every component earns its place:
 
 | Signal | Why it matters |
 |--------|----------------|
-| Path and branch | Know where Claude Code is writing. Dirty branch is bright yellow. |
+| Path and branch | Know where Claude Code is writing. Neutral grey; a dirty branch brightens to white with a `*`. |
 | Activity | Session diff without opening git. |
 | Time and cost | Track long sessions. Hours format above 60m (`1h30m`). |
 | Model | Abbreviated. `claude-opus-4-8[1m]` becomes `opus4.8[1m]`, `claude-fable-5` becomes `fabl5`. On a 1M-context model, crossing 200k (the premium input-pricing band) shows absolute context in a warning color: `fabl5[1m:300k]`. |
-| Effort | Compact reasoning-effort badge: `L` / `M` / `XH` / `MAX` / `ULTRA` / `AUTO` (`high` is the default and stays hidden). `MAX` / `ULTRA` are highlighted as expensive modes; `fast` shows in fast mode. |
+| Effort | Compact lowercase badge: `lo` / `md` / `xh` / `max` / `ultra` / `auto` (`high` is the default and stays hidden). Dim for routine levels; `max` / `ultra` use the pressure color; `fast` shows in fast mode. |
 | Context bar | Merged with model. Green / yellow / red by pressure. |
-| User tier | MAX is green, PRO is cyan. Truncated display name. |
+| User tier | Neutral white-weight (MAX bold, PRO normal, dim otherwise) — identity, never a status color. Truncated display name. |
 | Quota | Integer percentages. 5h shows its reset on pressure (>= 80%) or imminent reset (<= 2h); 7d shows its reset only near the weekly cap (>= 70%). `5h[87%@14:30]` `7d[75%@Mon]`. Recovery color when imminent. |
 | Extra usage | Monthly spend, limit, prepaid balance. `--extra auto` shows when quota runs out. |
 | Cache health | Detects observed prompt-cache rebuilds and cache-read drops. `cache!` on break, `cache~` when building. If a future Claude Code stdin includes TTL breakdown, `--cache always` can show `cache:1h@14:20`; current stdin usually exposes aggregate cache tokens only. Hidden when healthy by default. |
+
+**Color follows three lanes** so a glance is unambiguous: **status**
+(green/yellow/red) = pressure *only* — quota, context, cache, the premium
+context band, expensive effort; **identity** (magenta/cyan/blue) = model family;
+everything else is **neutral** grey/white. Warm color always means "near a
+limit or cost."
 
 ## vs Built-in `/statusline`
 

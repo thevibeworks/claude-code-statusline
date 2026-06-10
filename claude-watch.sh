@@ -105,10 +105,10 @@ esac
 # --- Colors ---------------------------------------------------------------
 if [ "$use_color" = true ] && [ -t 1 ]; then
     YELLOW='\033[0;33m'; GREEN='\033[0;32m'; RED='\033[0;31m'
-    DIM='\033[2m'; CYAN='\033[0;36m'; MAGENTA='\033[0;95m'; PURPLE='\033[0;35m'
+    DIM='\033[2m'; CYAN='\033[0;36m'; MAGENTA='\033[0;95m'; PURPLE='\033[0;35m'; BLUE='\033[0;94m'
     BOLD='\033[1m'; RESET='\033[0m'
 else
-    YELLOW=''; GREEN=''; RED=''; DIM=''; CYAN=''; MAGENTA=''; PURPLE=''; BOLD=''; RESET=''
+    YELLOW=''; GREEN=''; RED=''; DIM=''; CYAN=''; MAGENTA=''; PURPLE=''; BLUE=''; BOLD=''; RESET=''
 fi
 
 # --- Pricing (mirrors ccx internal/parser/pricing.go) ---------------------
@@ -332,7 +332,7 @@ render() {
     *opus*)   mcolor="$PURPLE" ;;
     *fable*)  mcolor="$MAGENTA" ;;
     *sonnet*) mcolor="$CYAN" ;;
-    *haiku*)  mcolor="$YELLOW" ;;
+    *haiku*)  mcolor="$BLUE" ;;
     esac
 
     printf '%b━━ claude-watch ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%b\n' "$DIM" "$RESET"

@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.9.0 — 2026-06-10 — color system (three lanes)
+
+A deliberate palette redesign so a glance is unambiguous. Color follows three
+lanes:
+
+- **Status** (green/yellow/red) = pressure ONLY — quota, context, cache, the
+  premium context band, expensive effort. Warm color always means "near a limit
+  or cost."
+- **Identity** (magenta/cyan/blue) = model family only.
+- **Neutral** (grey/white by weight) = structure & you.
+
+### Changed
+
+- **Cost** moved off yellow → neutral grey (it's info, not a warning).
+- **Path** → neutral grey (was cyan, which collided with sonnet).
+- **Dirty branch** → bright white + `*` (was yellow); clean branch dim.
+- **Tier** → neutral white-weight: MAX bold white, PRO white, ENT/TEAM dim. (MAX
+  was green — collided with "quota healthy"; PRO was cyan — collided with sonnet.)
+- **Haiku** → bright blue (was a hard-to-read dark blue).
+- **Premium context cue** escalates with depth: `[1m:300k]` yellow past 200k,
+  `[1m:900k]` red past 800k.
+- `claude-watch.sh` model colors aligned (haiku → blue; opus/fable/sonnet match
+  the statusline).
+
+Net: yellow used to mean six things (dirty · cost · premium · max-effort · 5h ·
+7d). Now warm color means pressure, full stop.
+
 ## v0.8.1 — 2026-06-10 — quieter effort badge
 
 - Effort badge is now **lowercase** — `lo` / `md` / `xh` / `max` / `ultra` /

@@ -335,6 +335,12 @@ debug_log "PARSED INPUT: model=$model_display (id=$model_id) cwd=$current_dir co
 
 term_width=$(tput cols 2>/dev/null || echo 80)
 
+# Palette is organized in three lanes so a glance is unambiguous:
+#   STATUS  (green/yellow/red) — pressure ONLY: quota, context, cache, premium
+#                                band, expensive effort. Warm = "watch a limit".
+#   IDENTITY (magenta/cyan/blue) — model family only. Never status.
+#   NEUTRAL (grey/white by weight) — structure & you: path, branch, time, cost,
+#                                tier, name, routine effort.
 YELLOW='\033[0;33m'
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -344,6 +350,8 @@ DIM_RED='\033[2;31m'
 DIM_YELLOW='\033[2;33m'
 CYAN='\033[0;36m'
 DIM_CYAN='\033[2;36m'
+WHITE='\033[0;37m'
+BOLD_WHITE='\033[1;37m'
 RESET='\033[0m'
 
 # Usage quota tracking
@@ -1482,11 +1490,13 @@ build_user_info() {
         name="${name:0:7}."
     fi
 
+    # Tier is identity, not status — neutral white-weight so it never reads as
+    # a quota signal (MAX used to be green, which collided with "quota healthy").
     local tier_color="$DIM"
     case "$tier" in
-        "MAX")       tier_color="$GREEN" ;;
-        "PRO")       tier_color="$CYAN" ;;
-        "ENT"|"TEAM") tier_color="$DIM_CYAN" ;;
+        "MAX")        tier_color="$BOLD_WHITE" ;;
+        "PRO")        tier_color="$WHITE" ;;
+        "ENT"|"TEAM") tier_color="$DIM" ;;
     esac
 
     if [ -n "$tier" ] && [ -n "$name" ]; then
@@ -1543,9 +1553,9 @@ if [ -d "$current_dir/.git" ] || git -C "$current_dir" rev-parse --git-dir >/dev
     branch=$(git -C "$current_dir" branch --show-current 2>/dev/null)
     if [ -n "$branch" ]; then
         if ! git -C "$current_dir" diff-index --quiet HEAD -- 2>/dev/null; then
-            git_info=" ${YELLOW}(${branch}*)${RESET}"
+            git_info=" ${WHITE}(${branch}*)${RESET}"
         else
-            git_info=" ${DIM_YELLOW}(${branch})${RESET}"
+            git_info=" ${DIM}(${branch})${RESET}"
         fi
     fi
 fi
@@ -1575,8 +1585,9 @@ is_1m_model() {
 }
 
 # Build the [1m] context tag. Above 200k tokens a 1M-window model enters the
-# premium (higher input rate) pricing band, so surface the absolute context in
-# a warning color as a cost cue: [1m] under 200k, [1m:240k] (yellow) over it.
+# premium (higher input rate) pricing band, so surface the absolute context as
+# a cost cue and escalate the color with depth: [1m] under 200k, [1m:240k]
+# (yellow) past 200k, [1m:900k] (red) deep in the band (>800k).
 # $1 = the model's base color, so the bracket restores after the warning span.
 build_1m_tag() {
     local mcolor="$1"
@@ -1585,7 +1596,9 @@ build_1m_tag() {
         local abs=$(( context_pct * size / 100 ))
         if [ "$abs" -gt 200000 ]; then
             local k=$(( (abs + 500) / 1000 ))
-            echo "[1m:${YELLOW}${k}k${mcolor}]"
+            local cue="$YELLOW"
+            [ "$abs" -gt 800000 ] && cue="$RED"
+            echo "[1m:${cue}${k}k${mcolor}]"
             return
         fi
     fi
@@ -1641,7 +1654,7 @@ if [ -n "$configured_model" ]; then
         fi
         ;;
     "haiku"|claude-haiku-*)
-        model_color='\033[0;34m'
+        model_color='\033[0;94m'
         if [ "$local_cfg" = "haiku" ]; then
             model_text="haiku"
         else
@@ -1679,7 +1692,7 @@ else
         model_color='\033[2;36m'
         ;;
     "haiku")
-        model_color='\033[2;34m'
+        model_color='\033[2;94m'
         ;;
     "fable")
         model_color='\033[2;95m'
@@ -1842,7 +1855,7 @@ fi
 # as awk data, never program text.
 if awk -v c="${cost_usd:-0}" 'BEGIN{exit !((c+0)>=0.005)}' 2>/dev/null; then
     cost_formatted=$(printf "%.2f" "$cost_usd" | sed 's/\.00$//')
-    cost_component="${DIM_YELLOW}\$${cost_formatted}${RESET}"
+    cost_component="${DIM}\$${cost_formatted}${RESET}"
 fi
 
 add_component() {
@@ -2032,7 +2045,7 @@ for item in "${order_array[@]}"; do
 done
 
 format_output() {
-    local path_part="${DIM_CYAN}${display_path}${RESET}${git_info}"
+    local path_part="${DIM}${display_path}${RESET}${git_info}"
     local stats_part="${right_parts}"
 
     # Strip ANSI escapes for length calculation (portable: printf %b instead of echo -e)
