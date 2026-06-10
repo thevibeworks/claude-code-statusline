@@ -1773,15 +1773,16 @@ if [ -n "$context_pct" ] && [ "$context_pct" -gt 0 ] 2>/dev/null; then
     esac
 fi
 
-# Compact effort badge: L / M / XH / MAX / ULTRA / AUTO. 'high' is the default
-# and stays hidden to avoid clutter. Visual weight tracks cost — the expensive
-# modes (max, ultracode) render in a warning color so you notice you're
-# spending hard; the rest stay dim like the secondary metadata they are.
+# Compact effort badge: lo / md / xh / max / ultra / auto. Lowercase keeps it
+# quiet — it's secondary metadata, and (for xhigh users especially) it's on
+# every render. 'high' is the default and stays hidden. Color carries the
+# weight: routine levels are dim, the expensive modes (max, ultracode) render
+# in the pressure color so you notice you're spending hard (see effort_color).
 abbrev_effort() {
     case "$1" in
-        low) echo "L" ;;  medium) echo "M" ;;  high) echo "H" ;;
-        xhigh) echo "XH" ;;  max) echo "MAX" ;;
-        ultracode) echo "ULTRA" ;;  auto) echo "AUTO" ;;
+        low) echo "lo" ;;  medium) echo "md" ;;  high) echo "hi" ;;
+        xhigh) echo "xh" ;;  max) echo "max" ;;
+        ultracode) echo "ultra" ;;  auto) echo "auto" ;;
         *) echo "$1" ;;
     esac
 }

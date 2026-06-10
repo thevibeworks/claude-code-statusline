@@ -645,11 +645,11 @@ JSON
     [[ "$plain" == *"42%"* ]]
 }
 
-@test "integration: --test shows effort max as MAX badge" {
+@test "integration: --test shows effort max as max badge" {
     result=$(echo '{"model":{"id":"claude-opus-4-6[1m]","display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.141","effort":{"level":"max"}}' \
         | bash "$SCRIPT_DIR/statusline.sh" --test)
     plain=$(strip_ansi "$result")
-    [[ "$plain" == *"MAX"* ]]
+    [[ "$plain" == *"max"* ]]
 }
 
 @test "integration: --test hides default effort high" {
@@ -1165,12 +1165,12 @@ JSON
 # --- effort badge ----------------------------------------------------------
 
 @test "abbrev_effort: levels map to compact badges" {
-    [ "$(abbrev_effort low)" = "L" ]
-    [ "$(abbrev_effort medium)" = "M" ]
-    [ "$(abbrev_effort xhigh)" = "XH" ]
-    [ "$(abbrev_effort max)" = "MAX" ]
-    [ "$(abbrev_effort ultracode)" = "ULTRA" ]
-    [ "$(abbrev_effort auto)" = "AUTO" ]
+    [ "$(abbrev_effort low)" = "lo" ]
+    [ "$(abbrev_effort medium)" = "md" ]
+    [ "$(abbrev_effort xhigh)" = "xh" ]
+    [ "$(abbrev_effort max)" = "max" ]
+    [ "$(abbrev_effort ultracode)" = "ultra" ]
+    [ "$(abbrev_effort auto)" = "auto" ]
 }
 
 @test "effort_color: expensive modes warn, others dim" {
@@ -1180,15 +1180,15 @@ JSON
     [ "$(effort_color low)" = "$DIM" ]
 }
 
-@test "integration: --test renders effort badge XH, hides default high" {
+@test "integration: --test renders effort badge xh, hides default high" {
     tmpdir=$(mktemp -d)
     mkdir -p "$tmpdir/.claude"
     xh=$(echo '{"model":{"id":"claude-fable-5","display_name":"F"},"cwd":"/t","workspace":{"current_dir":"/t"},"version":"2.1.170","effort":{"level":"xhigh"}}' \
         | HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
-    [[ "$(strip_ansi "$xh")" == *"fabl5 XH"* ]]
+    [[ "$(strip_ansi "$xh")" == *"fabl5 xh"* ]]
     hi=$(echo '{"model":{"id":"claude-fable-5","display_name":"F"},"cwd":"/t","workspace":{"current_dir":"/t"},"version":"2.1.170","effort":{"level":"high"}}' \
         | HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
-    [[ "$(strip_ansi "$hi")" != *" H"* ]]
+    [[ "$(strip_ansi "$hi")" != *"hi"* ]]
     rm -rf "$tmpdir"
 }
 

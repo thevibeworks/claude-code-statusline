@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.8.1 — 2026-06-10 — quieter effort badge
+
+- Effort badge is now **lowercase** — `lo` / `md` / `xh` / `max` / `ultra` /
+  `auto` instead of `L`/`M`/`XH`/`MAX`/`ULTRA`/`AUTO`. It's secondary metadata
+  that renders on every line (especially for `xhigh` users, where it was
+  effectively always-on), so it should stay quiet. Color still carries the
+  weight: routine levels are dim; the expensive modes (`max`, `ultracode`) keep
+  the pressure color. `high` remains the hidden default.
+
 ## v0.8.0 — 2026-06-10 — Shared Account Cache, fabl5, claude-watch, quota freshness
 
 Tested against Claude Code CLI v2.1.170 (MAX and PRO accounts), Fable 5, and

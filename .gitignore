@@ -3,3 +3,6 @@ raw-stdin-*.json
 *.lock
 *.err
 sessions/
+
+# design mockups (not shipped)
+assets/palette-retheme-mockup.svg
