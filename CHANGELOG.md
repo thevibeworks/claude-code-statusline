@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.9.3 — 2026-06-11 — show the model that's actually running (critical)
+
+The displayed model came from `settings.json .model` (a static default) and
+only fell back to the stdin `model.id` when settings had none. So a session
+running Opus 4.6 while `settings.json` defaulted to `claude-fable-5[1m]` rendered
+`fabl5` — the wrong model — and worse, the **name and the context window came
+from different sources**: `fabl5` (settings) sat on top of a 200k/Opus context
+(stdin). On a 200k model mislabeled as 1M-default Fable, the context felt
+roomier than it was and the session hit the limit by surprise.
+
+### Fixed
+
+- **The displayed model is now the one the session is actually running**, read
+  from the stdin `model.id` — the same source as the context window, so the name
+  and the window can never disagree. A session that switches models mid-flight
+  (`/model`, `--model`) is tracked correctly every render.
+- **`settings.json .model` is now a fallback only** — consulted (and even read)
+  solely when stdin carries no model id. It can no longer shadow the running
+  model.
+- The stdin model path now uses the full-strength identity color (e.g. `0;95`
+  magenta for fable) instead of the old dim variant, matching the documented
+  look.
+
+### Notes
+
+- The `opusplan` settings shorthand only renders via the fallback now; with a
+  real `model.id` on stdin the badge shows the model actually in use, which is
+  more accurate per render.
+
 ## v0.9.2 — 2026-06-11 — 7d quota paced, not leveled
 
 The weekly quota color used a pure level threshold (yellow at 70%, red at 85%),

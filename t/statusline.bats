@@ -679,14 +679,40 @@ JSON
 }
 
 @test "integration: --test shows model" {
-    # Isolate HOME so a real ~/.claude/settings.json "model" override does
-    # not shadow the stdin model.id (configured_model wins by design).
     tmpdir=$(mktemp -d)
     mkdir -p "$tmpdir/.claude"
     result=$(echo '{"model":{"id":"claude-opus-4-6[1m]","display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.139"}' \
         | HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
     plain=$(strip_ansi "$result")
     [[ "$plain" == *"opus4.6[1m]"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: stdin model.id wins over settings.json .model (regression)" {
+    # The session is running opus-4-6 at a 200k window; settings.json defaults to
+    # claude-fable-5[1m]. The badge MUST show the running model (opus4.6), not the
+    # static default — and at 200k, not 1M. Regression for the fabl5-on-opus bug
+    # where the name (settings) and context (stdin) came from different sources.
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    echo '{"model":"claude-fable-5[1m]"}' > "$tmpdir/.claude/settings.json"
+    result=$(echo '{"model":{"id":"claude-opus-4-6","display_name":"Opus 4.6"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.174","context_window":{"used_percentage":86,"context_window_size":200000}}' \
+        | HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"opus4.6"* ]]
+    [[ "$plain" != *"fabl"* ]]
+    [[ "$plain" != *"[1m"* ]]   # 200k window -> no 1M tag
+    rm -rf "$tmpdir"
+}
+
+@test "integration: settings.json .model is the fallback when stdin has no id" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    echo '{"model":"opus"}' > "$tmpdir/.claude/settings.json"
+    result=$(echo '{"model":{"display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.174"}' \
+        | HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"opus"* ]]
     rm -rf "$tmpdir"
 }
 
@@ -698,8 +724,8 @@ JSON
     plain=$(strip_ansi "$result")
     [[ "$plain" == *"fabl5[1m]"* ]]
     [[ "$plain" != *"[1m:"* ]]
-    # Bright-magenta family color (95) applied to fable.
-    [[ "$result" == *$'\033[2;95m'* ]]
+    # Full-strength magenta (0;95) — identity color from the stdin model.id path.
+    [[ "$result" == *$'\033[0;95m'* ]]
     rm -rf "$tmpdir"
 }
 

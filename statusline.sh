@@ -1664,9 +1664,12 @@ if [ -d "$current_dir/.git" ] || git -C "$current_dir" rev-parse --git-dir >/dev
     fi
 fi
 
+# settings.json .model is only a fallback for the rare case stdin carries no
+# model id — it's a static default a session can override, so it must not be
+# read (let alone preferred) when stdin already tells us the running model.
 configured_model=""
 claude_config_dir="${CLAUDE_CONFIG_DIR:-$CLAUDE_HOME/.claude}"
-if [ -f "$claude_config_dir/settings.json" ]; then
+if [ -z "$model_id" ] && [ -f "$claude_config_dir/settings.json" ]; then
     configured_model=$(jq -r '.model // ""' "$claude_config_dir/settings.json" 2>/dev/null || echo "")
 fi
 
@@ -1763,7 +1766,30 @@ abbreviate_model_id() {
     esac
 }
 
-if [ -n "$configured_model" ]; then
+# PRIMARY: the model the session is actually running THIS render, from the
+# stdin model.id. This is ground truth — the same source as the context window
+# — so the name and the window can never disagree. A session can switch models
+# mid-flight (/model, --model), and stdin tracks that; settings.json cannot.
+if [ -n "$model_id" ]; then
+    base_id="${model_id%%\[*\]}"
+    abbreviated=$(abbreviate_model_id "$base_id")
+    if [ "$abbreviated" != "$base_id" ]; then
+        model_text="$abbreviated"
+    else
+        model_text="$runtime_model"
+    fi
+    # Identity lane: full-strength family color (magenta/cyan/blue).
+    case "$runtime_model" in
+    "opus")   model_color='\033[0;35m' ;;
+    "sonnet") model_color='\033[0;36m' ;;
+    "haiku")  model_color='\033[0;94m' ;;
+    # Fable shares Opus's capability group; bright magenta keeps it in the same
+    # hue family while staying distinct from opus's 0;35.
+    "fable")  model_color='\033[0;95m' ;;
+    *)        model_color='\033[0;37m' ;;
+    esac
+# FALLBACK: stdin gave no model id (rare) — fall back to the configured default.
+elif [ -n "$configured_model" ]; then
     local_cfg="${configured_model%%\[1m\]}"
     case "$local_cfg" in
     "opusplan")
@@ -1795,8 +1821,6 @@ if [ -n "$configured_model" ]; then
         fi
         ;;
     "fable"|claude-fable-*)
-        # Fable shares Opus's capability group; bright magenta keeps it in
-        # the same hue family while staying distinct from opus's 0;35.
         model_color='\033[0;95m'
         if [ "$local_cfg" = "fable" ]; then
             model_text="fable"
@@ -1807,31 +1831,6 @@ if [ -n "$configured_model" ]; then
     *)
         model_text="$local_cfg"
         model_color='\033[0;37m'
-        ;;
-    esac
-else
-    base_id="${model_id%%\[*\]}"
-    abbreviated=$(abbreviate_model_id "$base_id")
-    if [ "$abbreviated" != "$base_id" ]; then
-        model_text="$abbreviated"
-    else
-        model_text="$runtime_model"
-    fi
-    case "$runtime_model" in
-    "opus")
-        model_color='\033[2;35m'
-        ;;
-    "sonnet")
-        model_color='\033[2;36m'
-        ;;
-    "haiku")
-        model_color='\033[2;94m'
-        ;;
-    "fable")
-        model_color='\033[2;95m'
-        ;;
-    *)
-        model_color='\033[2;37m'
         ;;
     esac
 fi
