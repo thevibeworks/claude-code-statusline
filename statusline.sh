@@ -656,6 +656,9 @@ fetch_usage_for_session() {
         rm -f "$err_file"
         cat "$cache_file"
         log_usage_snapshot "$session_id" "$body" "$token"
+        # Hourly-gated internally; piggybacks on the TTL-gated fetch path so
+        # renders never pay the history scan.
+        build_seven_day_profile
         return 0
     else
         debug_log "fetch_usage_for_session: API failed (code: $http_code)"
@@ -760,6 +763,7 @@ log_usage_snapshot() {
     mkdir -p "$CLAUDE_ACCOUNT_DIR"
     local usage_log="$CLAUDE_ACCOUNT_DIR/usage.jsonl"
     debug_log "log_usage_snapshot: session=$session_id"
+    rotate_usage_log "$usage_log"
 
     detect_session_boundary "$session_id" "$usage_data"
 
@@ -1413,6 +1417,154 @@ get_seven_day_color() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# 7d forecast: learn the user's weekday burn signature from usage.jsonl and
+# project whether the remaining quota survives the remaining days. The pace
+# model (above) only knows the window average; the profile knows that YOUR
+# Tuesday burns 27%/day while YOUR Saturday burns 5%/day, so it can warn on a
+# quiet Friday about next week — and stay quiet before a light weekend.
+#
+# All day math is epoch arithmetic (no awk strftime/mktime — GNU-only):
+#   local_day = (epoch + tz_offset) / 86400;  dow = (local_day + 4) % 7
+# with 0=Sun..6=Sat (epoch day 0 was a Thursday). Snapshots are partitioned by
+# account uuid — usage.jsonl interleaves accounts and mixing them produces
+# garbage burn rates (observed: 9000%/day). Plan changes rescale utilization%,
+# so days are EWMA-weighted with a 14-day half-life: old scales fade away.
+# ---------------------------------------------------------------------------
+
+USAGE_LOG_MAX_BYTES="${USAGE_LOG_MAX_BYTES:-33554432}"  # 32 MiB cap
+
+# Rotate usage.jsonl when it exceeds the cap. Single .1 backup; the profile
+# builder reads .1 + current, so rotation never costs learned history.
+rotate_usage_log() {
+    local f="$1"
+    [ -f "$f" ] || return 0
+    local size
+    size=$(stat -c %s "$f" 2>/dev/null || stat -f %z "$f" 2>/dev/null || echo 0)
+    [ "$size" -lt "$USAGE_LOG_MAX_BYTES" ] 2>/dev/null && return 0
+    local rot_lock="${f}.rotate.lock"
+    if mkdir "$rot_lock" 2>/dev/null; then
+        mv -f "$f" "${f}.1" 2>/dev/null
+        rmdir "$rot_lock" 2>/dev/null
+    fi
+}
+
+# Rebuild forecast.cache from usage.jsonl (at most hourly; called from the
+# fetch path, which is itself TTL-gated). Output: one small JSON the renders
+# can read for free:
+#   { computed_at, days_history, recent_24h, recent_48h,
+#     weekday_profile: {"0":sun.. "6":sat, unknown days = -1} }
+# Daily burn = sum of positive deltas of seven_day.utilization within a local
+# calendar day (negative deltas = window reset; ignored by construction).
+build_seven_day_profile() {
+    local jsonl="$CLAUDE_ACCOUNT_DIR/usage.jsonl"
+    local out="$CLAUDE_ACCOUNT_DIR/forecast.cache"
+    [ -f "$jsonl" ] || return 0
+    local acct
+    acct=$(jq -r '.account.uuid // empty' "$CLAUDE_ACCOUNT_DIR/profile.cache" 2>/dev/null)
+    [ -n "$acct" ] || return 0
+    if [ -f "$out" ]; then
+        local computed age
+        computed=$(jq -r '.computed_at // 0' "$out" 2>/dev/null)
+        age=$(( $(date +%s) - ${computed:-0} ))
+        [ "$age" -lt 3600 ] 2>/dev/null && return 0
+    fi
+    local now tzoff_s
+    now=$(date +%s)
+    # ±HHMM -> signed seconds (portable; date +%z works on GNU and BSD)
+    tzoff_s=$(date +%z | awk '{ s=substr($0,1,1)=="-"?-1:1; h=substr($0,2,2)+0; m=substr($0,4,2)+0; print s*(h*3600+m*60) }')
+    local data
+    data=$( { cat "${jsonl}.1" 2>/dev/null; cat "$jsonl"; } | jq -r --arg a "$acct" '
+            select((.user.uuid // "") == $a)
+            | [.timestamp, (.seven_day.utilization // empty)] | @tsv' 2>/dev/null \
+        | sort -n | awk -F'\t' -v now="$now" -v tz="$tzoff_s" '
+        $2 != "" {
+            if (prev_set && $2 > prev) {
+                d = $2 - prev
+                day = int(($1 + tz) / 86400)
+                burn[day] += d
+                if (now - $1 <= 86400)  r24 += d
+                if (now - $1 <= 172800) r48 += d
+            }
+            prev = $2; prev_set = 1
+        }
+        END {
+            today = int((now + tz) / 86400)
+            for (day in burn) {
+                age = today - day; if (age < 0) age = 0
+                w = exp(-0.0495 * age)            # half-life 14 days
+                dw = (day + 4) % 7                # 0=Sun .. 6=Sat
+                num[dw] += burn[day] * w; den[dw] += w
+                ndays++
+            }
+            printf "{\"computed_at\":%d,\"days_history\":%d,", now, ndays
+            printf "\"recent_24h\":%.2f,\"recent_48h\":%.2f,", r24, r48
+            printf "\"weekday_profile\":{"
+            sep = ""
+            for (i = 0; i <= 6; i++) {
+                p = (den[i] > 0) ? num[i] / den[i] : -1
+                printf "%s\"%d\":%.2f", sep, i, p; sep = ","
+            }
+            printf "}}\n"
+        }')
+    if [ -n "$data" ]; then
+        printf '%s\n' "$data" >"${out}.tmp.$$" 2>/dev/null && mv -f "${out}.tmp.$$" "$out"
+        debug_log "build_seven_day_profile: rebuilt ($(echo "$data" | jq -r '.days_history') days, acct=${acct:0:8})"
+    fi
+}
+
+# Project the remaining window day-by-day against the learned profile and
+# echo "<level> <dry_gap_hours>" when the quota dries up BEFORE the reset
+# ("you will be out of usage while days still remain"). Empty output = no
+# verdict (no cache, cold start < 14 days of history, or quota outlasts the
+# window). The first 24h of the walk burns at max(profile, recent_24h) so a
+# hot streak escalates before the weekday average catches up (L1 blend).
+seven_day_forecast() {
+    local used="$1" secs_left="$2"
+    local fc="$CLAUDE_ACCOUNT_DIR/forecast.cache"
+    [ -f "$fc" ] || return 0
+    [ -n "$secs_left" ] && [ "$secs_left" -gt 0 ] 2>/dev/null || return 0
+    local used_int
+    used_int=$(printf '%.0f' "$used" 2>/dev/null || echo 0)
+    [ "$used_int" -gt 0 ] 2>/dev/null || return 0
+    local now tzoff_s
+    now=$(date +%s)
+    tzoff_s=$(date +%z | awk '{ s=substr($0,1,1)=="-"?-1:1; h=substr($0,2,2)+0; m=substr($0,4,2)+0; print s*(h*3600+m*60) }')
+    jq -r '[.days_history, .recent_24h,
+            .weekday_profile["0"], .weekday_profile["1"], .weekday_profile["2"],
+            .weekday_profile["3"], .weekday_profile["4"], .weekday_profile["5"],
+            .weekday_profile["6"]] | @tsv' "$fc" 2>/dev/null \
+    | awk -F'\t' -v used="$used_int" -v left="$secs_left" -v now="$now" -v tz="$tzoff_s" '
+    {
+        ndays = $1 + 0; r24 = $2 + 0
+        for (i = 0; i <= 6; i++) prof[i] = $(i + 3) + 0
+        if (ndays < 14) exit               # cold start: not enough history
+        # fallback rate for never-seen weekdays: mean of known ones
+        known = 0; sum = 0
+        for (i = 0; i <= 6; i++) if (prof[i] >= 0) { sum += prof[i]; known++ }
+        if (known == 0) exit
+        fb = sum / known
+        remaining = 100 - used
+        t = now; end = now + left; burned = 0
+        while (t < end) {
+            day = int((t + tz) / 86400)
+            day_end = (day + 1) * 86400 - tz
+            step = (day_end < end ? day_end : end) - t
+            rate = prof[(day + 4) % 7]; if (rate < 0) rate = fb
+            if (t - now < 86400 && r24 > rate) rate = r24   # L1 blend
+            add = rate * step / 86400.0
+            if (burned + add >= remaining && rate > 0) {
+                dry = t + (remaining - burned) / rate * 86400.0
+                gap_h = (end - dry) / 3600.0
+                level = (gap_h >= 48 || used >= 90) ? "red" : "yellow"
+                printf "%s %d\n", level, int(gap_h)
+                exit
+            }
+            burned += add; t = day_end
+        }
+    }'
+}
+
 build_usage_display() {
     local usage_data="$1"
     local user_tier="${2:-}"  # MAX, PRO, ENT, TEAM, or empty
@@ -1484,9 +1636,22 @@ build_usage_display() {
         esac
 
         # seven_day_pace also returns runway-days and a hint flag; only the
-        # level drives the display (see comment below on why no runway text).
+        # level drives the display (no runway text — every compact rendering
+        # of "days of quota left" was misread as days until reset).
         local sev_level sev_runway sev_hint
         read -r sev_level sev_runway sev_hint <<<"$(seven_day_pace "$seven_int" "$reset_secs" "$deadline_secs")"
+
+        # Learned forecast (weekday profile + recent burn) can escalate the
+        # verdict: it knows YOUR heavy days are still ahead when the plain
+        # window-average looks calm. Worst of the two levels wins.
+        local fc_level fc_gap
+        read -r fc_level fc_gap <<<"$(seven_day_forecast "$seven_int" "$reset_secs")"
+        if [ "$fc_level" = "red" ]; then
+            sev_level="red"
+        elif [ "$fc_level" = "yellow" ] && [ "$sev_level" = "green" ]; then
+            sev_level="yellow"
+        fi
+
         local color="$GREEN"
         case "$sev_level" in red) color="$RED";; yellow) color="$YELLOW";; esac
 
@@ -1496,21 +1661,22 @@ build_usage_display() {
             color="$DIM_GREEN"
         fi
 
-        # No derived runway number in the badge: every compact rendering of
-        # "days of quota left at this burn" (~2d, 2d!) was misread as days
-        # until reset — a second time-unit next to a 7d metric cannot win.
-        # The pace verdict is carried by color alone; the @reset deadline
-        # below is the only number, and it's a fact, not a model.
-
-        # @reset deadline only when it's the binding constraint: relief is near
-        # (<= 3d) AND there's pressure (pace warns, or usage already high). At
-        # low/on-pace usage a 7d clock is just noise, so it stays hidden.
+        # Under pressure, be explicit about how long the window still has to
+        # run: @Nd / @Nh REMAINING (timezone-proof, unlike a day name). Shown
+        # whenever the verdict warns — abnormal burn 5 days out included —
+        # or usage is already high. On-pace badges stay a bare 7d[NN%].
         local reset_suffix=""
-        if [ -n "$seven_reset" ] && [ -n "$reset_secs" ] \
-           && [ "$reset_secs" -le $SEVEN_DAY_COUNTDOWN_SECS ] 2>/dev/null \
+        if [ -n "$reset_secs" ] && [ "$reset_secs" -gt 0 ] 2>/dev/null \
            && { [ "$sev_level" != "green" ] || [ "$seven_int" -ge 85 ] 2>/dev/null; }; then
-            local abs=$(format_reset_absolute "$seven_reset" "day")
-            [ -n "$abs" ] && reset_suffix="${DIM}@${abs}${color}"
+            local rem=""
+            if [ "$reset_secs" -ge 86400 ]; then
+                rem="$(( reset_secs / 86400 ))d"
+            elif [ "$reset_secs" -ge 3600 ]; then
+                rem="$(( reset_secs / 3600 ))h"
+            else
+                rem="<1h"
+            fi
+            reset_suffix="${DIM}@${rem}${color}"
         fi
         parts+=("${DIM}7d${color}[${seven_int}%${reset_suffix}]${RESET}")
     fi
@@ -1753,43 +1919,30 @@ is_1m_model() {
     [[ "$model_id" == *"[1m]"* ]] || is_default_1m_family "$model_id"
 }
 
-# Build the [1m] context tag. Above 200k tokens a 1M-window model enters the
-# premium (higher input rate) pricing band, so surface the absolute context as
-# a cost cue and escalate the color with depth: [1m] under 200k, [1m:240k]
-# (yellow) past 200k, [1m:900k] (red) deep in the band (>800k).
-#
-# The premium-band trigger prefers the CLI's authoritative exceeds_200k flag
-# (immune to our context-size detection) and falls back to the computed
-# absolute when that flag is absent. If the band is flagged but we can't derive
-# a number (no context_pct), degrade to [1m:200k+] rather than dropping the cue.
-# $1 = the model's base color, so the bracket restores after the warning span.
-build_1m_tag() {
-    local mcolor="$1"
+# Premium pricing band for 1M-window models: above 200k tokens the input rate
+# is higher. The cue lives in the CONTEXT BAR's color (not extra text — the
+# absolute NNNk was redundant with the bar's own percentage): yellow past 200k,
+# red past 800k. Echoes 0 (none) / 1 (yellow) / 2 (red).
+# Prefers the CLI's authoritative exceeds_200k flag, falls back to pct × size.
+premium_band_level() {
     local size="${ctx_size:-1000000}"
     local abs=""
     if [ -n "$context_pct" ] && [ "$size" -gt 0 ] 2>/dev/null; then
         abs=$(( context_pct * size / 100 ))
     fi
-    local in_band=""
-    if [ "$exceeds_200k" = "true" ]; then
-        in_band=1
+    if [ -n "$abs" ] && [ "$abs" -gt 800000 ] 2>/dev/null; then
+        echo 2
+    elif [ "$exceeds_200k" = "true" ]; then
+        echo 1
     elif [ -n "$abs" ] && [ "$abs" -gt 200000 ] 2>/dev/null; then
-        in_band=1
+        echo 1
+    else
+        echo 0
     fi
-    if [ -n "$in_band" ]; then
-        # Show the precise NNNk only when our own number agrees it's past 200k;
-        # if the flag fired but the computed number is below 200k (or absent),
-        # the number is untrustworthy — show 200k+ rather than contradict it.
-        if [ -n "$abs" ] && [ "$abs" -gt 200000 ] 2>/dev/null; then
-            local k=$(( (abs + 500) / 1000 ))
-            local cue="$YELLOW"
-            [ "$abs" -gt 800000 ] && cue="$RED"
-            echo "[1m:${cue}${k}k${mcolor}]"
-        else
-            echo "[1m:${YELLOW}200k+${mcolor}]"
-        fi
-        return
-    fi
+}
+
+# The [1m] tag itself is now constant — band pressure is the bar's job.
+build_1m_tag() {
     echo "[1m]"
 }
 
@@ -1913,10 +2066,9 @@ elif [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
     fi
 fi
 
-# Append the 1M-context tag now that context_pct is known, so the tag can flag
-# the >200k premium pricing band (see build_1m_tag).
+# Append the constant 1M-context tag; premium-band pressure colors the bar.
 if is_1m_model; then
-    model_text="${model_text}$(build_1m_tag "$model_color")"
+    model_text="${model_text}$(build_1m_tag)"
 fi
 
 if [ -n "$context_pct" ] && [ "$context_pct" -gt 0 ] 2>/dev/null; then
@@ -1926,6 +2078,18 @@ if [ -n "$context_pct" ] && [ "$context_pct" -gt 0 ] 2>/dev/null; then
         bar_color='\033[0;33m'
     else
         bar_color='\033[0;32m'
+    fi
+
+    # Premium pricing band (1M models, >200k tokens) escalates the bar color:
+    # the bar % alone looks calm (320k = 32%) while every request in the band
+    # bills at the premium input rate. Yellow in the band, red past 800k.
+    if is_1m_model; then
+        band=$(premium_band_level)
+        if [ "$band" = "2" ]; then
+            bar_color='\033[0;31m'
+        elif [ "$band" = "1" ] && [ "$bar_color" = '\033[0;32m' ]; then
+            bar_color='\033[0;33m'
+        fi
     fi
 
     case "$progress_bar_style" in

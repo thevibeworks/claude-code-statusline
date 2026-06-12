@@ -240,6 +240,75 @@ render_quota() {
     printf '%b\n' "$out"
 }
 
+# --- Render learned 7d forecast (statusline.sh maintains forecast.cache) ---
+# Walks the remaining window against the per-weekday burn profile and shows
+# the projected dry point when the quota won't outlast the window. Day math is
+# epoch arithmetic (dow = (local_day + 4) % 7, 0=Sun) — no GNU strftime needed.
+render_forecast() {
+    local fc="$CLAUDE_ACCOUNT_DIR/forecast.cache"
+    local cache="$CLAUDE_ACCOUNT_DIR/usage.cache"
+    [ -f "$fc" ] && [ -f "$cache" ] || return 0
+
+    local seven seven_reset
+    eval "$(jq -r '
+        @sh "seven=\(.seven_day.utilization // "")",
+        @sh "seven_reset=\(.seven_day.resets_at // "")"
+    ' "$cache" 2>/dev/null)"
+    [ -n "$seven" ] && [ -n "$seven_reset" ] || return 0
+
+    local now reset_epoch tzoff_s
+    now=$(date +%s)
+    case "$seven_reset" in
+    (*[!0-9]*) reset_epoch=$(date -d "${seven_reset%%.*}" +%s 2>/dev/null \
+                  || date -j -f '%Y-%m-%dT%H:%M:%S' "${seven_reset%%.*}" +%s 2>/dev/null) ;;
+    (*) reset_epoch="$seven_reset" ;;
+    esac
+    [ -n "$reset_epoch" ] && [ "$reset_epoch" -gt "$now" ] 2>/dev/null || return 0
+    tzoff_s=$(date +%z | awk '{ s=substr($0,1,1)=="-"?-1:1; h=substr($0,2,2)+0; m=substr($0,4,2)+0; print s*(h*3600+m*60) }')
+
+    jq -r '[.days_history, .recent_24h,
+            .weekday_profile["0"], .weekday_profile["1"], .weekday_profile["2"],
+            .weekday_profile["3"], .weekday_profile["4"], .weekday_profile["5"],
+            .weekday_profile["6"]] | @tsv' "$fc" 2>/dev/null \
+    | awk -F'\t' -v used="$(printf '%.0f' "$seven")" -v now="$now" -v end="$reset_epoch" -v tz="$tzoff_s" \
+          -v G="$GREEN" -v Y="$YELLOW" -v R="$RED" -v D="$DIM" -v X="$RESET" -v B="$BOLD" '
+    {
+        ndays = $1 + 0; r24 = $2 + 0
+        split("Su Mo Tu We Th Fr Sa", DN, " ")
+        for (i = 0; i <= 6; i++) prof[i] = $(i + 3) + 0
+        if (ndays < 14) { printf "%sforecast%s %slearning (%d/14 days of history)%s\n", B, X, D, ndays, X; exit }
+        known = 0; sum = 0
+        for (i = 0; i <= 6; i++) if (prof[i] >= 0) { sum += prof[i]; known++ }
+        if (known == 0) exit
+        fb = sum / known
+        remaining = 100 - used
+        t = now; burned = 0; dry = 0
+        while (t < end) {
+            day = int((t + tz) / 86400)
+            day_end = (day + 1) * 86400 - tz
+            step = (day_end < end ? day_end : end) - t
+            rate = prof[(day + 4) % 7]; if (rate < 0) rate = fb
+            if (t - now < 86400 && r24 > rate) rate = r24
+            add = rate * step / 86400.0
+            if (burned + add >= remaining && rate > 0) { dry = t + (remaining - burned) / rate * 86400.0; break }
+            burned += add; t = day_end
+        }
+        line = sprintf("%sforecast%s ", B, X)
+        if (dry > 0) {
+            ddow = DN[int((dry + tz) / 86400 + 4) % 7 + 1]
+            gap_d = (end - dry) / 86400.0
+            c = (gap_d >= 2 || used >= 90) ? R : Y
+            line = line sprintf("%sdry ~%s (%.1fd before reset)%s", c, ddow, gap_d, X)
+        } else {
+            line = line sprintf("%squota outlasts the window%s", G, X)
+        }
+        line = line sprintf("  %sprofile/d", D)
+        for (i = 1; i <= 7; i++) { j = i % 7; if (prof[j] >= 0) line = line sprintf(" %s%.0f", DN[j+1], prof[j]) }
+        line = line sprintf(" (ewma %%)%s", X)
+        print line
+    }'
+}
+
 # --- Render one snapshot --------------------------------------------------
 render() {
     local tp="$1"
@@ -355,6 +424,7 @@ render() {
         "$DIM" "$RESET" "$(fmt_int "$tot_cc")"
     echo
     render_quota
+    render_forecast
     printf '%b%s%b\n' "$DIM" "$tp" "$RESET"
     if [ -z "$(lookup_pricing "$model")" ]; then
         printf '%b! cost n/a: no list price for "%s"%b\n' "$YELLOW" "$model" "$RESET"

@@ -66,7 +66,7 @@ Then add to `~/.claude/settings.json`:
 ## What It Shows
 
 ```text
-project (main*)  +84/-14 1h30m $6.72 opus4.8[1m][███░░░26%] cache:1h@14:20~ [MAX|you] 5h[87%@14:30] 7d[75%@Mon] ex[$16.29/$200 8% bal$4.66]
+project (main*)  +84/-14 1h30m $6.72 opus4.8[1m][███░░░26%] cache:1h@14:20~ [MAX|you] 5h[87%@14:30] 7d[75%@2d] ex[$16.29/$200 8% bal$4.66]
    |       |       |      |     |       |                        |                 |              |             |              |
  path   branch   edits   time  cost   model+context             cache             user         5h quota      7d quota      extra usage
 ```
@@ -78,11 +78,11 @@ Every component earns its place:
 | Path and branch | Know where Claude Code is writing. Neutral grey; a dirty branch brightens to white with a `*`. |
 | Activity | Session diff without opening git. |
 | Time and cost | Track long sessions. Hours format above 60m (`1h30m`). |
-| Model | Abbreviated: `claude-opus-4-8` becomes `opus4.8`, `claude-fable-5` becomes `fabl5`. The `[1m]` tag marks a 1M-context session, detected from the window the CLI reports (`context_window_size`) — not the name — so it shows even when Claude Code strips the `[1m]` suffix (which it does since 2.1.173 whenever 1M is the default). On any 1M model, crossing 200k (the premium input-pricing band) shows absolute context in a warning color: `fabl5[1m:300k]` (yellow), deepening to red past 800k. |
+| Model | Abbreviated: `claude-opus-4-8` becomes `opus4.8`, `claude-fable-5` becomes `fabl5`. The `[1m]` tag marks a 1M-context session, detected from the window the CLI reports (`context_window_size`) — not the name — so it shows even when Claude Code strips the `[1m]` suffix (which it does since 2.1.173 whenever 1M is the default). |
 | Effort | Compact lowercase badge: `lo` / `md` / `xh` / `max` / `ultra` / `auto` (`high` is the default and stays hidden). Dim for routine levels; `max` / `ultra` use the pressure color; `fast` shows in fast mode. |
-| Context bar | Merged with model. Green / yellow / red by pressure. |
+| Context bar | Merged with model. Green / yellow / red by window pressure. On 1M models the bar also carries the premium input-pricing band: yellow past 200k tokens, red past 800k — the % alone looks calm (320k = 32%) while every request bills at the premium rate. |
 | User tier | Neutral white-weight (MAX bold, PRO normal, dim otherwise) — identity, never a status color. Truncated display name. |
-| Quota | Integer percentages. 5h shows its reset on pressure (>= 80%) or imminent reset (<= 2h). **7d is paced, not leveled**: the color asks "will the quota outlast the window?" — a moderate % early can warn (burning too fast) while a high % late stays calm (will make it). The verdict is color alone; under pressure the `@reset` deadline appears: `7d[40%]` yellow (early overshoot), `7d[70%]` green (late, safe), `7d[95%@Mon]` red. Recovery color when reset is imminent. |
+| Quota | Integer percentages. 5h shows its reset on pressure (>= 80%) or imminent reset (<= 2h). **7d is forecast, not leveled**: a learned per-weekday burn profile (EWMA over your own usage history) plus your recent 24h burn project whether the quota outlasts the window — your heavy Tuesday counts more than a generic average. The verdict is color alone; under pressure the badge shows explicit time remaining in the window: `7d[44%@5d]` red means "at your pace, dry days before the reset 5 days from now". Cold start (<14 days history) falls back to window-average pacing. Recovery color when reset is imminent. |
 | Extra usage | Monthly spend, limit, prepaid balance. `--extra auto` shows when quota runs out. |
 | Cache health | Detects observed prompt-cache rebuilds and cache-read drops. `cache!` on break, `cache~` when building. If a future Claude Code stdin includes TTL breakdown, `--cache always` can show `cache:1h@14:20`; current stdin usually exposes aggregate cache tokens only. Hidden when healthy by default. |
 
@@ -207,12 +207,15 @@ model  opus4.8  turns 412  2026-06-09T11:42:08Z
 last turn  $0.67  in 319  out 21,274  c-read 132,952  c-make 10,960
 session   $4.91  in 9,044  out 72,837  c-read 6,062,353  c-make 1,879,467
 
-quota  5h 36%  7d 15%  extra $16.29/$200 8%  (12s ago)
+quota  5h 36%  7d 44%  extra $16.29/$200 8%  (12s ago)
+forecast dry ~Mo (2.4d before reset)  profile/d Mo12 Tu16 We15 Th15 Fr9 Sa6 Su10 (ewma %)
 ```
 
-It reads three things, all read-only: the session transcript (per-turn token
-usage), the shared account usage cache (5h / 7d / extra quota), and
-`usage.jsonl`. By default it picks the most recently modified transcript for the
+It reads four things, all read-only: the session transcript (per-turn token
+usage), the shared account usage cache (5h / 7d / extra quota), `usage.jsonl`,
+and `forecast.cache` (the learned per-weekday burn profile statusline.sh
+maintains — the forecast line projects when your quota runs dry at your own
+pace and stays quiet when it outlasts the window). By default it picks the most recently modified transcript for the
 current directory's project.
 
 ```bash

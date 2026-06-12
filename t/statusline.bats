@@ -517,6 +517,145 @@ JSON
     [ $(( result % 86400 )) -eq 0 ]
 }
 
+# --- 7d learned forecast (weekday profile from usage.jsonl) ----------------
+
+# Synthetic history: every local day burns +20% for account A (10 -> 30, then
+# back to 10 next day: the negative midnight delta is a window reset and must
+# be ignored). Account B burns +60/day and must be filtered out entirely.
+_write_forecast_fixture() {
+    local dir="$1" now days="$2"
+    now=$(date +%s)
+    echo '{"account":{"uuid":"acct-A"}}' > "$dir/profile.cache"
+    : > "$dir/usage.jsonl"
+    local d ts
+    for (( d = days; d >= 1; d-- )); do
+        ts=$(( now - d * 86400 ))
+        printf '{"timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":10}}\n' "$ts"
+        printf '{"timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":22}}\n' "$(( ts + 14400 ))"
+        printf '{"timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":30}}\n' "$(( ts + 28800 ))"
+        printf '{"timestamp":%s,"user":{"uuid":"acct-B"},"seven_day":{"utilization":20}}\n' "$(( ts + 1000 ))"
+        printf '{"timestamp":%s,"user":{"uuid":"acct-B"},"seven_day":{"utilization":80}}\n' "$(( ts + 30000 ))"
+    done >> "$dir/usage.jsonl"
+}
+
+@test "build_seven_day_profile: learns per-weekday burn, filters by account" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    _write_forecast_fixture "$tmpdir" 21
+    build_seven_day_profile
+    [ -f "$tmpdir/forecast.cache" ]
+    days=$(jq -r '.days_history' "$tmpdir/forecast.cache")
+    [ "$days" -ge 14 ]
+    # Account A burns 20/day; B's 60/day must not leak in. Allow EWMA rounding.
+    mon=$(jq -r '.weekday_profile["1"]' "$tmpdir/forecast.cache")
+    awk -v p="$mon" 'BEGIN{exit !(p >= 19 && p <= 21)}'
+    rm -rf "$tmpdir"
+}
+
+@test "build_seven_day_profile: hourly gate skips rebuild" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    _write_forecast_fixture "$tmpdir" 16
+    build_seven_day_profile
+    first=$(jq -r '.computed_at' "$tmpdir/forecast.cache")
+    sleep 1
+    build_seven_day_profile
+    [ "$(jq -r '.computed_at' "$tmpdir/forecast.cache")" = "$first" ]
+    rm -rf "$tmpdir"
+}
+
+_write_profile_cache() { # $1=dir $2=days_history $3=rate_all_days $4=recent24
+    cat > "$1/forecast.cache" <<EOF
+{"computed_at":$(date +%s),"days_history":$2,"recent_24h":$4,"recent_48h":0,
+ "weekday_profile":{"0":$3,"1":$3,"2":$3,"3":$3,"4":$3,"5":$3,"6":$3}}
+EOF
+}
+
+@test "seven_day_forecast: warns when learned burn dries quota before reset" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    # 20%/day uniform, 43% used, reset in 4d: remaining 57% lasts ~2.9d -> dry
+    # ~1.1d before reset (gap < 48h) -> yellow.
+    _write_profile_cache "$tmpdir" 21 20 0
+    read -r level gap <<<"$(seven_day_forecast 43 345600)"
+    [ "$level" = "yellow" ]
+    rm -rf "$tmpdir"
+}
+
+@test "seven_day_forecast: red when dry days before reset" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    # 30%/day, 50% used, reset in 5d: dry in ~1.7d, gap ~3.3d (>= 48h) -> red.
+    _write_profile_cache "$tmpdir" 21 30 0
+    read -r level gap <<<"$(seven_day_forecast 50 432000)"
+    [ "$level" = "red" ]
+    [ "$gap" -ge 48 ]
+    rm -rf "$tmpdir"
+}
+
+@test "seven_day_forecast: silent when the quota outlasts the window" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    # 5%/day, 43% used, 5d left: burns ~25% more, never dries.
+    _write_profile_cache "$tmpdir" 21 5 0
+    [ -z "$(seven_day_forecast 43 432000)" ]
+    rm -rf "$tmpdir"
+}
+
+@test "seven_day_forecast: silent on cold start (<14 days history)" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    _write_profile_cache "$tmpdir" 5 30 0
+    [ -z "$(seven_day_forecast 50 432000)" ]
+    rm -rf "$tmpdir"
+}
+
+@test "seven_day_forecast: recent 24h burn escalates over a calm profile (L1)" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    # Profile says 5%/day (calm) but the last 24h burned 40%: 70% used with 3d
+    # left dries within the first day at the hot rate -> warns.
+    _write_profile_cache "$tmpdir" 21 5 40
+    read -r level gap <<<"$(seven_day_forecast 70 259200)"
+    [ "$level" = "red" ]
+    rm -rf "$tmpdir"
+}
+
+@test "seven_day_forecast: no cache file means no verdict" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    [ -z "$(seven_day_forecast 50 432000)" ]
+    rm -rf "$tmpdir"
+}
+
+# --- premium band -> bar color ---------------------------------------------
+
+@test "premium_band_level: yellow band over 200k, red past 800k" {
+    ctx_size=1000000 exceeds_200k=false
+    context_pct=15; [ "$(premium_band_level)" = "0" ]
+    context_pct=30; [ "$(premium_band_level)" = "1" ]
+    context_pct=82; [ "$(premium_band_level)" = "2" ]
+}
+
+@test "premium_band_level: authoritative exceeds flag wins at low pct" {
+    ctx_size=1000000 context_pct=15 exceeds_200k=true
+    [ "$(premium_band_level)" = "1" ]
+}
+
+@test "premium_band_level: 200k window never enters the band" {
+    ctx_size=200000 context_pct=90 exceeds_200k=false
+    [ "$(premium_band_level)" = "0" ]
+}
+
+@test "build_usage_display: pace pressure shows explicit @Nd remaining" {
+    # 75% used, reset in ~5d (=> ~2d elapsed, way over pace): the reset
+    # distance appears as days-remaining even though reset is far away.
+    reset_time=$(date -u -d '+5 days 2 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":10},\"seven_day\":{\"utilization\":75,\"resets_at\":\"$reset_time\"}}"
+    plain=$(strip_ansi "$(build_usage_display "$usage" "")")
+    [[ "$plain" == *"7d[75%@5d]"* ]]
+}
+
 # --- get_adaptive_ttl ---
 
 @test "get_adaptive_ttl: low usage = 5 min" {
@@ -729,16 +868,29 @@ JSON
     rm -rf "$tmpdir"
 }
 
-@test "integration: --test flags premium band as [1m:NNNk] over 200k" {
+@test "integration: premium band colors the context bar yellow (no :NNNk text)" {
     tmpdir=$(mktemp -d)
     mkdir -p "$tmpdir/.claude"
-    # 30% of a 1M window = 300k tokens, past the 200k premium boundary.
+    # 30% of a 1M window = 300k tokens, past the 200k premium boundary. The
+    # band is the BAR's color now; the tag stays a constant [1m] (the absolute
+    # NNNk was redundant with the bar percentage).
     result=$(echo '{"model":{"id":"claude-fable-5[1m]","display_name":"Fable 5 (1M context)"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.170","context_window":{"used_percentage":30,"context_window_size":1000000}}' \
         | HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
     plain=$(strip_ansi "$result")
-    [[ "$plain" == *"fabl5[1m:300k]"* ]]
-    # Premium cue carries the warning (yellow 0;33) color.
-    [[ "$result" == *$'\033[0;33m'*"300k"* ]]
+    [[ "$plain" == *"fabl5[1m]"* ]]
+    [[ "$plain" != *"[1m:"* ]]
+    # Bar (30% would be green) escalated to warning yellow by the band.
+    [[ "$result" == *$'\033[0;33m'*"30%"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: deep premium band (>800k) colors the context bar red" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    result=$(echo '{"model":{"id":"claude-fable-5","display_name":"Fable 5"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.174","exceeds_200k_tokens":true,"context_window":{"used_percentage":82,"context_window_size":1000000}}' \
+        | HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
+    # 82% of 1M = 820k: deep band forces red even though pct < 85 threshold.
+    [[ "$result" == *$'\033[0;31m'*"82%"* ]]
     rm -rf "$tmpdir"
 }
 
@@ -762,7 +914,9 @@ JSON
     result=$(echo '{"model":{"id":"claude-fable-5","display_name":"Fable 5"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.174","context_window":{"used_percentage":30,"context_window_size":1000000}}' \
         | HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
     plain=$(strip_ansi "$result")
-    [[ "$plain" == *"fabl5[1m:300k]"* ]]
+    [[ "$plain" == *"fabl5[1m]"* ]]
+    [[ "$plain" != *"[1m:"* ]]
+    [[ "$result" == *$'\033[0;33m'*"30%"* ]]
     rm -rf "$tmpdir"
 }
 
@@ -775,7 +929,9 @@ JSON
     result=$(echo '{"model":{"id":"claude-fable-5","display_name":"Fable 5"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.174","exceeds_200k_tokens":true,"context_window":{"used_percentage":15,"context_window_size":1000000}}' \
         | HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
     plain=$(strip_ansi "$result")
-    [[ "$plain" == *"fabl5[1m:200k+]"* ]]
+    [[ "$plain" == *"fabl5[1m]"* ]]
+    # Authoritative flag colors the bar yellow even at a low computed 15%.
+    [[ "$result" == *$'\033[0;33m'*"15%"* ]]
     rm -rf "$tmpdir"
 }
 
@@ -785,7 +941,8 @@ JSON
     result=$(echo '{"model":{"id":"claude-opus-4-6[1m]","display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.174","context_window":{"used_percentage":50,"context_window_size":1000000}}' \
         | HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
     plain=$(strip_ansi "$result")
-    [[ "$plain" == *"opus4.6[1m:500k]"* ]]
+    [[ "$plain" == *"opus4.6[1m]"* ]]
+    [[ "$result" == *$'\033[0;33m'*"50%"* ]]
     rm -rf "$tmpdir"
 }
 
@@ -798,7 +955,8 @@ JSON
     result=$(echo '{"model":{"id":"claude-opus-4-8","display_name":"Opus 4.8"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.174","exceeds_200k_tokens":true,"context_window":{"used_percentage":24,"context_window_size":1000000}}' \
         | HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
     plain=$(strip_ansi "$result")
-    [[ "$plain" == *"opus4.8[1m:240k]"* ]]
+    [[ "$plain" == *"opus4.8[1m]"* ]]
+    [[ "$result" == *$'\033[0;33m'*"24%"* ]]
     rm -rf "$tmpdir"
 }
 

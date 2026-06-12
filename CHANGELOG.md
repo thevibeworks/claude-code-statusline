@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.10.0 — 2026-06-12 — learned 7d forecast + premium band in the bar
+
+The original initiative, delivered: the statusline watches your 7d usage with
+a model of YOUR week — learned from your own history, not assumed — and warns
+when you'll run out of usage while days still remain in the window.
+
+### Added
+
+- **Learned weekday burn profile.** `build_seven_day_profile` (hourly, inside
+  the TTL-gated fetch path) scans `usage.jsonl` and writes `forecast.cache`:
+  per-weekday %/day (EWMA, 14-day half-life) plus recent 24h/48h burn.
+  Partitioned by account uuid — interleaved multi-account history produces
+  garbage rates otherwise. Plan upgrades fade out via the EWMA. Pure epoch/awk
+  arithmetic, no GNU date extensions; 195 days of history builds in ~0.2s.
+- **Forecast verdict.** `seven_day_forecast` walks the remaining window
+  day-by-day against the profile (first 24h burns at max(profile, recent-24h))
+  and flags when quota dries before reset: yellow, red when dry >= 2 days
+  early. Escalates the pace color — it knows your heavy Tuesday is still
+  ahead when the window-average looks calm. Cold start (< 14 days of history)
+  falls back to window-average pacing silently.
+- **`claude-watch.sh` forecast line**: projected dry day + the learned
+  profile: `forecast dry ~Mo (2.4d before reset)  profile/d Mo12 Tu16 ...`.
+- **`usage.jsonl` rotation** at 32 MiB (single `.1` backup; the profile
+  builder reads both, so rotation never costs learned history).
+
+### Changed
+
+- **Premium pricing band moved into the context bar.** `fabl5[1m:320k]` was
+  redundant — 320k IS the bar's 32%. The model tag is a constant `[1m]`; the
+  bar color now carries the band: yellow past 200k, red past 800k.
+- **7d reset shows explicit time remaining** — `@5d` / `@18h` (timezone-proof,
+  unlike a day name) — whenever the verdict warns, even with the reset days
+  away. "Abnormal burn" is exactly when you need to know how long the window
+  still has to run.
+
 ## v0.9.6 — 2026-06-12 — pace verdict is color-only (no runway text)
 
 Two attempts at a compact runway number (`~2d`, then `2d!`) were both misread
