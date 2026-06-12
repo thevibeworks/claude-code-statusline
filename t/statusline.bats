@@ -244,12 +244,14 @@ setup() {
     [[ "$plain" =~ 5h\[87%@ ]]
 }
 
-@test "build_usage_display: 7d at 75% includes absolute reset time" {
+@test "build_usage_display: 7d at 75% under pace pressure shows runway + reset" {
+    # 75% with ~2.2d left = ~4.8d elapsed: runway falls short of the deadline,
+    # so the badge surfaces both the runway hint and the absolute reset.
     reset_time=$(date -u -d '+2 days 5 hours' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":10},\"seven_day\":{\"utilization\":75,\"resets_at\":\"$reset_time\"}}"
     result=$(build_usage_display "$usage" "")
     plain=$(strip_ansi "$result")
-    [[ "$plain" =~ 7d\[75%@ ]]
+    [[ "$plain" =~ 7d\[75%~[0-9]+d@ ]]
 }
 
 @test "build_usage_display: MAX tier shows opus model quota" {
@@ -268,9 +270,11 @@ setup() {
     [[ "$plain" != *"op["* ]]
 }
 
-@test "build_usage_display: below threshold with distant reset hides suffix" {
+@test "build_usage_display: on-pace usage hides runway and reset suffix" {
+    # 5h 50% with a distant reset stays bare; 7d 40% late in the window (reset
+    # in ~1d => ~6d elapsed) is well under pace, so no runway hint, no @reset.
     reset_time=$(date -u -d '+4 hours' '+%Y-%m-%dT%H:%M:%SZ')
-    reset_time_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_time_7d=$(date -u -d '+1 day' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":50,\"resets_at\":\"$reset_time\"},\"seven_day\":{\"utilization\":40,\"resets_at\":\"$reset_time_7d\"}}"
     result=$(build_usage_display "$usage" "")
     plain=$(strip_ansi "$result")
@@ -450,6 +454,67 @@ JSON
 @test "get_seven_day_color: red at 85" {
     result=$(get_seven_day_color 85)
     [ "$result" = "$RED" ]
+}
+
+# --- seven_day pace (burndown) ---
+# Window is 7d=604800s; elapsed = 604800 - seconds_left.
+
+@test "seven_day_elapsed: no verdict without a deadline" {
+    [ -z "$(seven_day_elapsed '')" ]
+}
+
+@test "seven_day_elapsed: no verdict in the noisy first ~8h" {
+    # 1h elapsed (seconds_left = 604800-3600) is below the 1/20 window floor.
+    [ -z "$(seven_day_elapsed 601200)" ]
+}
+
+@test "seven_day_elapsed: reports elapsed once past the early window" {
+    [ "$(seven_day_elapsed 518400)" = "86400" ]  # day 1
+}
+
+@test "seven_day_pace: heavy early burn is red and at risk" {
+    # 40% one day into the window projects to ~280% — you'll run dry by day ~3.
+    [ "$(seven_day_pace 40 518400 518400)" = "red 1 1" ]
+}
+
+@test "seven_day_pace: light early use is calm" {
+    [ "$(seven_day_pace 10 518400 518400)" = "green 9 0" ]
+}
+
+@test "seven_day_pace: exactly on pace at the midpoint is green" {
+    [ "$(seven_day_pace 50 302400 302400)" = "green 3 0" ]
+}
+
+@test "seven_day_pace: overshooting at the midpoint is red" {
+    [ "$(seven_day_pace 70 302400 302400)" = "red 1 1" ]
+}
+
+@test "seven_day_pace: high but late is NOT a false alarm (was the bug)" {
+    # 70% on day 6 projects to ~82% — you'll comfortably make it.
+    [ "$(seven_day_pace 70 86400 86400)" = "green 2 0" ]
+}
+
+@test "seven_day_pace: near the cap is red regardless of timing" {
+    [ "$(seven_day_pace 95 43200 43200)" = "red 0 1" ]
+}
+
+@test "seven_day_pace: no deadline falls back to level thresholds" {
+    [ "$(seven_day_pace 75 '' '')" = "yellow -1 0" ]
+    [ "$(seven_day_pace 90 '' '')" = "red -1 0" ]
+    [ "$(seven_day_pace 30 '' '')" = "green -1 0" ]
+}
+
+@test "seven_day_pace: a shorter (weekend-skipped) deadline relieves the risk" {
+    # 75% on day 5 (runway ~1.6d) is at risk against a 2d calendar deadline...
+    [ "$(seven_day_pace 75 172800 172800 | cut -d' ' -f3)" = "1" ]
+    # ...but not once the weekend (deadline -> 0) is removed.
+    [ "$(seven_day_pace 75 172800 0 | cut -d' ' -f3)" = "0" ]
+}
+
+@test "weekend_secs_ahead: never exceeds the deadline, multiples of a day" {
+    result=$(weekend_secs_ahead 172800)  # 2 days out
+    [ "$result" -le 172800 ]
+    [ $(( result % 86400 )) -eq 0 ]
 }
 
 # --- get_adaptive_ttl ---
@@ -919,11 +984,12 @@ JSON
 }
 
 @test "build_usage_display: 7d at 75% with reset in 3d keeps warning color" {
+    # ~4d elapsed at 75% => runway < deadline: a real warning, not recovery.
     reset_time=$(date -u -d '+3 days' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":10},\"seven_day\":{\"utilization\":75,\"resets_at\":\"$reset_time\"}}"
     result=$(build_usage_display "$usage" "")
     plain=$(strip_ansi "$result")
-    [[ "$plain" =~ 7d\[75%@ ]]
+    [[ "$plain" =~ 7d\[75%~[0-9]+d@ ]]
     [[ "$result" != *"$DIM_GREEN"* ]]
 }
 

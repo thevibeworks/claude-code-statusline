@@ -28,6 +28,7 @@ FIVE_HOUR_COUNTDOWN_SECS=7200    # show countdown when reset <= 2h
 FIVE_HOUR_RECOVERY_SECS=1800     # recovery color when reset <= 30min
 SEVEN_DAY_COUNTDOWN_SECS=259200  # show countdown when reset <= 3d
 SEVEN_DAY_RECOVERY_SECS=43200    # recovery color when reset <= 12h
+SEVEN_DAY_WINDOW_SECS=604800     # weekly quota window (fixed 7d) for pace math
 EXTRA_AUTO_UTIL_PCT=50           # show extra when its own utilization >= 50%
 CACHE_BREAK_MIN_TOKENS=2000      # ignore cache drops below this (noise)
 CACHE_BREAK_DROP_PCT=5           # cache read must drop >5% to count as break
@@ -1286,6 +1287,73 @@ get_usage_color() {
     fi
 }
 
+# Seconds elapsed into the fixed 7d quota window, or "" when pace can't be
+# judged: no/invalid deadline, or the first ~8h where the projection is too
+# noisy to trust (a single opening burst would otherwise read as a runaway).
+seven_day_elapsed() {
+    local secs_left="$1"
+    [ -z "$secs_left" ] && return
+    [ "$secs_left" -le 0 ] 2>/dev/null && return
+    [ "$secs_left" -ge "$SEVEN_DAY_WINDOW_SECS" ] 2>/dev/null && return
+    local elapsed=$(( SEVEN_DAY_WINDOW_SECS - secs_left ))
+    [ "$elapsed" -lt $(( SEVEN_DAY_WINDOW_SECS / 20 )) ] && return  # < ~8.4h: noisy
+    echo "$elapsed"
+}
+
+# Upcoming weekend seconds between now and reset, by 24h sampling (<=7 probes).
+# Used only when CLAUDE_7D_WORKDAYS is set, to shorten the effective deadline so
+# the meter doesn't alarm over weekend days the user won't spend quota on.
+# Approximate (whole-day granularity) — it's an opt-in planning aid, not billing.
+weekend_secs_ahead() {
+    local secs_left="$1" now_epoch wsecs=0 off=0 probe dow
+    now_epoch=$(date +%s)
+    while [ $(( off * 86400 )) -lt "$secs_left" ] 2>/dev/null; do
+        probe=$(( now_epoch + off * 86400 ))
+        dow=$(_fmt_epoch "$probe" '%u')  # 1=Mon .. 7=Sun
+        [ "${dow:-0}" -ge 6 ] 2>/dev/null && wsecs=$(( wsecs + 86400 ))
+        off=$(( off + 1 ))
+    done
+    [ "$wsecs" -gt "$secs_left" ] && wsecs="$secs_left"
+    echo "$wsecs"
+}
+
+# Pace verdict for the weekly quota. Compares runway (seconds of quota left at
+# the current burn rate) against the deadline (seconds until reset; $3 lets the
+# weekend-skip flag shorten it). Echoes: "<level> <runway_days> <hint>".
+#   level: green|yellow|red   runway_days: int, -1 when unknown   hint: 0|1
+# A 10% buffer keeps marginal overshoots quiet (warn only when you'll fall
+# >~10% short). Falls back to level thresholds when pace can't be judged
+# (no deadline, or the noisy first ~8h). $2 drives elapsed; $3 the deadline.
+#   $1 used%   $2 seconds_left   $3 effective deadline secs (optional)
+seven_day_pace() {
+    local used; used=$(printf '%.0f' "$1" 2>/dev/null || echo 0)
+    local secs_left="${2:-}" deadline="${3:-}"
+    [ -z "$deadline" ] && deadline="$secs_left"
+    local elapsed; elapsed=$(seven_day_elapsed "$secs_left")
+    if [ -z "$elapsed" ] || [ "$used" -le 0 ] 2>/dev/null; then
+        if   [ "$used" -ge 85 ] 2>/dev/null; then echo "red -1 0"
+        elif [ "$used" -ge 70 ] 2>/dev/null; then echo "yellow -1 0"
+        else echo "green -1 0"; fi
+        return
+    fi
+    local runway_secs=$(( (100 - used) * elapsed / used ))
+    local runway_days=$(( runway_secs / 86400 ))
+    # at risk: you'll fall >10% short of the deadline (runway/deadline < 0.9).
+    local atrisk=0
+    [ $(( runway_secs * 10 )) -lt $(( ${deadline:-0} * 9 )) ] 2>/dev/null && atrisk=1
+    # red when used up (>=95), or you'll run out in under half the time left.
+    local hard=0
+    { [ "$used" -ge 90 ] 2>/dev/null || [ $(( runway_secs * 2 )) -lt "${deadline:-0}" ] 2>/dev/null; } && hard=1
+    local level="green"
+    if   [ "$used" -ge 95 ] 2>/dev/null;            then level="red"
+    elif [ "$atrisk" = 1 ] && [ "$hard" = 1 ];      then level="red"
+    elif [ "$atrisk" = 1 ] || [ "$used" -ge 85 ] 2>/dev/null; then level="yellow"
+    fi
+    local hint=0
+    { [ "$atrisk" = 1 ] || [ "$used" -ge 90 ] 2>/dev/null; } && hint=1
+    echo "$level $runway_days $hint"
+}
+
 get_seven_day_color() {
     local percent=$(printf '%.0f' "$1" 2>/dev/null || echo 0)
     if [ "$percent" -ge 85 ]; then
@@ -1346,30 +1414,53 @@ build_usage_display() {
         parts+=("${DIM}5h${color}[${five_int}%${reset_suffix}]${RESET}")
     fi
 
-    # 7d aggregate quota (if present and >0)
-    # Countdown shown when: usage >= 70% (warning) OR reset <= 3d (planning)
-    # Recovery color (DIM_GREEN) when high usage + reset <= 12h
+    # 7d aggregate quota (if present and >0). Color comes from PACE, not level:
+    # the question is "will the quota outlast the window?" not "how full is it?".
+    # The runway hint (~Nd of quota left) and the @reset deadline appear only
+    # under real pressure — a high % late in the window is fine and stays quiet.
     if [ "$seven_int" -gt 0 ] 2>/dev/null; then
-        local color=$(get_seven_day_color "$seven_int")
-        local reset_suffix=""
         local reset_secs=""
         [ -n "$seven_reset" ] && reset_secs=$(get_reset_seconds "$seven_reset")
 
-        # Only surface the 7d reset when you're actually near the weekly cap.
-        # A reset time is irrelevant at low usage, and a bare clock time on a
-        # 7-day metric (e.g. "@09:00") is meaningless noise — so we gate it on
-        # utilization, not mere reset proximity.
-        local show_reset=false
-        [ "$seven_int" -ge 70 ] && show_reset=true
-
-        if [ "$show_reset" = true ] && [ -n "$seven_reset" ]; then
-            if [ "$seven_int" -ge 70 ] && [ -n "$reset_secs" ] && [ "$reset_secs" -le $SEVEN_DAY_RECOVERY_SECS ] 2>/dev/null; then
-                color="$DIM_GREEN"
+        # Opt-in: skip weekends in the deadline so the meter doesn't alarm over
+        # days the user won't spend quota on (the limit itself is calendar-based).
+        local deadline_secs="$reset_secs"
+        case "${CLAUDE_7D_WORKDAYS:-}" in
+        1|true|yes|on)
+            if [ -n "$reset_secs" ]; then
+                local wknd; wknd=$(weekend_secs_ahead "$reset_secs")
+                deadline_secs=$(( reset_secs - wknd ))
+                [ "$deadline_secs" -lt 0 ] && deadline_secs=0
             fi
+            ;;
+        esac
+
+        local sev_level sev_runway sev_hint
+        read -r sev_level sev_runway sev_hint <<<"$(seven_day_pace "$seven_int" "$reset_secs" "$deadline_secs")"
+        local color="$GREEN"
+        case "$sev_level" in red) color="$RED";; yellow) color="$YELLOW";; esac
+
+        # Recovery: high usage + imminent reset (<= 12h) — relief is basically
+        # here, so dim the alarm rather than scream at a wall you won't hit.
+        if [ "$seven_int" -ge 70 ] && [ -n "$reset_secs" ] && [ "$reset_secs" -le $SEVEN_DAY_RECOVERY_SECS ] 2>/dev/null; then
+            color="$DIM_GREEN"
+        fi
+
+        # Runway hint (~Nd of quota left at this burn) only under pace pressure.
+        local hint=""
+        [ "$sev_hint" = "1" ] && [ "${sev_runway:--1}" -ge 0 ] 2>/dev/null && hint="~${sev_runway}d"
+
+        # @reset deadline only when it's the binding constraint: relief is near
+        # (<= 3d) AND there's pressure (pace warns, or usage already high). At
+        # low/on-pace usage a 7d clock is just noise, so it stays hidden.
+        local reset_suffix=""
+        if [ -n "$seven_reset" ] && [ -n "$reset_secs" ] \
+           && [ "$reset_secs" -le $SEVEN_DAY_COUNTDOWN_SECS ] 2>/dev/null \
+           && { [ "$sev_level" != "green" ] || [ "$seven_int" -ge 85 ] 2>/dev/null; }; then
             local abs=$(format_reset_absolute "$seven_reset" "day")
             [ -n "$abs" ] && reset_suffix="${DIM}@${abs}${color}"
         fi
-        parts+=("${DIM}7d${color}[${seven_int}%${reset_suffix}]${RESET}")
+        parts+=("${DIM}7d${color}[${seven_int}%${hint}${reset_suffix}]${RESET}")
     fi
 
     # Model-specific 7d quotas

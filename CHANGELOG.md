@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.9.2 — 2026-06-11 — 7d quota paced, not leveled
+
+The weekly quota color used a pure level threshold (yellow at 70%, red at 85%),
+which is wrong in both directions: 70% on day 6 is a false alarm (you'll easily
+make it), and 40% on day 1 is a real danger shown as calm green. The 7d badge
+now judges **pace** — will the quota outlast the window? — using two numbers
+already on stdin: `used_percentage` and `resets_at`.
+
+### Added
+
+- **Pace-aware 7d color.** Compares runway (quota-time left at the current burn)
+  against the time until reset. A 10% buffer keeps marginal overshoots quiet, so
+  the badge warns only when you'll genuinely fall short. Fixes the false-alarm
+  (high-but-late) and missed-warning (moderate-but-early) cases.
+- **Runway hint** `~Nd` — days of quota left at this burn rate — shown beside the
+  percentage under pace pressure: `7d[40%~3d]`, `7d[95%~0d@Mon]`.
+- **`@reset` gating tied to pressure**, not a fixed 70% level — it appears when
+  the pace warns or usage is already high, and the reset is within 3d. On-pace
+  usage stays a bare `7d[27%]`, no clock noise.
+- **`CLAUDE_7D_WORKDAYS`** (opt-in, default off) — skips weekend days in the
+  deadline so the meter doesn't alarm over Sat/Sun you won't spend quota on. The
+  limit itself stays calendar-based; this only adjusts the planning view, and
+  only changes the verdict in the borderline band where it's decision-relevant.
+
+### Notes
+
+- Early-window guard: pace isn't judged in the first ~8h (a single opening burst
+  would otherwise read as a runaway); the badge falls back to level there.
+- The opus/sonnet sub-quotas (`op`/`sn`) remain level-based — they're secondary.
+
 ## v0.9.1 — 2026-06-11 — authoritative 1M detection
 
 Claude Code 2.1.173 stopped appending the `[1m]` suffix whenever 1M is the
