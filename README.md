@@ -82,15 +82,15 @@ Every component earns its place:
 | Effort | Compact lowercase badge: `lo` / `md` / `xh` / `max` / `ultra` / `auto` (`high` is the default and stays hidden). Dim for routine levels; `max` / `ultra` use the pressure color; `fast` shows in fast mode. |
 | Context bar | Merged with model. Green / yellow / red by pressure. |
 | User tier | Neutral white-weight (MAX bold, PRO normal, dim otherwise) — identity, never a status color. Truncated display name. |
-| Quota | Integer percentages. 5h shows its reset on pressure (>= 80%) or imminent reset (<= 2h). **7d is paced, not leveled**: the color asks "will the quota outlast the window?" — a moderate % early can warn while a high % late stays calm. Under pace pressure it surfaces a runway hint (`~Nd` of quota left at this burn) and the `@reset` deadline. `7d[40%~3d]` (burning too fast), `7d[70%]` (high but late — quiet), `7d[95%~0d@Mon]`. Recovery color when reset is imminent. |
+| Quota | Integer percentages. 5h shows its reset on pressure (>= 80%) or imminent reset (<= 2h). **7d is paced, not leveled**: the color asks "will the quota outlast the window?" — a moderate % early can warn while a high % late stays calm. Under pace pressure it surfaces a days-left warning (`Nd!` = days of quota remaining at this burn) and the `@reset` deadline. `7d[40% 3d!]` (burning too fast), `7d[70%]` (high but late — quiet), `7d[95% 0d!@Mon]`. Recovery color when reset is imminent. |
 | Extra usage | Monthly spend, limit, prepaid balance. `--extra auto` shows when quota runs out. |
 | Cache health | Detects observed prompt-cache rebuilds and cache-read drops. `cache!` on break, `cache~` when building. If a future Claude Code stdin includes TTL breakdown, `--cache always` can show `cache:1h@14:20`; current stdin usually exposes aggregate cache tokens only. Hidden when healthy by default. |
 
 **Color follows three lanes** so a glance is unambiguous: **status**
 (green/yellow/red) = pressure *only* — quota, context, cache, the premium
-context band, expensive effort; **identity** (magenta/cyan/blue) = model family;
-everything else is **neutral** grey/white. Warm color always means "near a
-limit or cost."
+context band, expensive effort; **identity** (magenta/cyan/blue; fable = bright
+red, matching its Claude Code TUI color) = model family; everything else is
+**neutral** grey/white. Warm status color always means "near a limit or cost."
 
 ## vs Built-in `/statusline`
 

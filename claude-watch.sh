@@ -105,10 +105,10 @@ esac
 # --- Colors ---------------------------------------------------------------
 if [ "$use_color" = true ] && [ -t 1 ]; then
     YELLOW='\033[0;33m'; GREEN='\033[0;32m'; RED='\033[0;31m'
-    DIM='\033[2m'; CYAN='\033[0;36m'; MAGENTA='\033[0;95m'; PURPLE='\033[0;35m'; BLUE='\033[0;94m'
+    DIM='\033[2m'; CYAN='\033[0;36m'; FABLE_RED='\033[0;91m'; PURPLE='\033[0;35m'; BLUE='\033[0;94m'
     BOLD='\033[1m'; RESET='\033[0m'
 else
-    YELLOW=''; GREEN=''; RED=''; DIM=''; CYAN=''; MAGENTA=''; PURPLE=''; BLUE=''; BOLD=''; RESET=''
+    YELLOW=''; GREEN=''; RED=''; DIM=''; CYAN=''; FABLE_RED=''; PURPLE=''; BLUE=''; BOLD=''; RESET=''
 fi
 
 # --- Pricing (mirrors ccx internal/parser/pricing.go) ---------------------
@@ -326,11 +326,12 @@ render() {
     claude-fable-*) abbrev=$(echo "$model" | sed -E 's/claude-fable-([0-9]+).*/fabl\1/') ;;
     esac
 
-    # Match statusline's hue split: opus=purple (0;35), fable=bright magenta (0;95).
+    # Match statusline's hue split: opus=purple (0;35), fable=bright red (0;91,
+    # the Claude Code TUI identity; pressure red stays 0;31).
     local mcolor="$DIM"
     case "$model" in
     *opus*)   mcolor="$PURPLE" ;;
-    *fable*)  mcolor="$MAGENTA" ;;
+    *fable*)  mcolor="$FABLE_RED" ;;
     *sonnet*) mcolor="$CYAN" ;;
     *haiku*)  mcolor="$BLUE" ;;
     esac

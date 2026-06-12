@@ -251,7 +251,7 @@ setup() {
     usage="{\"five_hour\":{\"utilization\":10},\"seven_day\":{\"utilization\":75,\"resets_at\":\"$reset_time\"}}"
     result=$(build_usage_display "$usage" "")
     plain=$(strip_ansi "$result")
-    [[ "$plain" =~ 7d\[75%~[0-9]+d@ ]]
+    [[ "$plain" =~ 7d\[75%\ [0-9]+d!@ ]]
 }
 
 @test "build_usage_display: MAX tier shows opus model quota" {
@@ -280,7 +280,7 @@ setup() {
     plain=$(strip_ansi "$result")
     [[ "$plain" == *"5h[50%]"* ]]
     [[ "$plain" == *"7d[40%]"* ]]
-    [[ "$plain" != *"~"* ]]
+    [[ "$plain" != *"d!"* ]]
 }
 
 # --- should_show_extra ---
@@ -724,8 +724,8 @@ JSON
     plain=$(strip_ansi "$result")
     [[ "$plain" == *"fabl5[1m]"* ]]
     [[ "$plain" != *"[1m:"* ]]
-    # Full-strength magenta (0;95) — identity color from the stdin model.id path.
-    [[ "$result" == *$'\033[0;95m'* ]]
+    # Fable identity = bright red (0;91), matching the Claude Code TUI.
+    [[ "$result" == *$'\033[0;91m'* ]]
     rm -rf "$tmpdir"
 }
 
@@ -1015,7 +1015,7 @@ JSON
     usage="{\"five_hour\":{\"utilization\":10},\"seven_day\":{\"utilization\":75,\"resets_at\":\"$reset_time\"}}"
     result=$(build_usage_display "$usage" "")
     plain=$(strip_ansi "$result")
-    [[ "$plain" =~ 7d\[75%~[0-9]+d@ ]]
+    [[ "$plain" =~ 7d\[75%\ [0-9]+d!@ ]]
     [[ "$result" != *"$DIM_GREEN"* ]]
 }
 

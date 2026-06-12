@@ -352,7 +352,9 @@ term_width=$(tput cols 2>/dev/null || echo 80)
 # Palette is organized in three lanes so a glance is unambiguous:
 #   STATUS  (green/yellow/red) — pressure ONLY: quota, context, cache, premium
 #                                band, expensive effort. Warm = "watch a limit".
-#   IDENTITY (magenta/cyan/blue) — model family only. Never status.
+#   IDENTITY (magenta/cyan/blue; fable = bright red 0;91 to match the Claude
+#                                Code TUI) — model family only. Never status.
+#                                Pressure red stays 0;31; fable is 0;91.
 #   NEUTRAL (grey/white by weight) — structure & you: path, branch, time, cost,
 #                                tier, name, routine effort.
 YELLOW='\033[0;33m'
@@ -1492,9 +1494,11 @@ build_usage_display() {
             color="$DIM_GREEN"
         fi
 
-        # Runway hint (~Nd of quota left at this burn) only under pace pressure.
+        # Runway hint (days of quota left at this burn) only under pace
+        # pressure: "7d[37% 2d!]" = ~2 days of quota remain at this rate. The
+        # '!' marks it as a warning, the space separates it from the level %.
         local hint=""
-        [ "$sev_hint" = "1" ] && [ "${sev_runway:--1}" -ge 0 ] 2>/dev/null && hint="~${sev_runway}d"
+        [ "$sev_hint" = "1" ] && [ "${sev_runway:--1}" -ge 0 ] 2>/dev/null && hint=" ${sev_runway}d!"
 
         # @reset deadline only when it's the binding constraint: relief is near
         # (<= 3d) AND there's pressure (pace warns, or usage already high). At
@@ -1829,9 +1833,9 @@ if [ -n "$model_id" ]; then
     "opus")   model_color='\033[0;35m' ;;
     "sonnet") model_color='\033[0;36m' ;;
     "haiku")  model_color='\033[0;94m' ;;
-    # Fable shares Opus's capability group; bright magenta keeps it in the same
-    # hue family while staying distinct from opus's 0;35.
-    "fable")  model_color='\033[0;95m' ;;
+    # Fable renders in red in the Claude Code TUI; bright red (0;91) matches
+    # that identity while staying distinct from the pressure red (0;31).
+    "fable")  model_color='\033[0;91m' ;;
     *)        model_color='\033[0;37m' ;;
     esac
 # FALLBACK: stdin gave no model id (rare) — fall back to the configured default.
@@ -1867,7 +1871,7 @@ elif [ -n "$configured_model" ]; then
         fi
         ;;
     "fable"|claude-fable-*)
-        model_color='\033[0;95m'
+        model_color='\033[0;91m'
         if [ "$local_cfg" = "fable" ]; then
             model_text="fable"
         else

@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.9.5 — 2026-06-12 — readable runway warning (Nd!)
+
+`~2d` confused its own audience: it mixed two time quantities (quota-runway vs
+reset-deadline) into one unlabeled number inside a `%` badge — "2 days until
+what?". Reworked for legibility.
+
+### Changed
+
+- **Runway hint is now `Nd!`**, space-separated from the percentage:
+  `7d[37% 2d!]` = ~2 days of quota left at the current burn rate. The `!` marks
+  it as a warning rather than a neutral stat; the space keeps it from reading
+  as part of the percentage. Still shown only under pace pressure — on-pace
+  badges stay a bare `7d[27%]`.
+- **Fable identity color → bright red (`0;91`)**, matching Fable's color in the
+  Claude Code TUI (was bright magenta). Pressure red stays `0;31`, so alarms
+  remain distinguishable. `claude-watch.sh` and the hero preview follow.
+
 ## v0.9.4 — 2026-06-12 — window-aware quota merge (multi-session freshness)
 
 With several Claude Code instances running, the 5h/7d numbers lagged: an idle
