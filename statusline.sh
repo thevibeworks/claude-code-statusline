@@ -1464,8 +1464,8 @@ build_usage_display() {
 
     # 7d aggregate quota (if present and >0). Color comes from PACE, not level:
     # the question is "will the quota outlast the window?" not "how full is it?".
-    # The runway hint (~Nd of quota left) and the @reset deadline appear only
-    # under real pressure — a high % late in the window is fine and stays quiet.
+    # The @reset deadline appears only under real pressure — a high % late in
+    # the window is fine and stays quiet.
     if [ "$seven_int" -gt 0 ] 2>/dev/null; then
         local reset_secs=""
         [ -n "$seven_reset" ] && reset_secs=$(get_reset_seconds "$seven_reset")
@@ -1483,6 +1483,8 @@ build_usage_display() {
             ;;
         esac
 
+        # seven_day_pace also returns runway-days and a hint flag; only the
+        # level drives the display (see comment below on why no runway text).
         local sev_level sev_runway sev_hint
         read -r sev_level sev_runway sev_hint <<<"$(seven_day_pace "$seven_int" "$reset_secs" "$deadline_secs")"
         local color="$GREEN"
@@ -1494,11 +1496,11 @@ build_usage_display() {
             color="$DIM_GREEN"
         fi
 
-        # Runway hint (days of quota left at this burn) only under pace
-        # pressure: "7d[37% 2d!]" = ~2 days of quota remain at this rate. The
-        # '!' marks it as a warning, the space separates it from the level %.
-        local hint=""
-        [ "$sev_hint" = "1" ] && [ "${sev_runway:--1}" -ge 0 ] 2>/dev/null && hint=" ${sev_runway}d!"
+        # No derived runway number in the badge: every compact rendering of
+        # "days of quota left at this burn" (~2d, 2d!) was misread as days
+        # until reset — a second time-unit next to a 7d metric cannot win.
+        # The pace verdict is carried by color alone; the @reset deadline
+        # below is the only number, and it's a fact, not a model.
 
         # @reset deadline only when it's the binding constraint: relief is near
         # (<= 3d) AND there's pressure (pace warns, or usage already high). At
@@ -1510,7 +1512,7 @@ build_usage_display() {
             local abs=$(format_reset_absolute "$seven_reset" "day")
             [ -n "$abs" ] && reset_suffix="${DIM}@${abs}${color}"
         fi
-        parts+=("${DIM}7d${color}[${seven_int}%${hint}${reset_suffix}]${RESET}")
+        parts+=("${DIM}7d${color}[${seven_int}%${reset_suffix}]${RESET}")
     fi
 
     # Model-specific 7d quotas

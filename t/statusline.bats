@@ -244,14 +244,14 @@ setup() {
     [[ "$plain" =~ 5h\[87%@ ]]
 }
 
-@test "build_usage_display: 7d at 75% under pace pressure shows runway + reset" {
+@test "build_usage_display: 7d at 75% under pace pressure shows reset" {
     # 75% with ~2.2d left = ~4.8d elapsed: runway falls short of the deadline,
-    # so the badge surfaces both the runway hint and the absolute reset.
+    # so the badge surfaces the absolute reset (verdict carried by color).
     reset_time=$(date -u -d '+2 days 5 hours' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":10},\"seven_day\":{\"utilization\":75,\"resets_at\":\"$reset_time\"}}"
     result=$(build_usage_display "$usage" "")
     plain=$(strip_ansi "$result")
-    [[ "$plain" =~ 7d\[75%\ [0-9]+d!@ ]]
+    [[ "$plain" =~ 7d\[75%@ ]]
 }
 
 @test "build_usage_display: MAX tier shows opus model quota" {
@@ -1015,7 +1015,7 @@ JSON
     usage="{\"five_hour\":{\"utilization\":10},\"seven_day\":{\"utilization\":75,\"resets_at\":\"$reset_time\"}}"
     result=$(build_usage_display "$usage" "")
     plain=$(strip_ansi "$result")
-    [[ "$plain" =~ 7d\[75%\ [0-9]+d!@ ]]
+    [[ "$plain" =~ 7d\[75%@ ]]
     [[ "$result" != *"$DIM_GREEN"* ]]
 }
 

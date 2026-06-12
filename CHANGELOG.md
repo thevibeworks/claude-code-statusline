@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.9.6 — 2026-06-12 — pace verdict is color-only (no runway text)
+
+Two attempts at a compact runway number (`~2d`, then `2d!`) were both misread
+as "days until reset" — a second time-unit sitting next to a 7-day metric
+cannot win, no matter the label. The derived number is gone.
+
+### Changed
+
+- **7d badge shows no runway text.** The pace verdict (will the quota outlast
+  the window?) is carried by color alone; under pressure the `@reset` deadline
+  appears — a fact, not a model: `7d[40%]` yellow (early overshoot), `7d[70%]`
+  green (late, safe), `7d[95%@Mon]` red. The pace engine (`seven_day_pace`) is
+  unchanged underneath, including `CLAUDE_7D_WORKDAYS`.
+
+### Notes
+
+- Reset times render in the local timezone of wherever the statusline runs.
+  If your containers run in a different TZ than your other monitors, set `TZ`
+  in the container for matching `@day` labels.
+
 ## v0.9.5 — 2026-06-12 — readable runway warning (Nd!)
 
 `~2d` confused its own audience: it mixed two time quantities (quota-runway vs
