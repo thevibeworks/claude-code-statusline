@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.9.4 — 2026-06-12 — window-aware quota merge (multi-session freshness)
+
+With several Claude Code instances running, the 5h/7d numbers lagged: an idle
+session's stdin can carry a rate-limit window that already reset hours ago,
+and the old merge let stdin clobber the shared cache unconditionally — even
+when another session's fetch had just written fresher data. Observed live: one
+session's stdin said 5h=33% on an expired window while the shared cache held
+47% on the current window, fetched two minutes earlier.
+
+### Fixed
+
+- **Window-aware merge.** Neither stdin nor the cache is always fresher, and
+  stdin carries no timestamp — but two structural facts decide it without one:
+  across windows the later `resets_at` IS the newer window; within one window
+  utilization only increases. Per window: newer `resets_at` wins outright;
+  same window takes the max utilization. Stale stdin can no longer mask
+  fresher cross-session data, and a frozen cache still self-heals (its
+  `resets_at` falls behind stdin's).
+
+### Notes
+
+- Context (`NN%` / `[1m:NNNk]`) is per-session by design — it comes from that
+  session's own stdin, never from shared state, so concurrent instances cannot
+  pollute each other's context display.
+
 ## v0.9.3 — 2026-06-11 — show the model that's actually running (critical)
 
 The displayed model came from `settings.json .model` (a static default) and

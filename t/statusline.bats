@@ -1319,6 +1319,32 @@ JSON
     [ "$(echo "$merged" | jq -r '.five_hour.resets_at')" = "1781097000" ]
 }
 
+@test "merge_stdin_rate_limits: expired stdin window does not clobber fresher cache" {
+    # Observed live: an idle session's stdin still carried 33% on a 5h window
+    # that reset 3h earlier, while the shared cache (fed by an active session)
+    # had 47% on the CURRENT window. The cache's later resets_at must win.
+    cache='{"five_hour":{"utilization":47,"resets_at":"2026-06-12T11:00:00+00:00"},"seven_day":{"utilization":39,"resets_at":"2026-06-17T16:00:01+00:00"}}'
+    merged=$(merge_stdin_rate_limits "$cache" 33 1781244000 28 1781712000)
+    [ "$(echo "$merged" | jq -r '.five_hour.utilization')" = "47" ]
+    [ "$(echo "$merged" | jq -r '.five_hour.resets_at')" = "2026-06-12T11:00:00+00:00" ]
+}
+
+@test "merge_stdin_rate_limits: same window takes the max utilization" {
+    # Within one window usage only increases, so the larger reading is the
+    # fresher one regardless of which source it came from.
+    cache='{"five_hour":{"utilization":46,"resets_at":1781262000},"seven_day":{"utilization":38,"resets_at":1781712000}}'
+    merged=$(merge_stdin_rate_limits "$cache" 43 1781262000 39 1781712000)
+    [ "$(echo "$merged" | jq -r '.five_hour.utilization')" = "46" ]  # cache fresher
+    [ "$(echo "$merged" | jq -r '.seven_day.utilization')" = "39" ]  # stdin fresher
+}
+
+@test "merge_stdin_rate_limits: stdin with a newer window wins (reset rolled)" {
+    cache='{"five_hour":{"utilization":98,"resets_at":1781244000},"seven_day":{"utilization":21,"resets_at":1781712000}}'
+    merged=$(merge_stdin_rate_limits "$cache" 2 1781262000 21 1781712000)
+    [ "$(echo "$merged" | jq -r '.five_hour.utilization')" = "2" ]
+    [ "$(echo "$merged" | jq -r '.five_hour.resets_at')" = "1781262000" ]
+}
+
 @test "merge_stdin_rate_limits: preserves cache-only fields (extra_usage, opus)" {
     stale='{"five_hour":{"utilization":100},"seven_day":{"utilization":21},"extra_usage":{"is_enabled":true,"utilization":12},"seven_day_opus":{"utilization":9}}'
     merged=$(merge_stdin_rate_limits "$stale" 4 "" 1 "")

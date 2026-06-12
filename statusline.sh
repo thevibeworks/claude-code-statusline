@@ -1176,17 +1176,63 @@ reap_stale_lock() {
     return 0
 }
 
-# Overlay the CLI's fresh stdin rate_limits onto cached usage JSON. The CLI
-# passes current-plan, current-window 5h/7d numbers on every render, so this is
-# the freshest, zero-cost source — preferring it self-heals plan upgrades,
-# window resets, and a stale/frozen cache. Fields stdin lacks (extra_usage,
-# model breakdowns) are left untouched so the cache still enriches them.
+# Merge the CLI's stdin rate_limits with cached usage JSON, window-aware.
+#
+# Neither source is always fresher: stdin reflects THIS session's last API
+# response (seconds old when active, hours old when idle — an idle session can
+# carry a window that already reset), while the shared cache is fed by whichever
+# concurrent session fetched last. Timestamps for stdin aren't available, but
+# two structural facts decide freshness without them:
+#   - across windows: the later resets_at IS the newer window
+#   - within one window: utilization only ever increases
+# So per window: newer resets_at wins outright; same window takes the max
+# utilization (the larger number is by definition the more recent reading).
+# Fields stdin lacks (extra_usage, model breakdowns) are left untouched.
 # Args: <usage_json> <five_pct> <five_reset> <seven_pct> <seven_reset>
 merge_stdin_rate_limits() {
     local usage="$1" fp="$2" fr="$3" sp="$4" sr="$5"
+
+    # Cached window state (utilization + resets_at) for comparison.
+    local c5p c5r c7p c7r
+    c5p=$(echo "$usage" | jq -r '.five_hour.utilization // empty' 2>/dev/null)
+    c5r=$(echo "$usage" | jq -r '.five_hour.resets_at // empty' 2>/dev/null)
+    c7p=$(echo "$usage" | jq -r '.seven_day.utilization // empty' 2>/dev/null)
+    c7r=$(echo "$usage" | jq -r '.seven_day.resets_at // empty' 2>/dev/null)
+
+    # Decide one window. Echoes "pct|reset" to apply, or "" to keep the cache.
+    _pick_window() {
+        local sp_="$1" sr_="$2" cp_="$3" cr_="$4"
+        [ -z "$sp_" ] && return 0                      # no stdin -> keep cache
+        if [ -z "$cp_" ] || [ -z "$cr_" ]; then        # no cache -> stdin wins
+            echo "${sp_}|${sr_}"; return 0
+        fi
+        local se ce
+        se=$(_epoch_from_ts "$sr_"); ce=$(_epoch_from_ts "$cr_")
+        if [ -z "$se" ] || [ -z "$ce" ]; then          # unparseable -> stdin
+            echo "${sp_}|${sr_}"; return 0
+        fi
+        if [ "$se" -gt "$ce" ] 2>/dev/null; then       # stdin has newer window
+            echo "${sp_}|${sr_}"
+        elif [ "$se" -lt "$ce" ] 2>/dev/null; then     # stdin window expired
+            return 0                                   # keep fresher cache
+        else                                           # same window: take max
+            if awk -v a="$sp_" -v b="$cp_" 'BEGIN{exit !((a+0) > (b+0))}'; then
+                echo "${sp_}|${sr_}"
+            fi                                         # else cache >= stdin: keep
+        fi
+    }
+
+    local pick5 pick7
+    pick5=$(_pick_window "$fp" "$fr" "$c5p" "$c5r")
+    pick7=$(_pick_window "$sp" "$sr" "$c7p" "$c7r")
+
+    local f5p="" f5r="" s7p="" s7r=""
+    [ -n "$pick5" ] && { f5p="${pick5%%|*}"; f5r="${pick5#*|}"; }
+    [ -n "$pick7" ] && { s7p="${pick7%%|*}"; s7r="${pick7#*|}"; }
+
     echo "$usage" | jq \
-        --argjson fp "${fp:-null}" --arg fr "$fr" \
-        --argjson sp "${sp:-null}" --arg sr "$sr" \
+        --argjson fp "${f5p:-null}" --arg fr "$f5r" \
+        --argjson sp "${s7p:-null}" --arg sr "$s7r" \
         '(.five_hour //= {}) | (.seven_day //= {})
          | (if $fp != null then .five_hour.utilization = $fp
               | .five_hour.resets_at = (if $fr == "" then null else $fr end) else . end)
