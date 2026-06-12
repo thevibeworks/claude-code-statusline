@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.9.1 — 2026-06-11 — authoritative 1M detection
+
+Claude Code 2.1.173 stopped appending the `[1m]` suffix whenever 1M is the
+active default. Real session logs show this on **both** Fable 5 and Opus 4.8
+(`exceeds_200k=true` at ~24% context proves a >200k window with no suffix in the
+id). Our `[1m]` detection keyed on the suffix, so those sessions lost their tag
+*and* their premium-band cost cue, and the context bar measured against 200k
+instead of 1M.
+
+### Fixed
+
+- **`[1m]` tag + premium cue restored for suffix-less 1M sessions.** Detection
+  now prefers the CLI's authoritative signals over the model name, in order:
+  1. `context_window_size > 200k` — the window the CLI itself reports.
+  2. `exceeds_200k_tokens=true` — only a >200k window can exceed 200k tokens.
+  3. `[1m]` opt-in suffix, or a family that defaults to 1M (`is_default_1m_family`
+     — fable) — name fallbacks for older CLIs that send neither of the above.
+- **`opus4.6[1m]` opt-in** unchanged — the suffix path still drives the tag and
+  the 1M window (verified by a dedicated compat test).
+- **`get_context_limit`** (transcript fallback for pre-`ctx_pct` CLIs) also
+  treats a 1M-default family as 1M, so the fallback bar matches.
+
+### Changed
+
+- **Premium-band trigger** prefers the authoritative `exceeds_200k_tokens` flag
+  over our own `context% × size` arithmetic. When the flag fires but the
+  computed number doesn't itself clear 200k (e.g. exactly 20% of 1M, the common
+  boundary case), the cue degrades to `[1m:200k+]` rather than printing a
+  contradictory sub-200k figure.
+
 ## v0.9.0 — 2026-06-10 — color system (three lanes)
 
 A deliberate palette redesign so a glance is unambiguous. Color follows three

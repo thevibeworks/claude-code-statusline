@@ -10,7 +10,9 @@ stat_order="activity,time,cost,model,user,quota,extra"
 path_display="project" # project, cwd, full, relative
 alignment="left-right" # left-right, right-left, center
 theme=""
-# Context limit: auto-detected from model.id ([1m] suffix = 1M, default = 200k)
+# Context limit: auto-detected from model.id. 1M when the family ships 1M by
+# default (e.g. fable — CLI strips its [1m] suffix since 2.1.173) OR when the id
+# carries an explicit [1m] opt-in suffix (e.g. opus/sonnet); otherwise 200k.
 # CLAUDE_CONTEXT_LIMIT env override still honored for manual tuning
 context_limit_override="${CLAUDE_CONTEXT_LIMIT:-}"
 extra_display_mode="auto" # auto, always, on-limit, off
@@ -320,11 +322,22 @@ eval "$(echo "$input" | jq -r '
     @sh "stdin_session_id=\(.session_id // "")"
 ' 2>/dev/null)"
 
+# Families that ship a 1M context window by default. Claude Code 2.1.173+ omits
+# the [1m] suffix for these (1M is implied), so the suffix alone no longer
+# detects them — match on the family instead. The [1m] suffix is now reserved
+# for opt-in 1M on default-200k families (opus/sonnet), still honored below.
+is_default_1m_family() {
+    case "$1" in
+    *fable*) return 0 ;;
+    *)       return 1 ;;
+    esac
+}
+
 # Detect context window from model ID:
-#   CLI function NO(A): if A.includes("[1m]") return 1e6; else return 200000;
+#   CLI: if id.includes("[1m]") -> 1e6; else family-default (fable=1e6, else 200k)
 get_context_limit() {
     local mid="$1"
-    if [[ "$mid" == *"[1m]"* ]]; then
+    if [[ "$mid" == *"[1m]"* ]] || is_default_1m_family "$mid"; then
         echo 1000000
     else
         echo 200000
@@ -1579,28 +1592,57 @@ get_runtime_model() {
     esac
 }
 
-# Detect if this is a 1M context model
+# Detect if this is a 1M context model. Prefer the CLI's authoritative signals
+# over the model name — since 2.1.173 the [1m] suffix is stripped whenever 1M is
+# the active default (observed on both fable AND opus when running 1M), so the
+# name alone under-detects. Order: real window size > the >200k flag > name.
+#   1. ctx_size > 200k          — the window the CLI reports (ground truth)
+#   2. exceeds_200k=true        — only a >200k window can exceed 200k tokens
+#   3. [1m] suffix / 1M family  — name fallbacks for older CLIs lacking the above
 is_1m_model() {
-    [[ "$model_id" == *"[1m]"* ]]
+    if [ -n "$ctx_size" ] && [ "$ctx_size" -gt 200000 ] 2>/dev/null; then
+        return 0
+    fi
+    [ "$exceeds_200k" = "true" ] && return 0
+    [[ "$model_id" == *"[1m]"* ]] || is_default_1m_family "$model_id"
 }
 
 # Build the [1m] context tag. Above 200k tokens a 1M-window model enters the
 # premium (higher input rate) pricing band, so surface the absolute context as
 # a cost cue and escalate the color with depth: [1m] under 200k, [1m:240k]
 # (yellow) past 200k, [1m:900k] (red) deep in the band (>800k).
+#
+# The premium-band trigger prefers the CLI's authoritative exceeds_200k flag
+# (immune to our context-size detection) and falls back to the computed
+# absolute when that flag is absent. If the band is flagged but we can't derive
+# a number (no context_pct), degrade to [1m:200k+] rather than dropping the cue.
 # $1 = the model's base color, so the bracket restores after the warning span.
 build_1m_tag() {
     local mcolor="$1"
     local size="${ctx_size:-1000000}"
+    local abs=""
     if [ -n "$context_pct" ] && [ "$size" -gt 0 ] 2>/dev/null; then
-        local abs=$(( context_pct * size / 100 ))
-        if [ "$abs" -gt 200000 ]; then
+        abs=$(( context_pct * size / 100 ))
+    fi
+    local in_band=""
+    if [ "$exceeds_200k" = "true" ]; then
+        in_band=1
+    elif [ -n "$abs" ] && [ "$abs" -gt 200000 ] 2>/dev/null; then
+        in_band=1
+    fi
+    if [ -n "$in_band" ]; then
+        # Show the precise NNNk only when our own number agrees it's past 200k;
+        # if the flag fired but the computed number is below 200k (or absent),
+        # the number is untrustworthy — show 200k+ rather than contradict it.
+        if [ -n "$abs" ] && [ "$abs" -gt 200000 ] 2>/dev/null; then
             local k=$(( (abs + 500) / 1000 ))
             local cue="$YELLOW"
             [ "$abs" -gt 800000 ] && cue="$RED"
             echo "[1m:${cue}${k}k${mcolor}]"
-            return
+        else
+            echo "[1m:${YELLOW}200k+${mcolor}]"
         fi
+        return
     fi
     echo "[1m]"
 }

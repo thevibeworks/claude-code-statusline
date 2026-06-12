@@ -561,10 +561,37 @@ JSON
     [ -z "$result" ]
 }
 
+# --- is_default_1m_family ---
+
+@test "is_default_1m_family: fable is a default-1M family" {
+    run is_default_1m_family "claude-fable-5"
+    [ "$status" -eq 0 ]
+}
+
+@test "is_default_1m_family: fable with date suffix still matches" {
+    run is_default_1m_family "claude-fable-5-20260115"
+    [ "$status" -eq 0 ]
+}
+
+@test "is_default_1m_family: opus is not a default-1M family" {
+    run is_default_1m_family "claude-opus-4-6"
+    [ "$status" -eq 1 ]
+}
+
+@test "is_default_1m_family: sonnet is not a default-1M family" {
+    run is_default_1m_family "claude-sonnet-4-6"
+    [ "$status" -eq 1 ]
+}
+
 # --- get_context_limit ---
 
 @test "get_context_limit: 1m model" {
     result=$(get_context_limit "claude-opus-4-6[1m]")
+    [ "$result" = "1000000" ]
+}
+
+@test "get_context_limit: fable defaults to 1M without a [1m] suffix (2.1.173+)" {
+    result=$(get_context_limit "claude-fable-5")
     [ "$result" = "1000000" ]
 }
 
@@ -621,6 +648,78 @@ JSON
     [[ "$plain" == *"fabl5[1m:300k]"* ]]
     # Premium cue carries the warning (yellow 0;33) color.
     [[ "$result" == *$'\033[0;33m'*"300k"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: fable WITHOUT [1m] suffix (2.1.173+) still renders fabl5[1m]" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    # 2.1.173+ strips the [1m] suffix from Fable 5 (1M is its default), so the
+    # tag must come from the family, not the suffix.
+    result=$(echo '{"model":{"id":"claude-fable-5","display_name":"Fable 5"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.174","context_window":{"used_percentage":15,"context_window_size":1000000}}' \
+        | HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"fabl5[1m]"* ]]
+    [[ "$plain" != *"[1m:"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: suffix-less fable flags the premium band over 200k" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    # 30% of the (family-detected) 1M window = 300k, past the 200k boundary.
+    result=$(echo '{"model":{"id":"claude-fable-5","display_name":"Fable 5"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.174","context_window":{"used_percentage":30,"context_window_size":1000000}}' \
+        | HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"fabl5[1m:300k]"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: exceeds_200k flag is authoritative even when context% is low" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    # The CLI flags the premium band (exceeds_200k_tokens) while our computed
+    # context (15% of 1M = 150k) is below 200k. Trust the flag; show 200k+
+    # rather than a contradictory sub-200k number.
+    result=$(echo '{"model":{"id":"claude-fable-5","display_name":"Fable 5"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.174","exceeds_200k_tokens":true,"context_window":{"used_percentage":15,"context_window_size":1000000}}' \
+        | HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"fabl5[1m:200k+]"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: opus4.6[1m] opt-in suffix still drives the 1M tag (compat)" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    result=$(echo '{"model":{"id":"claude-opus-4-6[1m]","display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.174","context_window":{"used_percentage":50,"context_window_size":1000000}}' \
+        | HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"opus4.6[1m:500k]"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: suffix-less model on a 1M window (ctx_size) gets the 1M tag" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    # Observed in real logs: opus-4-8 with NO [1m] suffix yet a 1M window and
+    # exceeds_200k=true at ~24% — proves a >200k window. The CLI's reported
+    # context_window_size is authoritative, so the tag must follow it.
+    result=$(echo '{"model":{"id":"claude-opus-4-8","display_name":"Opus 4.8"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.174","exceeds_200k_tokens":true,"context_window":{"used_percentage":24,"context_window_size":1000000}}' \
+        | HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"opus4.8[1m:240k]"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: suffix-less 200k model stays plain (no false 1M tag)" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    # A genuine 200k window must NOT pick up a [1m] tag from the new ctx_size path.
+    result=$(echo '{"model":{"id":"claude-opus-4-8","display_name":"Opus 4.8"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.174","context_window":{"used_percentage":40,"context_window_size":200000}}' \
+        | HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"opus4.8"* ]]
+    [[ "$plain" != *"[1m"* ]]
     rm -rf "$tmpdir"
 }
 
@@ -1185,7 +1284,9 @@ JSON
     mkdir -p "$tmpdir/.claude"
     xh=$(echo '{"model":{"id":"claude-fable-5","display_name":"F"},"cwd":"/t","workspace":{"current_dir":"/t"},"version":"2.1.170","effort":{"level":"xhigh"}}' \
         | HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
-    [[ "$(strip_ansi "$xh")" == *"fabl5 xh"* ]]
+    # fable now carries [1m] (family default), so the bracket is the separator
+    # and the badge attaches without a space: fabl5[1m]xh.
+    [[ "$(strip_ansi "$xh")" == *"fabl5[1m]xh"* ]]
     hi=$(echo '{"model":{"id":"claude-fable-5","display_name":"F"},"cwd":"/t","workspace":{"current_dir":"/t"},"version":"2.1.170","effort":{"level":"high"}}' \
         | HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
     [[ "$(strip_ansi "$hi")" != *"hi"* ]]

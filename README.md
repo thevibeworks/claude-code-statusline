@@ -78,7 +78,7 @@ Every component earns its place:
 | Path and branch | Know where Claude Code is writing. Neutral grey; a dirty branch brightens to white with a `*`. |
 | Activity | Session diff without opening git. |
 | Time and cost | Track long sessions. Hours format above 60m (`1h30m`). |
-| Model | Abbreviated. `claude-opus-4-8[1m]` becomes `opus4.8[1m]`, `claude-fable-5` becomes `fabl5`. On a 1M-context model, crossing 200k (the premium input-pricing band) shows absolute context in a warning color: `fabl5[1m:300k]`. |
+| Model | Abbreviated: `claude-opus-4-8` becomes `opus4.8`, `claude-fable-5` becomes `fabl5`. The `[1m]` tag marks a 1M-context session, detected from the window the CLI reports (`context_window_size`) — not the name — so it shows even when Claude Code strips the `[1m]` suffix (which it does since 2.1.173 whenever 1M is the default). On any 1M model, crossing 200k (the premium input-pricing band) shows absolute context in a warning color: `fabl5[1m:300k]` (yellow), deepening to red past 800k. |
 | Effort | Compact lowercase badge: `lo` / `md` / `xh` / `max` / `ultra` / `auto` (`high` is the default and stays hidden). Dim for routine levels; `max` / `ultra` use the pressure color; `fast` shows in fast mode. |
 | Context bar | Merged with model. Green / yellow / red by pressure. |
 | User tier | Neutral white-weight (MAX bold, PRO normal, dim otherwise) — identity, never a status color. Truncated display name. |

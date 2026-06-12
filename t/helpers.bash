@@ -36,7 +36,7 @@ debug_log() {
 # Source individual functions by extracting them from statusline.sh.
 # This is deliberate: we test the actual production code, not copies.
 eval "$(awk '
-    /^(abbreviate_model_id|get_runtime_model|format_reset_relative|format_reset_absolute|get_reset_seconds|format_duration|should_show_extra|get_cache_health|infer_cache_ttl_class|format_cache_active_time|build_cache_indicator|get_usage_color|get_seven_day_color|get_adaptive_ttl|reap_stale_lock|merge_stdin_rate_limits|abbrev_effort|effort_color|_epoch_from_ts|_fmt_epoch|render_bar|format_money_minor|oauth_token_expired|refresh_oauth_credentials_file|get_context_limit|is_1m_model|rotate_debug_log|build_display_path|build_usage_display|build_extra_usage_display|build_user_info|get_user_tier)\(\)/ { capture=1 }
+    /^(abbreviate_model_id|get_runtime_model|format_reset_relative|format_reset_absolute|get_reset_seconds|format_duration|should_show_extra|get_cache_health|infer_cache_ttl_class|format_cache_active_time|build_cache_indicator|get_usage_color|get_seven_day_color|get_adaptive_ttl|reap_stale_lock|merge_stdin_rate_limits|abbrev_effort|effort_color|_epoch_from_ts|_fmt_epoch|render_bar|format_money_minor|oauth_token_expired|refresh_oauth_credentials_file|is_default_1m_family|get_context_limit|is_1m_model|rotate_debug_log|build_display_path|build_usage_display|build_extra_usage_display|build_user_info|get_user_tier)\(\)/ { capture=1 }
     capture { print }
     capture && /^}$/ { capture=0 }
 ' "$SCRIPT_DIR/statusline.sh")"
