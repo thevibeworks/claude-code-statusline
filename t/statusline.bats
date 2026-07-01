@@ -633,6 +633,41 @@ EOF
     rm -rf "$tmpdir"
 }
 
+# --- is_1m_model ------------------------------------------------------------
+
+@test "is_1m_model: ctx_size > 200k is sufficient regardless of exceeds_200k" {
+    model_id="claude-opus-4-8" ctx_size=1000000 exceeds_200k=false
+    run is_1m_model
+    [ "$status" -eq 0 ]
+}
+
+@test "is_1m_model: exceeds_200k_tokens=true does NOT imply a 1M window" {
+    # The real bug: claude-opus-4-6 with a genuine 200k window reports
+    # exceeds_200k_tokens=true once cumulative session usage passes 200k
+    # tokens. That must not be read as "this is a 1M-context model."
+    model_id="claude-opus-4-6" ctx_size=200000 exceeds_200k=true
+    run is_1m_model
+    [ "$status" -eq 1 ]
+}
+
+@test "is_1m_model: falls back to [1m] suffix when ctx_size is absent" {
+    model_id="claude-opus-4-6[1m]" ctx_size="" exceeds_200k=false
+    run is_1m_model
+    [ "$status" -eq 0 ]
+}
+
+@test "is_1m_model: falls back to default-1M family when ctx_size is absent" {
+    model_id="claude-fable-5" ctx_size="" exceeds_200k=false
+    run is_1m_model
+    [ "$status" -eq 0 ]
+}
+
+@test "is_1m_model: plain 200k model with no signals is not 1M" {
+    model_id="claude-sonnet-4-6" ctx_size=200000 exceeds_200k=false
+    run is_1m_model
+    [ "$status" -eq 1 ]
+}
+
 # --- premium band -> bar color ---------------------------------------------
 
 @test "premium_band_level: yellow band over 200k, red past 800k" {
@@ -642,13 +677,19 @@ EOF
     context_pct=82; [ "$(premium_band_level)" = "2" ]
 }
 
-@test "premium_band_level: authoritative exceeds flag wins at low pct" {
+@test "premium_band_level: exceeds_200k_tokens is ignored (cumulative-usage flag, not a window-size signal)" {
+    # Real logs: a genuine 200k-window opus-4-6 session reports
+    # exceeds_200k_tokens=true once cumulative usage passes 200k tokens — the
+    # flag tracks session-total usage, not window capacity. Band must follow
+    # ctx_size x context_pct only.
     ctx_size=1000000 context_pct=15 exceeds_200k=true
-    [ "$(premium_band_level)" = "1" ]
+    [ "$(premium_band_level)" = "0" ]
 }
 
-@test "premium_band_level: 200k window never enters the band" {
+@test "premium_band_level: 200k window never enters the band, even with exceeds_200k=true" {
     ctx_size=200000 context_pct=90 exceeds_200k=false
+    [ "$(premium_band_level)" = "0" ]
+    exceeds_200k=true
     [ "$(premium_band_level)" = "0" ]
 }
 
@@ -954,18 +995,34 @@ EOF
     rm -rf "$tmpdir"
 }
 
-@test "integration: exceeds_200k flag is authoritative even when context% is low" {
+@test "integration: exceeds_200k_tokens does not force the premium band at low pct" {
     tmpdir=$(mktemp -d)
     mkdir -p "$tmpdir/.claude"
-    # The CLI flags the premium band (exceeds_200k_tokens) while our computed
-    # context (15% of 1M = 150k) is below 200k. Trust the flag; show 200k+
-    # rather than a contradictory sub-200k number.
+    # exceeds_200k_tokens tracks cumulative session usage crossing 200k, not
+    # window size — real logs show it true on genuine 200k-window sessions
+    # too. The 1M tag still comes from context_window_size (ctx_size), but the
+    # premium band must reflect the real computed 150k (15% of 1M), not the
+    # flag: no yellow band here.
     result=$(echo '{"model":{"id":"claude-fable-5","display_name":"Fable 5"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.174","exceeds_200k_tokens":true,"context_window":{"used_percentage":15,"context_window_size":1000000}}' \
         | HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
     plain=$(strip_ansi "$result")
     [[ "$plain" == *"fabl5[1m]"* ]]
-    # Authoritative flag colors the bar yellow even at a low computed 15%.
-    [[ "$result" == *$'\033[0;33m'*"15%"* ]]
+    [[ "$result" != *$'\033[0;33m'*"15%"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: exceeds_200k_tokens on a real 200k window does not add a false 1M tag" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    # Real bug, real logs: claude-opus-4-6 (no [1m] suffix) with a genuine
+    # 200k context_window_size reports exceeds_200k_tokens=true once session
+    # cumulative usage passes 200k tokens. That flag must not be read as "this
+    # window is 1M" — ctx_size=200000 is the ground truth here.
+    result=$(echo '{"model":{"id":"claude-opus-4-6","display_name":"Opus 4.6"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.197","exceeds_200k_tokens":true,"context_window":{"used_percentage":100,"context_window_size":200000}}' \
+        | HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"opus4.6"* ]]
+    [[ "$plain" != *"[1m"* ]]
     rm -rf "$tmpdir"
 }
 
@@ -983,9 +1040,10 @@ EOF
 @test "integration: suffix-less model on a 1M window (ctx_size) gets the 1M tag" {
     tmpdir=$(mktemp -d)
     mkdir -p "$tmpdir/.claude"
-    # Observed in real logs: opus-4-8 with NO [1m] suffix yet a 1M window and
-    # exceeds_200k=true at ~24% — proves a >200k window. The CLI's reported
-    # context_window_size is authoritative, so the tag must follow it.
+    # Observed in real logs: opus-4-8 with NO [1m] suffix and a reported 1M
+    # context_window_size. That field alone (not exceeds_200k_tokens, which
+    # only tracks cumulative usage — see is_1m_model) is authoritative, so the
+    # tag must follow it.
     result=$(echo '{"model":{"id":"claude-opus-4-8","display_name":"Opus 4.8"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.174","exceeds_200k_tokens":true,"context_window":{"used_percentage":24,"context_window_size":1000000}}' \
         | HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
     plain=$(strip_ansi "$result")

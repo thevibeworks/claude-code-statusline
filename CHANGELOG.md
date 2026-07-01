@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.10.2 — 2026-06-12 — fix false [1m] tags from misread exceeds_200k_tokens
+
+A systematic audit of the live debug log (857 real turns across two rotated
+log files) found `exceeds_200k_tokens` was being misread since the v0.9.1 1M
+detection rework. It does not mean "this window is bigger than 200k" — it
+means "this session's cumulative token usage has passed 200k so far." On a
+genuine 200k-window model (`claude-opus-4-6`, no `[1m]` suffix), once a long
+session's total usage crosses 200k, the CLI reports the flag `true` too —
+`total_input_tokens > 200000` predicted the flag in 839/840 sampled turns;
+`context_window_size > 200000` predicted it in only 719/840. Treating it as a
+window-size signal put a false `[1m]` tag on **~14% of observed renders**
+(121/857) — every long-running session on a real 200k model.
+
+### Fixed
+
+- **`is_1m_model`**: dropped the `exceeds_200k_tokens` fallback tier entirely.
+  `context_window_size` (`ctx_size`) is reported on every sampled turn and is
+  the actual ground truth for window capacity; the `[1m]` suffix / default-1M
+  family check remains as the fallback for older CLIs that omit `ctx_size`.
+- **`premium_band_level`**: same fix — the flag no longer forces the yellow
+  band on a low-usage 1M session or a real 200k session. Band is now purely
+  `context_pct x ctx_size` against the 200k/800k thresholds.
+
+212 tests (6 new), shellcheck clean.
+
 ## v0.10.1 — 2026-06-12 — Claude Sonnet 5 support
 
 Claude Code 2.1.197 shipped Claude Sonnet 5, and it broke the statusline the

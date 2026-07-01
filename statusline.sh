@@ -1906,18 +1906,25 @@ get_runtime_model() {
     esac
 }
 
-# Detect if this is a 1M context model. Prefer the CLI's authoritative signals
-# over the model name — since 2.1.173 the [1m] suffix is stripped whenever 1M is
-# the active default (observed on both fable AND opus when running 1M), so the
-# name alone under-detects. Order: real window size > the >200k flag > name.
+# Detect if this is a 1M context model. Prefer the CLI's authoritative window
+# size over the model name — since 2.1.173 the [1m] suffix is stripped
+# whenever 1M is the active default (observed on fable, opus, and sonnet-5),
+# so the name alone under-detects. Order: real window size > name.
 #   1. ctx_size > 200k          — the window the CLI reports (ground truth)
-#   2. exceeds_200k=true        — only a >200k window can exceed 200k tokens
-#   3. [1m] suffix / 1M family  — name fallbacks for older CLIs lacking the above
+#   2. [1m] suffix / 1M family  — name fallback for older CLIs lacking ctx_size
+#
+# exceeds_200k_tokens is NOT a window-size signal and must not be used as one:
+# real logs show claude-opus-4-6 (a genuine 200k-window model, no [1m] suffix)
+# reporting exceeds_200k_tokens=true once cumulative session usage passes
+# 200k tokens (total_input_tokens > 200000 predicts the flag in 839/840
+# sampled turns; context_window_size > 200000 predicts it in only 719/840).
+# The flag tracks "this session has used over 200k tokens so far", not "this
+# window is bigger than 200k" — treating it as the latter mis-tagged a real
+# 200k opus session as opus4.6[1m] on ~14% of observed renders.
 is_1m_model() {
     if [ -n "$ctx_size" ] && [ "$ctx_size" -gt 200000 ] 2>/dev/null; then
         return 0
     fi
-    [ "$exceeds_200k" = "true" ] && return 0
     [[ "$model_id" == *"[1m]"* ]] || is_default_1m_family "$model_id"
 }
 
@@ -1925,7 +1932,8 @@ is_1m_model() {
 # is higher. The cue lives in the CONTEXT BAR's color (not extra text — the
 # absolute NNNk was redundant with the bar's own percentage): yellow past 200k,
 # red past 800k. Echoes 0 (none) / 1 (yellow) / 2 (red).
-# Prefers the CLI's authoritative exceeds_200k flag, falls back to pct × size.
+# Computed from ctx_size × context_pct only — see is_1m_model for why
+# exceeds_200k_tokens is not a valid signal here either.
 premium_band_level() {
     local size="${ctx_size:-1000000}"
     local abs=""
@@ -1934,8 +1942,6 @@ premium_band_level() {
     fi
     if [ -n "$abs" ] && [ "$abs" -gt 800000 ] 2>/dev/null; then
         echo 2
-    elif [ "$exceeds_200k" = "true" ]; then
-        echo 1
     elif [ -n "$abs" ] && [ "$abs" -gt 200000 ] 2>/dev/null; then
         echo 1
     else
