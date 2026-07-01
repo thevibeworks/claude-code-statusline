@@ -326,11 +326,13 @@ eval "$(echo "$input" | jq -r '
 # Families that ship a 1M context window by default. Claude Code 2.1.173+ omits
 # the [1m] suffix for these (1M is implied), so the suffix alone no longer
 # detects them — match on the family instead. The [1m] suffix is now reserved
-# for opt-in 1M on default-200k families (opus/sonnet), still honored below.
+# for opt-in 1M on default-200k families (opus, and sonnet before 5), still
+# honored below. sonnet-5 joined fable as default-1M in 2.1.197 — matched by
+# exact major version so older sonnet-4-x/4-5 stay opt-in.
 is_default_1m_family() {
     case "$1" in
-    *fable*) return 0 ;;
-    *)       return 1 ;;
+    *fable*|*sonnet-5*) return 0 ;;
+    *)                  return 1 ;;
     esac
 }
 
@@ -1956,9 +1958,15 @@ abbreviate_model_id() {
         family="${family%%-[0-9]*}"
         local rest="${m#claude-${family}-}"
         local major="${rest%%-*}"
-        rest="${rest#*-}"
-        local minor="${rest%%-*}"
-        echo "${family}${major}.${minor}"
+        if [[ "$rest" == *-* ]]; then
+            # major.minor versioning (opus-4-8, sonnet-4-6, haiku-4-5)
+            local minor="${rest#*-}"
+            minor="${minor%%-*}"
+            echo "${family}${major}.${minor}"
+        else
+            # flat versioning (sonnet-5) — no minor component to append
+            echo "${family}${major}"
+        fi
         ;;
     claude-fable-*)
         # Fable uses single-component versioning (claude-fable-5) — no

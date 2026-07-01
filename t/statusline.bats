@@ -27,6 +27,11 @@ setup() {
     [ "$result" = "haiku4.5" ]
 }
 
+@test "abbreviate_model_id: sonnet-5 flat versioning -> sonnet5 (no false .5 minor)" {
+    result=$(abbreviate_model_id "claude-sonnet-5")
+    [ "$result" = "sonnet5" ]
+}
+
 @test "abbreviate_model_id: fable-5 -> fabl5 (4-char family + version)" {
     result=$(abbreviate_model_id "claude-fable-5")
     [ "$result" = "fabl5" ]
@@ -782,9 +787,19 @@ EOF
     [ "$status" -eq 1 ]
 }
 
-@test "is_default_1m_family: sonnet is not a default-1M family" {
+@test "is_default_1m_family: sonnet-4-6 is not a default-1M family" {
     run is_default_1m_family "claude-sonnet-4-6"
     [ "$status" -eq 1 ]
+}
+
+@test "is_default_1m_family: sonnet-5 is a default-1M family (2.1.197+)" {
+    run is_default_1m_family "claude-sonnet-5"
+    [ "$status" -eq 0 ]
+}
+
+@test "is_default_1m_family: sonnet-5 with date suffix still matches" {
+    run is_default_1m_family "claude-sonnet-5-20260601"
+    [ "$status" -eq 0 ]
 }
 
 # --- get_context_limit ---
@@ -799,7 +814,12 @@ EOF
     [ "$result" = "1000000" ]
 }
 
-@test "get_context_limit: standard model" {
+@test "get_context_limit: sonnet-5 defaults to 1M without a [1m] suffix (2.1.197+)" {
+    result=$(get_context_limit "claude-sonnet-5")
+    [ "$result" = "1000000" ]
+}
+
+@test "get_context_limit: sonnet-4-6 stays 200k (1M is still opt-in for it)" {
     result=$(get_context_limit "claude-sonnet-4-6")
     [ "$result" = "200000" ]
 }
@@ -904,6 +924,20 @@ EOF
     plain=$(strip_ansi "$result")
     [[ "$plain" == *"fabl5[1m]"* ]]
     [[ "$plain" != *"[1m:"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: sonnet-5 WITHOUT [1m] suffix (2.1.197+) renders sonnet5[1m], not sonnet5.5" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    # 2.1.197+ strips the [1m] suffix from Sonnet 5 (1M is its default), same as
+    # fable. Observed in real logs: id="claude-sonnet-5", exceeds_200k=true,
+    # context_window_size=1000000, no suffix.
+    result=$(echo '{"model":{"id":"claude-sonnet-5","display_name":"Sonnet 5"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.197","exceeds_200k_tokens":true,"context_window":{"used_percentage":29,"context_window_size":1000000}}' \
+        | HOME="$tmpdir" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"sonnet5[1m]"* ]]
+    [[ "$plain" != *"sonnet5.5"* ]]
     rm -rf "$tmpdir"
 }
 

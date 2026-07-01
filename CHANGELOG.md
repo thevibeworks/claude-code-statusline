@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.10.1 — 2026-06-12 — Claude Sonnet 5 support
+
+Claude Code 2.1.197 shipped Claude Sonnet 5, and it broke the statusline the
+same way Fable 5 did back in v0.9.1 — plus a new one.
+
+### Fixed
+
+- **`sonnet5.5[1m]` instead of `sonnet5[1m]` (critical, live-broken).**
+  `abbreviate_model_id` assumed every `claude-opus-*`/`claude-sonnet-*`/
+  `claude-haiku-*` ID has a major.minor version pair (`opus-4-8` -> `opus4.8`).
+  Sonnet 5 uses flat versioning (`claude-sonnet-5`, no minor component), so the
+  minor-extraction fallback re-read the major digit as the minor and doubled
+  it: `sonnet` + `5` + `.` + `5`. Fixed by checking whether the id has a second
+  version component before appending one.
+- **1M context not detected for suffix-less Sonnet 5.** Same pattern as Fable
+  5 in v0.9.1: Claude Code 2.1.197 omits the `[1m]` suffix for Sonnet 5 because
+  1M is now its default (confirmed live: `context_window_size:1000000`,
+  `exceeds_200k_tokens:true`, `model.id:"claude-sonnet-5"`, no suffix).
+  `is_default_1m_family` only matched `fable`; added `sonnet-5` by exact major
+  version so `sonnet-4-6`/`sonnet-4-5` correctly stay opt-in.
+
+206 tests (5 new), shellcheck clean.
+
 ## v0.10.0 — 2026-06-12 — learned 7d forecast + premium band in the bar
 
 The original initiative, delivered: the statusline watches your 7d usage with
