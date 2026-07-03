@@ -196,12 +196,12 @@ setup() {
     [ -z "$result" ]
 }
 
-@test "build_usage_display: 5h at 87% includes reset countdown" {
+@test "build_usage_display: 5h at 87% includes wall-clock reset time" {
     reset_time=$(date -u -d '+1 hour' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":87,\"resets_at\":\"$reset_time\"},\"seven_day\":{\"utilization\":10}}"
     result=$(build_usage_display "$usage" "")
     plain=$(strip_ansi "$result")
-    [[ "$plain" =~ 5h\[87%@ ]]
+    [[ "$plain" =~ 5h\[87%@[0-9]{2}:[0-9]{2}\] ]]
 }
 
 @test "build_usage_display: 7d at 75% under pace pressure shows reset" {
@@ -232,16 +232,14 @@ setup() {
 
 @test "build_usage_display: on-pace 7d hides runway and reset suffix" {
     # 7d 40% late in the window (reset in ~1d => ~6d elapsed) is well under
-    # pace, so no runway hint, no @reset. The 5h countdown is always visible
-    # (a live window always shows its @remaining), so 5h carries @ here.
-    # +3h30m (not a whole hour): renders 3h30m or 3h29m depending on the
-    # second the clock ticks, so the @3h prefix assertion can't flake.
+    # pace, so no runway hint, no @reset. The 5h reset time is always visible
+    # (a live window always shows its wall-clock @HH:MM), so 5h carries @ here.
     reset_time=$(date -u -d '+3 hours 30 minutes' '+%Y-%m-%dT%H:%M:%SZ')
     reset_time_7d=$(date -u -d '+1 day' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":50,\"resets_at\":\"$reset_time\"},\"seven_day\":{\"utilization\":40,\"resets_at\":\"$reset_time_7d\"}}"
     result=$(build_usage_display "$usage" "")
     plain=$(strip_ansi "$result")
-    [[ "$plain" == *"5h[50%@3h"* ]]
+    [[ "$plain" =~ 5h\[50%@[0-9]{2}:[0-9]{2}\] ]]
     [[ "$plain" == *"7d[40%]"* ]]
     [[ "$plain" != *"d!"* ]]
 }
@@ -1160,9 +1158,8 @@ JSON
     payload 40 | HOME="$tmpdir" CLAUDE_DATA_DIR="$tmpdir/.claude/statusline" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" >/dev/null
     result=$(payload 43 | HOME="$tmpdir" CLAUDE_DATA_DIR="$tmpdir/.claude/statusline" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh")
     plain=$(strip_ansi "$result")
-    # +N binds tight to its badge, outside the brackets: 5h[43%@3h...]+3
-    [[ "$plain" == *"5h[43%@3h"* ]]
-    [[ "$plain" == *"]+3"* ]]
+    # +N binds tight to its badge, outside the brackets: 5h[43%@HH:MM]+3
+    [[ "$plain" =~ 5h\[43%@[0-9]{2}:[0-9]{2}\]\+3 ]]
     # State is per-session and lives beside the cache-health files.
     [ -f "$tmpdir/sessions/sess-bump_quota_seen" ]
     rm -rf "$tmpdir"
@@ -1198,25 +1195,50 @@ JSON
     [ -z "$result" ]
 }
 
-# --- 5h reset countdown (always visible, relative) ---
+# --- 5h reset time (always visible, wall-clock) ---
+# Wall-clock, not a countdown: the statusline only re-renders on activity,
+# so a relative "@1h38m" decays into a lie during idle gaps. @HH:MM stays
+# true in a frozen frame (v0.7.0 rationale, restored in v0.14.0).
 
-@test "build_usage_display: 5h at 40% shows relative remaining time" {
-    # +1h30m avoids the whole-hour boundary: renders 1h30m or 1h29m.
+@test "format_reset_absolute: future timestamp renders local HH:MM" {
+    ts=$(date -u -d '+2 hours 30 minutes' '+%Y-%m-%dT%H:%M:%SZ')
+    result=$(format_reset_absolute "$ts")
+    [[ "$result" =~ ^[0-9]{2}:[0-9]{2}$ ]]
+}
+
+@test "format_reset_absolute: bare epoch works" {
+    ts=$(date -d '+2 hours' +%s)
+    result=$(format_reset_absolute "$ts")
+    [[ "$result" =~ ^[0-9]{2}:[0-9]{2}$ ]]
+}
+
+@test "format_reset_absolute: past timestamp returns now" {
+    ts=$(date -d '-1 hour' +%s)
+    result=$(format_reset_absolute "$ts")
+    [ "$result" = "now" ]
+}
+
+@test "format_reset_absolute: empty and null return empty" {
+    [ -z "$(format_reset_absolute "")" ]
+    [ -z "$(format_reset_absolute "null")" ]
+}
+
+@test "build_usage_display: 5h at 40% shows wall-clock reset time" {
     reset_time=$(date -u -d '+1 hour 30 minutes' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":40,\"resets_at\":\"$reset_time\"},\"seven_day\":{\"utilization\":10}}"
     result=$(build_usage_display "$usage" "")
     plain=$(strip_ansi "$result")
-    [[ "$plain" == *"5h[40%@1h"* ]]
+    [[ "$plain" =~ 5h\[40%@[0-9]{2}:[0-9]{2}\] ]]
 }
 
-@test "build_usage_display: 5h at 30% shows countdown even far from reset" {
-    # Low usage, distant reset — the old gating hid this; the countdown is
-    # now unconditional while a window is live.
+@test "build_usage_display: 5h at 30% shows reset time even far from reset" {
+    # Low usage, distant reset — the old gating hid this; the reset time is
+    # unconditional while a window is live.
     reset_time=$(date -u -d '+3 hours 30 minutes' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":30,\"resets_at\":\"$reset_time\"},\"seven_day\":{\"utilization\":10}}"
     result=$(build_usage_display "$usage" "")
     plain=$(strip_ansi "$result")
-    [[ "$plain" == *"5h[30%@3h"* ]]
+    [[ "$plain" =~ 5h\[30%@[0-9]{2}:[0-9]{2}\] ]]
 }
 
 @test "build_usage_display: 5h without resets_at stays a bare badge" {
@@ -1295,9 +1317,8 @@ JSON
     build_usage_display "$usage1" "" "$tmpdir/state" >/dev/null
     result=$(build_usage_display "$usage2" "" "$tmpdir/state")
     plain=$(strip_ansi "$result")
-    # +N outside, tight: 5h[45%@2h...]+3
-    [[ "$plain" == *"5h[45%@2h"* ]]
-    [[ "$plain" == *"]+3"* ]]
+    # +N outside, tight: 5h[45%@HH:MM]+3
+    [[ "$plain" =~ 5h\[45%@[0-9]{2}:[0-9]{2}\]\+3 ]]
     rm -rf "$tmpdir"
 }
 

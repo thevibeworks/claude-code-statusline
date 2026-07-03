@@ -66,7 +66,7 @@ Then add to `~/.claude/settings.json`:
 ## What It Shows
 
 ```text
-project (main*)  +84/-14 1h30m $6.72 opus4.8[1m][███░░░26%] cache:1h@14:20~ [MAX|you] 5h[87%@1h20m] 7d[75%@2d] ex[$16.29/$200 8% bal$4.66]
+project (main*)  +84/-14 1h30m $6.72 opus4.8[1m][███░░░26%] cache:1h@14:20~ [MAX|you] 5h[87%@14:30] 7d[75%@2d] ex[$16.29/$200 8% bal$4.66]
    |       |       |      |     |       |                        |                 |              |             |              |
  path   branch   edits   time  cost   model+context             cache             user         5h quota      7d quota      extra usage
 ```
@@ -82,7 +82,7 @@ Every component earns its place:
 | Effort | Compact lowercase badge: `lo` / `md` / `xh` / `max` / `ultra` / `auto` (`high` is the default and stays hidden). Dim for routine levels; `max` / `ultra` use the pressure color; `fast` shows in fast mode. |
 | Context bar | Merged with model. Green / yellow / red by window pressure. On 1M models the bar also carries the premium input-pricing band: yellow past 200k tokens, red past 800k — the % alone looks calm (320k = 32%) while every request bills at the premium rate. A real 0% (e.g. right after `/compact` resets the window) renders a visibly empty bar `[░░░░░░0%]` — the snap to empty *is* the refresh signal; the bar hides only when no context data exists at all. |
 | User tier | Neutral white-weight (MAX bold, PRO normal, dim otherwise) — identity, never a status color. Truncated display name. |
-| Quota | Integer percentages. The 5h badge always carries its window countdown while a window is live — `5h[42%@1h20m]` reads "42% used, resets in 1h20m" — because on a 5h horizon the time remaining is the number you plan the current sitting around. Same `@remaining` language as the 7d badge; relative, not wall-clock, so no mental subtraction. When a window's utilization climbs between renders, a reverse-video `+N` token appears right after the badge for ~60s: `5h[44%@1h18m]+2` means "you just burned 2%". A drop (window reset) stays quiet — the fresh low number is its own signal. **7d is forecast, not leveled**: a learned per-weekday burn profile (EWMA over your own usage history) plus your recent 24h burn project whether the quota outlasts the window — your heavy Tuesday counts more than a generic average. The verdict is color alone; under pressure the badge shows explicit time remaining in the window: `7d[44%@5d]` red means "at your pace, dry days before the reset 5 days from now". Cold start (<14 days history) falls back to window-average pacing. Recovery color when reset is imminent. |
+| Quota | Integer percentages. The 5h badge always carries its reset time while a window is live — `5h[42%@14:30]` reads "42% used, resets at 14:30" — because on a 5h horizon the reset is the number you plan the current sitting around. Wall-clock, not a countdown, on purpose: Claude Code only re-renders the statusline on activity, so a relative "@1h38m" silently decays into a lie during idle gaps, while "@14:30" stays true in a frozen frame. (The 7d badge stays relative — `@5d` decays at day granularity, slower than any idle gap.) When a window's utilization climbs between renders, a reverse-video `+N` token appears right after the badge for ~60s: `5h[44%@14:32]+2` means "you just burned 2%". A drop (window reset) stays quiet — the fresh low number is its own signal. **7d is forecast, not leveled**: a learned per-weekday burn profile (EWMA over your own usage history) plus your recent 24h burn project whether the quota outlasts the window — your heavy Tuesday counts more than a generic average. The verdict is color alone; under pressure the badge shows explicit time remaining in the window: `7d[44%@5d]` red means "at your pace, dry days before the reset 5 days from now". Cold start (<14 days history) falls back to window-average pacing. Recovery color when reset is imminent. |
 | Extra usage | Monthly spend, limit, prepaid balance. `--extra auto` shows when quota runs out. |
 | Cache health | Detects observed prompt-cache rebuilds and cache-read drops. `cache!` on break, `cache~` when building. If a future Claude Code stdin includes TTL breakdown, `--cache always` can show `cache:1h@14:20`; current stdin usually exposes aggregate cache tokens only. Hidden when healthy by default. |
 
@@ -108,7 +108,7 @@ red, matching its Claude Code TUI color) = model family; everything else is
 | Prompt cache break detection | -- | Yes |
 | OAuth + macOS Keychain | -- | Yes |
 | Quota bump flash (+N) | -- | Yes |
-| 238 bats tests + CI | -- | Yes |
+| 242 bats tests + CI | -- | Yes |
 
 ## Configuration
 
@@ -143,11 +143,11 @@ Flags go in the command string in `~/.claude/settings.json`:
 ### Extra Usage Gating
 
 ```text
---extra auto        5h[24%@3h10m] 7d[10%]                               (calm, hidden)
---extra auto        5h[87%@1h20m] 7d[10%] ex[$19.52/$200 10%]           (5h >= 80%, shown)
---extra always      5h[24%@3h10m] 7d[10%] ex[$19.52/$200 10% bal$4.66]  (always shown)
---extra on-limit    5h[87%@1h20m] 7d[10%] ex[$19.52/$200 10%]           (same as auto minus extra_util gate)
---extra off         5h[24%@3h10m] 7d[10%]                               (always hidden)
+--extra auto        5h[24%@14:30] 7d[10%]                               (calm, hidden)
+--extra auto        5h[87%@14:30] 7d[10%] ex[$19.52/$200 10%]           (5h >= 80%, shown)
+--extra always      5h[24%@14:30] 7d[10%] ex[$19.52/$200 10% bal$4.66]  (always shown)
+--extra on-limit    5h[87%@14:30] 7d[10%] ex[$19.52/$200 10%]           (same as auto minus extra_util gate)
+--extra off         5h[24%@14:30] 7d[10%]                               (always hidden)
 ```
 
 `auto` (default) shows extra when quota runs out (5h >= 80%, 7d >= 70%) or
@@ -281,7 +281,7 @@ run. Setting only `CLAUDE_CACHE_DIR` keeps the legacy single-dir behavior.
 npm exec --yes bats -- t/
 ```
 
-238 tests across `t/statusline.bats` (226 statusline + integration) and
+242 tests across `t/statusline.bats` (230 statusline + integration) and
 `t/install.bats` (12 installer). CI runs on push and PR to `main`.
 
 ## Project Structure

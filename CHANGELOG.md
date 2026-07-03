@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.14.0 — 2026-07-02 — 5h reset back to wall-clock (@14:30)
+
+v0.11.0 re-made a mistake v0.7.0 had already fixed and documented: it turned
+the 5h reset into a relative countdown (`@1h38m`). The statusline only
+re-renders on activity, so a countdown rendered 30 minutes before you look at
+it overstates the wait by 30 minutes — and idle is exactly when no re-render
+comes to correct it.
+
+The v0.11.0 rationale ("everything in a frozen frame is equally stale")
+missed the asymmetry: cost, context %, and usage % are **"as of" facts** —
+they only change with activity, and activity triggers a re-render, so a stale
+frame still reads truthfully as "the state when I stepped away." A countdown
+is a **"from now" claim** whose truth decays with wall-clock time at zero
+activity. Wall-clock `@14:30` is the only format that stays true in a frozen
+frame.
+
+The decay rule for what a non-realtime statusline may display: a quantity is
+safe if it changes only with activity, or decays slower than a plausible idle
+gap. Minute-scale countdowns on a 5h window fail; the 7d badge's `@5d` passes
+(day granularity) and stays relative.
+
+### Changed
+
+- **5h reset time is wall-clock again**: `5h[42%@14:30]`, local TZ, `@now`
+  when past. Restored `format_reset_absolute` (lean version — the old `day`
+  mode stays gone; the 7d badge no longer uses day names).
+- v0.11.0's *always-visible* half survives: the reset time still shows on
+  every live window, not just under pressure. Only the format reverted.
+
+242 tests (4 restored), shellcheck baseline unchanged.
+
 ## v0.13.0 — 2026-07-02 — escalating fetch cooldown + categorized !badges
 
 Live logs showed 23% of usage fetches failing 429 in clusters exactly one

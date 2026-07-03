@@ -1364,6 +1364,28 @@ format_reset_relative() {
     fi
 }
 
+# Wall-clock reset time (@14:30), local TZ. Claude Code only re-renders the
+# statusline on activity, so any minute-scale countdown quietly decays into a
+# lie during an idle gap — "@1h38m" rendered 30 minutes ago overstates the
+# wait by 30 minutes, and idle is exactly when no re-render comes to fix it.
+# Wall-clock stays true no matter how stale the frame is. The "as of" numbers
+# in the same frame (cost, context %, usage %) don't have this problem: they
+# only change with activity, and activity triggers a re-render. Restored from
+# v0.7.0 (v0.11.0 reversed it and re-made the v0.6-era mistake). "now" when
+# the reset is already past.
+format_reset_absolute() {
+    local ts="$1"
+    [ -z "$ts" ] || [ "$ts" = "null" ] && return
+    local reset_epoch
+    reset_epoch=$(_epoch_from_ts "$ts")
+    [ -z "$reset_epoch" ] && return
+    if [ "$reset_epoch" -le "$(date +%s)" ] 2>/dev/null; then
+        echo "now"
+        return
+    fi
+    _fmt_epoch "$reset_epoch" '%H:%M'
+}
+
 get_reset_seconds() {
     local ts="$1"
     [ -z "$ts" ] || [ "$ts" = "null" ] && { echo ""; return; }
@@ -1704,12 +1726,14 @@ build_usage_display() {
     local parts=()
 
     # 5h quota (always show if >0)
-    # The window countdown is always visible while a window is live: a 5h
-    # horizon is short enough that "how long until reset" is the number you
-    # plan the current sitting around, so it isn't gated on pressure like the
-    # 7d deadline. Relative (@1h20m) — same @remaining language as the 7d
-    # badge — since "1h20m left" is the answer; a wall clock makes you do the
-    # subtraction. Recovery color (DIM_GREEN) when high usage + reset <= 30min.
+    # The reset time is always visible while a window is live: a 5h horizon
+    # is short enough that "when does it reset" is the number you plan the
+    # current sitting around, so it isn't gated on pressure like the 7d
+    # deadline. WALL-CLOCK (@14:30), not a countdown: the statusline only
+    # re-renders on activity, so "@1h38m" decays into a lie during idle gaps
+    # while "@14:30" stays true in a frozen frame (see format_reset_absolute).
+    # The 7d badge keeps relative @Nd — day granularity outlives any idle gap.
+    # Recovery color (DIM_GREEN) when high usage + reset <= 30min.
     if [ "$five_int" -gt 0 ] 2>/dev/null; then
         local color=$(get_usage_color "$five_int")
         local reset_suffix=""
@@ -1720,8 +1744,8 @@ build_usage_display() {
             if [ "$five_int" -ge 80 ] && [ -n "$reset_secs" ] && [ "$reset_secs" -le $FIVE_HOUR_RECOVERY_SECS ] 2>/dev/null; then
                 color="$DIM_GREEN"
             fi
-            local rel=$(format_reset_relative "$five_reset")
-            [ -n "$rel" ] && reset_suffix="${DIM}@${rel}${color}"
+            local abs=$(format_reset_absolute "$five_reset")
+            [ -n "$abs" ] && reset_suffix="${DIM}@${abs}${color}"
         fi
         # Bump flash: reverse-video +N right after the badge — bound tight so
         # it can't read as belonging to the next badge, unmissable without
