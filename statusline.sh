@@ -368,10 +368,10 @@ CYAN='\033[0;36m'
 DIM_CYAN='\033[2;36m'
 WHITE='\033[0;37m'
 BOLD_WHITE='\033[1;37m'
-# Attribute toggles for a brief emphasis at the CURRENT hue (quota bump flash).
-# 22 first clears any dim so bold applies cleanly even inside DIM_GREEN text.
-BOLD='\033[22;1m'
-NO_BOLD='\033[22m'
+# Reverse video for the quota bump flash — inverts fg/bg at whatever the
+# badge's current color is, so the ▲N glyph pops without adding a new hue.
+REVERSE='\033[7m'
+NO_REVERSE='\033[27m'
 RESET='\033[0m'
 
 # Usage quota tracking
@@ -1655,11 +1655,11 @@ build_usage_display() {
             local rel=$(format_reset_relative "$five_reset")
             [ -n "$rel" ] && reset_suffix="${DIM}@${rel}${color}"
         fi
-        # Bump flash: bold "+N" at the badge's current hue — vivid without a
-        # new color, so the status lanes stay unambiguous.
+        # Bump flash: reverse-video ▲N outside the brackets — spatially
+        # distinct and unmissable without adding a fourth color lane.
         local bump_part=""
-        [ "$five_bump" -gt 0 ] 2>/dev/null && bump_part="${BOLD}+${five_bump}${NO_BOLD}${color}"
-        parts+=("${DIM}5h${color}[${five_int}%${bump_part}${reset_suffix}]${RESET}")
+        [ "$five_bump" -gt 0 ] 2>/dev/null && bump_part=" ${color}${REVERSE}▲${five_bump}${NO_REVERSE}"
+        parts+=("${DIM}5h${color}[${five_int}%${reset_suffix}]${bump_part}${RESET}")
     fi
 
     # 7d aggregate quota (if present and >0). Color comes from PACE, not level:
@@ -1727,8 +1727,8 @@ build_usage_display() {
             reset_suffix="${DIM}@${rem}${color}"
         fi
         local bump_part=""
-        [ "$seven_bump" -gt 0 ] 2>/dev/null && bump_part="${BOLD}+${seven_bump}${NO_BOLD}${color}"
-        parts+=("${DIM}7d${color}[${seven_int}%${bump_part}${reset_suffix}]${RESET}")
+        [ "$seven_bump" -gt 0 ] 2>/dev/null && bump_part=" ${color}${REVERSE}▲${seven_bump}${NO_REVERSE}"
+        parts+=("${DIM}7d${color}[${seven_int}%${reset_suffix}]${bump_part}${RESET}")
     fi
 
     # Model-specific 7d quotas

@@ -1148,7 +1148,7 @@ JSON
     rm -rf "$tmpdir"
 }
 
-@test "integration: 5h utilization climb flashes +N on the next render" {
+@test "integration: 5h utilization climb flashes ▲N on the next render" {
     tmpdir=$(mktemp -d)
     mkdir -p "$tmpdir/.claude"
     echo '{"claudeAiOauth":{"accessToken":"fake"}}' > "$tmpdir/.claude/.credentials.json"
@@ -1160,7 +1160,8 @@ JSON
     payload 40 | HOME="$tmpdir" CLAUDE_DATA_DIR="$tmpdir/.claude/statusline" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" >/dev/null
     result=$(payload 43 | HOME="$tmpdir" CLAUDE_DATA_DIR="$tmpdir/.claude/statusline" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh")
     plain=$(strip_ansi "$result")
-    [[ "$plain" == *"5h[43%+3@"* ]]
+    # ▲N lives outside the badge brackets: 5h[43%@3h...] ▲3
+    [[ "$plain" == *"5h[43%@3h"*"▲3"* ]]
     # State is per-session and lives beside the cache-health files.
     [ -f "$tmpdir/sessions/sess-bump_quota_seen" ]
     rm -rf "$tmpdir"
@@ -1273,15 +1274,15 @@ JSON
     [ "$result" = "0 0" ]
 }
 
-@test "build_usage_display: bump renders +N inside the badge" {
+@test "build_usage_display: bump renders ▲N outside the badge" {
     tmpdir=$(mktemp -d)
     usage1='{"five_hour":{"utilization":42},"seven_day":{"utilization":10}}'
     usage2='{"five_hour":{"utilization":45},"seven_day":{"utilization":12}}'
     build_usage_display "$usage1" "" "$tmpdir/state" >/dev/null
     result=$(build_usage_display "$usage2" "" "$tmpdir/state")
     plain=$(strip_ansi "$result")
-    [[ "$plain" == *"5h[45%+3]"* ]]
-    [[ "$plain" == *"7d[12%+2]"* ]]
+    [[ "$plain" == *"5h[45%]"*"▲3"* ]]
+    [[ "$plain" == *"7d[12%]"*"▲2"* ]]
     rm -rf "$tmpdir"
 }
 
@@ -1293,7 +1294,8 @@ JSON
     build_usage_display "$usage1" "" "$tmpdir/state" >/dev/null
     result=$(build_usage_display "$usage2" "" "$tmpdir/state")
     plain=$(strip_ansi "$result")
-    [[ "$plain" == *"5h[45%+3@2h"* ]]
+    # ▲N outside: 5h[45%@2h...] ▲3
+    [[ "$plain" == *"5h[45%@2h"*"▲3"* ]]
     rm -rf "$tmpdir"
 }
 

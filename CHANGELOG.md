@@ -1,14 +1,27 @@
 # Changelog
 
-## v0.12.0 — 2026-07-02 — quota bump flash (+N when 5h/7d usage climbs)
+## v0.12.1 — 2026-07-02 — bump flash: reverse-video ▲N outside brackets
+
+### Changed
+
+- **Bump flash visual**: the quota-climb indicator moved from bold `+N`
+  inside the badge to a **reverse-video `▲N`** outside the brackets:
+  `5h[44%@1h18m] ▲2` / `7d[10%] ▲1`. Spatially distinct + reverse video
+  (inverted bg/fg) makes it unmissable without adding a fourth color lane.
+  Bold-only was too subtle in most terminals, and cramming `+N` between
+  `%` and `@` inside the brackets made it read as noise.
+- `REVERSE`/`NO_REVERSE` (`ESC[7m`/`ESC[27m`) replaces `BOLD`/`NO_BOLD`.
+
+218 tests, shellcheck warning count unchanged.
+
+## v0.12.0 — 2026-07-02 — quota bump flash (▲N when 5h/7d usage climbs)
 
 ### Added
 
-- **Bump flash**: when the 5h or 7d utilization climbs between renders, the
-  badge shows the increment in bold at its current color for ~60s:
-  `5h[44%+2@1h18m]` / `7d[10%+1]` — "you just burned 2%". Vivid without a
-  new hue, so the three color lanes stay unambiguous (bold is emphasis, not
-  a fourth status color).
+- **Bump flash**: when the 5h or 7d utilization climbs between renders, a
+  reverse-video `▲N` glyph appears outside the badge for ~60s:
+  `5h[44%@1h18m] ▲2` / `7d[10%] ▲1` — "you just burned 2%". Vivid without
+  a new hue, so the three color lanes stay unambiguous.
 - `quota_bump_notice()` + per-session state file
   (`sessions/<session_id>_quota_seen`, same lifecycle as `_cache_health`).
   Per-session on purpose: the flash compares against what THIS statusline
@@ -16,12 +29,10 @@
   of racing over shared account state.
 - Semantics: first sighting is quiet; a climb records the increment; an
   unchanged value keeps a still-fresh notice alive; a second climb
-  overwrites (latest increment, not a running sum — "+N" answers "what just
+  overwrites (latest increment, not a running sum — "▲N" answers "what just
   happened"); a drop (window reset) clears silently, the fresh low number
   being its own signal.
-- `QUOTA_BUMP_NOTICE_SECS` (60) constant; `BOLD`/`NO_BOLD` attribute
-  toggles (`ESC[22;1m` / `ESC[22m` — 22-first so bold applies cleanly even
-  inside recovery-dimmed text).
+- `QUOTA_BUMP_NOTICE_SECS` (60) constant.
 
 ### Fixed
 
