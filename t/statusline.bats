@@ -143,51 +143,6 @@ setup() {
     [ -z "$result" ]
 }
 
-# --- format_reset_absolute ---
-
-@test "format_reset_absolute: short mode returns HH:MM" {
-    ts=$(date -d '+2 hours' +%s)
-    result=$(format_reset_absolute "$ts" "short")
-    [[ "$result" =~ ^[0-9]{2}:[0-9]{2}$ ]]
-}
-
-@test "format_reset_absolute: day mode returns day name for future day" {
-    ts=$(date -d '+2 days' +%s)
-    expected=$(date -d '+2 days' +%a)
-    result=$(format_reset_absolute "$ts" "day")
-    [ "$result" = "$expected" ]
-}
-
-@test "format_reset_absolute: day mode returns HH:MM when reset is today" {
-    ts=$(date -d '+2 hours' +%s)
-    reset_day=$(date -d "@$ts" +%a)
-    today=$(date +%a)
-    if [ "$reset_day" = "$today" ]; then
-        result=$(format_reset_absolute "$ts" "day")
-        [[ "$result" =~ ^[0-9]{2}:[0-9]{2}$ ]]
-    else
-        result=$(format_reset_absolute "$ts" "day")
-        [ "$result" = "$reset_day" ]
-    fi
-}
-
-@test "format_reset_absolute: past timestamp returns now" {
-    ts=$(date -d '-1 hour' +%s)
-    result=$(format_reset_absolute "$ts" "short")
-    [ "$result" = "now" ]
-}
-
-@test "format_reset_absolute: empty returns empty" {
-    result=$(format_reset_absolute "" "short")
-    [ -z "$result" ]
-}
-
-@test "format_reset_absolute: ISO timestamp works" {
-    ts=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
-    result=$(format_reset_absolute "$ts" "short")
-    [[ "$result" =~ ^[0-9]{2}:[0-9]{2}$ ]]
-}
-
 # --- format_duration ---
 
 @test "format_duration: zero returns 0m" {
@@ -241,7 +196,7 @@ setup() {
     [ -z "$result" ]
 }
 
-@test "build_usage_display: 5h at 87% includes absolute reset time" {
+@test "build_usage_display: 5h at 87% includes reset countdown" {
     reset_time=$(date -u -d '+1 hour' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":87,\"resets_at\":\"$reset_time\"},\"seven_day\":{\"utilization\":10}}"
     result=$(build_usage_display "$usage" "")
@@ -275,15 +230,18 @@ setup() {
     [[ "$plain" != *"op["* ]]
 }
 
-@test "build_usage_display: on-pace usage hides runway and reset suffix" {
-    # 5h 50% with a distant reset stays bare; 7d 40% late in the window (reset
-    # in ~1d => ~6d elapsed) is well under pace, so no runway hint, no @reset.
-    reset_time=$(date -u -d '+4 hours' '+%Y-%m-%dT%H:%M:%SZ')
+@test "build_usage_display: on-pace 7d hides runway and reset suffix" {
+    # 7d 40% late in the window (reset in ~1d => ~6d elapsed) is well under
+    # pace, so no runway hint, no @reset. The 5h countdown is always visible
+    # (a live window always shows its @remaining), so 5h carries @ here.
+    # +3h30m (not a whole hour): renders 3h30m or 3h29m depending on the
+    # second the clock ticks, so the @3h prefix assertion can't flake.
+    reset_time=$(date -u -d '+3 hours 30 minutes' '+%Y-%m-%dT%H:%M:%SZ')
     reset_time_7d=$(date -u -d '+1 day' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":50,\"resets_at\":\"$reset_time\"},\"seven_day\":{\"utilization\":40,\"resets_at\":\"$reset_time_7d\"}}"
     result=$(build_usage_display "$usage" "")
     plain=$(strip_ansi "$result")
-    [[ "$plain" == *"5h[50%]"* ]]
+    [[ "$plain" == *"5h[50%@3h"* ]]
     [[ "$plain" == *"7d[40%]"* ]]
     [[ "$plain" != *"d!"* ]]
 }
@@ -1113,6 +1071,28 @@ EOF
     [[ "$plain" == *"78%"* ]]
 }
 
+@test "integration: post-compact zero context renders an empty bar, not nothing" {
+    # After /compact the CLI reports used_percentage=0 for the reset window
+    # (observed live, 2026-07-02). Hiding the bar at 0 read as "statusline
+    # didn't refresh" — a real stdin zero must render a visibly empty bar.
+    result=$(echo '{"model":{"id":"claude-opus-4-6[1m]","display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.197","context_window":{"used_percentage":0,"context_window_size":1000000}}' \
+        | bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"opus4.6[1m][░░░░░░0%]"* ]]
+}
+
+@test "integration: absent context data still renders no bar" {
+    # No context_window and no readable transcript: 0% would be a fabricated
+    # number, so the bar stays hidden (distinct from a real stdin zero).
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    result=$(echo '{"session_id":"sess-noctx","model":{"id":"claude-opus-4-8","display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.197"}' \
+        | HOME="$tmpdir" CLAUDE_DATA_DIR="$tmpdir/.claude/statusline" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh")
+    plain=$(strip_ansi "$result")
+    [[ "$plain" != *"0%"* ]]
+    rm -rf "$tmpdir"
+}
+
 @test "integration: account usage.cache is read regardless of session_id" {
     # The shared account cache (not a per-session file) drives the quota
     # display. Two different session_ids hitting the same account dir must
@@ -1163,7 +1143,7 @@ JSON
     result=$(echo "{\"model\":{\"id\":\"claude-opus-4-6[1m]\",\"display_name\":\"Opus\"},\"cwd\":\"/tmp/test\",\"workspace\":{\"current_dir\":\"/tmp/test\"},\"cost\":{\"total_cost_usd\":0,\"total_lines_added\":0,\"total_lines_removed\":0,\"total_api_duration_ms\":0},\"version\":\"2.1.141\",\"context_window\":{\"used_percentage\":10,\"context_window_size\":1000000},\"rate_limits\":{\"five_hour\":{\"used_percentage\":55,\"resets_at\":$five_reset},\"seven_day\":{\"used_percentage\":12,\"resets_at\":$seven_reset}}}" \
         | HOME="$tmpdir" CLAUDE_DATA_DIR="$tmpdir/.claude/statusline" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
     plain=$(strip_ansi "$result")
-    [[ "$plain" == *"5h[55%]"* ]]
+    [[ "$plain" == *"5h[55%@"* ]]
     [[ "$plain" == *"7d[12%]"* ]]
     rm -rf "$tmpdir"
 }
@@ -1198,24 +1178,32 @@ JSON
     [ -z "$result" ]
 }
 
-# --- smart 5h reset time (absolute) ---
+# --- 5h reset countdown (always visible, relative) ---
 
-@test "build_usage_display: 5h at 40% with reset in 1h shows wall clock" {
-    reset_time=$(date -u -d '+1 hour' '+%Y-%m-%dT%H:%M:%SZ')
-    expected_clock=$(date -d '+1 hour' +%H:%M)
+@test "build_usage_display: 5h at 40% shows relative remaining time" {
+    # +1h30m avoids the whole-hour boundary: renders 1h30m or 1h29m.
+    reset_time=$(date -u -d '+1 hour 30 minutes' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":40,\"resets_at\":\"$reset_time\"},\"seven_day\":{\"utilization\":10}}"
     result=$(build_usage_display "$usage" "")
     plain=$(strip_ansi "$result")
-    [[ "$plain" == *"5h[40%@${expected_clock}]"* ]]
+    [[ "$plain" == *"5h[40%@1h"* ]]
 }
 
-@test "build_usage_display: 5h at 30% with reset in 3h hides reset" {
-    reset_time=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
+@test "build_usage_display: 5h at 30% shows countdown even far from reset" {
+    # Low usage, distant reset — the old gating hid this; the countdown is
+    # now unconditional while a window is live.
+    reset_time=$(date -u -d '+3 hours 30 minutes' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":30,\"resets_at\":\"$reset_time\"},\"seven_day\":{\"utilization\":10}}"
     result=$(build_usage_display "$usage" "")
     plain=$(strip_ansi "$result")
+    [[ "$plain" == *"5h[30%@3h"* ]]
+}
+
+@test "build_usage_display: 5h without resets_at stays a bare badge" {
+    usage='{"five_hour":{"utilization":30},"seven_day":{"utilization":10}}'
+    result=$(build_usage_display "$usage" "")
+    plain=$(strip_ansi "$result")
     [[ "$plain" == *"5h[30%]"* ]]
-    [[ "$plain" != *"@"* ]] || [[ "$plain" != *"5h[30%@"* ]]
 }
 
 @test "build_usage_display: 5h at 85% with reset in 20min uses recovery color" {

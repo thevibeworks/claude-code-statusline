@@ -1,5 +1,47 @@
 # Changelog
 
+## v0.11.0 — 2026-07-02 — always-on 5h countdown + post-compact bar reset
+
+Two changes driven by live use: "how long until my 5h window resets" was
+hidden until pressure, and `/compact` made the context bar vanish instead of
+visibly resetting.
+
+### Changed
+
+- **5h badge always shows its window countdown while a window is live**:
+  `5h[42%@1h20m]` — no more gating on usage >= 80% or reset <= 2h. On a 5h
+  horizon the time remaining is the number you plan the current sitting
+  around, so hiding it until pressure hid the badge's most useful signal.
+- **5h countdown is relative (`@1h20m`), not wall-clock (`@14:30`)** — this
+  deliberately reverses the v0.5-era "absolute stays true without re-renders"
+  decision. Three reasons: (1) remaining time is the actual question; a wall
+  clock makes you do the subtraction. (2) The 7d badge already went relative
+  (`@5d`) when the pace model landed — 5h absolute was the leftover
+  inconsistency, and one `@remaining` language beats two. (3) The staleness
+  argument proves too much: when the CLI stops invoking the statusline, the
+  usage %, cost, and context bar in the same frame are equally stale — a
+  wall-clock reset time being technically true doesn't make a frozen frame
+  fresh. During active use, renders arrive seconds apart.
+- **A real stdin 0% renders an empty context bar** (`[░░░░░░0%]`) instead of
+  nothing. Observed live: after `/compact` the CLI pushes
+  `used_percentage: 0` for the reset window, and hiding the bar at zero read
+  as "the statusline didn't refresh" — the visible snap to empty IS the
+  refresh. Absent data (no `context_window`, no transcript) still renders no
+  bar; only a genuine zero shows one.
+
+### Removed
+
+- `format_reset_absolute()` and its 6 unit tests (the 5h badge was its last
+  caller), plus the now-dead `FIVE_HOUR_COUNTDOWN_SECS` /
+  `SEVEN_DAY_COUNTDOWN_SECS` gating constants.
+
+Note on the freeze *during* compaction: the CLI simply does not invoke the
+statusline while compacting (~90s observed), and a statusline script is a pure
+function of its stdin — the first post-compact payload now visibly resets the
+bar, which is everything script-side can do.
+
+209 tests (3 new), shellcheck-clean at the same baseline as v0.10.2.
+
 ## v0.10.2 — 2026-06-12 — fix false [1m] tags from misread exceeds_200k_tokens
 
 A systematic audit of the live debug log (857 real turns across two rotated

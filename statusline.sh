@@ -21,12 +21,9 @@ test_mode=false
 test_data=""
 debug_mode=false
 
-# Auto-display thresholds: two signal types gate countdown and extra visibility
-#   Signal 1 — percentage: how much quota is consumed
-#   Signal 2 — time proximity: how close is the next reset window
-FIVE_HOUR_COUNTDOWN_SECS=7200    # show countdown when reset <= 2h
+# Auto-display thresholds. The 5h countdown itself is always visible (see
+# build_usage_display); these gate the recovery color and extra visibility.
 FIVE_HOUR_RECOVERY_SECS=1800     # recovery color when reset <= 30min
-SEVEN_DAY_COUNTDOWN_SECS=259200  # show countdown when reset <= 3d
 SEVEN_DAY_RECOVERY_SECS=43200    # recovery color when reset <= 12h
 SEVEN_DAY_WINDOW_SECS=604800     # weekly quota window (fixed 7d) for pace math
 EXTRA_AUTO_UTIL_PCT=50           # show extra when its own utilization >= 50%
@@ -1294,30 +1291,6 @@ format_reset_relative() {
     fi
 }
 
-format_reset_absolute() {
-    local ts="$1" kind="${2:-short}"
-    [ -z "$ts" ] || [ "$ts" = "null" ] && return
-    local reset_epoch
-    reset_epoch=$(_epoch_from_ts "$ts")
-    [ -z "$reset_epoch" ] && return
-
-    local now_epoch=$(date +%s)
-    local delta=$((reset_epoch - now_epoch))
-    [ "$delta" -le 0 ] && { echo "now"; return; }
-
-    if [ "$kind" = "day" ]; then
-        local reset_day=$(_fmt_epoch "$reset_epoch" '%a')
-        local today=$(date +%a)
-        if [ "$reset_day" = "$today" ]; then
-            _fmt_epoch "$reset_epoch" '%H:%M'
-        else
-            echo "$reset_day"
-        fi
-    else
-        _fmt_epoch "$reset_epoch" '%H:%M'
-    fi
-}
-
 get_reset_seconds() {
     local ts="$1"
     [ -z "$ts" ] || [ "$ts" = "null" ] && { echo ""; return; }
@@ -1594,24 +1567,24 @@ build_usage_display() {
     local parts=()
 
     # 5h quota (always show if >0)
-    # Countdown shown when: usage >= 80% (warning) OR reset <= 2h (opportunity)
-    # Recovery color (DIM_GREEN) when high usage + reset <= 30min
+    # The window countdown is always visible while a window is live: a 5h
+    # horizon is short enough that "how long until reset" is the number you
+    # plan the current sitting around, so it isn't gated on pressure like the
+    # 7d deadline. Relative (@1h20m) — same @remaining language as the 7d
+    # badge — since "1h20m left" is the answer; a wall clock makes you do the
+    # subtraction. Recovery color (DIM_GREEN) when high usage + reset <= 30min.
     if [ "$five_int" -gt 0 ] 2>/dev/null; then
         local color=$(get_usage_color "$five_int")
         local reset_suffix=""
         local reset_secs=""
         [ -n "$five_reset" ] && reset_secs=$(get_reset_seconds "$five_reset")
 
-        local show_reset=false
-        [ "$five_int" -ge 80 ] && show_reset=true
-        [ -n "$reset_secs" ] && [ "$reset_secs" -le $FIVE_HOUR_COUNTDOWN_SECS ] 2>/dev/null && show_reset=true
-
-        if [ "$show_reset" = true ] && [ -n "$five_reset" ]; then
+        if [ -n "$five_reset" ]; then
             if [ "$five_int" -ge 80 ] && [ -n "$reset_secs" ] && [ "$reset_secs" -le $FIVE_HOUR_RECOVERY_SECS ] 2>/dev/null; then
                 color="$DIM_GREEN"
             fi
-            local abs=$(format_reset_absolute "$five_reset" "short")
-            [ -n "$abs" ] && reset_suffix="${DIM}@${abs}${color}"
+            local rel=$(format_reset_relative "$five_reset")
+            [ -n "$rel" ] && reset_suffix="${DIM}@${rel}${color}"
         fi
         parts+=("${DIM}5h${color}[${five_int}%${reset_suffix}]${RESET}")
     fi
@@ -2085,7 +2058,11 @@ if is_1m_model; then
     model_text="${model_text}$(build_1m_tag)"
 fi
 
-if [ -n "$context_pct" ] && [ "$context_pct" -gt 0 ] 2>/dev/null; then
+# Render at a real 0% too (empty bar), not just >0: after /compact the CLI
+# reports used_percentage=0 for the reset window, and hiding the bar there
+# read as "statusline didn't refresh" — the visible snap to [░░░░░░0%] is the
+# refresh. Absent data (ctx_pct empty, no transcript) still renders nothing.
+if [ -n "$context_pct" ] && [ "$context_pct" -ge 0 ] 2>/dev/null; then
     if [ $context_pct -ge 100 ]; then
         bar_color='\033[0;31m'
     elif [ $context_pct -ge 85 ]; then
