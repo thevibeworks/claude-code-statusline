@@ -107,7 +107,8 @@ red, matching its Claude Code TUI color) = model family; everything else is
 | 5 themes, 9 bar styles | -- | Yes |
 | Prompt cache break detection | -- | Yes |
 | OAuth + macOS Keychain | -- | Yes |
-| 172 bats tests + CI | -- | Yes |
+| Quota bump flash (+N) | -- | Yes |
+| 230 bats tests + CI | -- | Yes |
 
 ## Configuration
 
@@ -276,13 +277,13 @@ run. Setting only `CLAUDE_CACHE_DIR` keeps the legacy single-dir behavior.
 npm exec --yes bats -- t/
 ```
 
-172 tests across `t/statusline.bats` (160 statusline + integration) and
+230 tests across `t/statusline.bats` (218 statusline + integration) and
 `t/install.bats` (12 installer). CI runs on push and PR to `main`.
 
 ## Project Structure
 
 ```text
-statusline.sh                Main script (one file, ~1950 lines)
+statusline.sh                Main script (one file, ~2500 lines)
 claude-watch.sh              Live usage/cost watcher (standalone companion)
 install.sh                   One-line installer
 t/statusline.bats            Unit and integration tests
