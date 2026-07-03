@@ -1,5 +1,41 @@
 # Changelog
 
+## v0.13.0 — 2026-07-02 — escalating fetch cooldown + categorized !badges
+
+Live logs showed 23% of usage fetches failing 429 in clusters exactly one
+backoff apart: the fixed 120s cooldown expired and retried straight into a
+still-throttled window. Cross-checked against the 2.1.197 binary: the
+endpoint contract is unchanged and the CLI's own `fetchUtilization` has no
+429 handling either (its only retry is 401→refresh→retry) — the CLI and every
+concurrent statusline render share one per-account throttle bucket, so the
+client must pace itself.
+
+### Added
+
+- **Escalating error cooldown**: consecutive fetch failures back off
+  120s → 240s → 480s → 600s (cap) instead of a fixed 120s. The err state
+  survives until a fetch succeeds, so the escalation compounds; success
+  clears it. Applies to both the usage and prepaid fetch paths.
+- **`Retry-After` honored**: failures now capture the header via curl's
+  `%header{retry-after}` (>= 7.83; older curls degrade cleanly) and the
+  cooldown extends to match when the server asks for longer. Failure logs
+  now include the header, consecutive-failure count, and computed cooldown.
+- **Categorized stale-data indicator**: the bare `!` after quota/extra now
+  says why: `!429` rate limited, `!auth` token rejected (401/403), `!5xx`
+  server error, `!net` connection failed. Legacy bare-epoch err files still
+  render plain `!`.
+- err files are now JSON (`{at, code, count, cooldown}`); pre-v0.13.0
+  bare-epoch files are read compatibly (fixed 120s window, bare `!`).
+
+### Changed
+
+- **Bump flash glyph: `▲` → `+`** (the Unicode triangle renders poorly in
+  some terminal fonts), still reverse-video, and now bound tight to its
+  badge — `5h[44%@1h18m]+2` — so it can't visually float toward the next
+  badge.
+
+226 tests (8 new), shellcheck baseline reduced by one.
+
 ## v0.12.1 — 2026-07-02 — bump flash: reverse-video ▲N outside brackets
 
 ### Changed

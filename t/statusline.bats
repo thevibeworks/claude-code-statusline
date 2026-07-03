@@ -1148,7 +1148,7 @@ JSON
     rm -rf "$tmpdir"
 }
 
-@test "integration: 5h utilization climb flashes ▲N on the next render" {
+@test "integration: 5h utilization climb flashes +N on the next render" {
     tmpdir=$(mktemp -d)
     mkdir -p "$tmpdir/.claude"
     echo '{"claudeAiOauth":{"accessToken":"fake"}}' > "$tmpdir/.claude/.credentials.json"
@@ -1160,8 +1160,9 @@ JSON
     payload 40 | HOME="$tmpdir" CLAUDE_DATA_DIR="$tmpdir/.claude/statusline" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" >/dev/null
     result=$(payload 43 | HOME="$tmpdir" CLAUDE_DATA_DIR="$tmpdir/.claude/statusline" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh")
     plain=$(strip_ansi "$result")
-    # ▲N lives outside the badge brackets: 5h[43%@3h...] ▲3
-    [[ "$plain" == *"5h[43%@3h"*"▲3"* ]]
+    # +N binds tight to its badge, outside the brackets: 5h[43%@3h...]+3
+    [[ "$plain" == *"5h[43%@3h"* ]]
+    [[ "$plain" == *"]+3"* ]]
     # State is per-session and lives beside the cache-health files.
     [ -f "$tmpdir/sessions/sess-bump_quota_seen" ]
     rm -rf "$tmpdir"
@@ -1274,15 +1275,15 @@ JSON
     [ "$result" = "0 0" ]
 }
 
-@test "build_usage_display: bump renders ▲N outside the badge" {
+@test "build_usage_display: bump renders +N bound tight outside the badge" {
     tmpdir=$(mktemp -d)
     usage1='{"five_hour":{"utilization":42},"seven_day":{"utilization":10}}'
     usage2='{"five_hour":{"utilization":45},"seven_day":{"utilization":12}}'
     build_usage_display "$usage1" "" "$tmpdir/state" >/dev/null
     result=$(build_usage_display "$usage2" "" "$tmpdir/state")
     plain=$(strip_ansi "$result")
-    [[ "$plain" == *"5h[45%]"*"▲3"* ]]
-    [[ "$plain" == *"7d[12%]"*"▲2"* ]]
+    [[ "$plain" == *"5h[45%]+3"* ]]
+    [[ "$plain" == *"7d[12%]+2"* ]]
     rm -rf "$tmpdir"
 }
 
@@ -1294,8 +1295,98 @@ JSON
     build_usage_display "$usage1" "" "$tmpdir/state" >/dev/null
     result=$(build_usage_display "$usage2" "" "$tmpdir/state")
     plain=$(strip_ansi "$result")
-    # ▲N outside: 5h[45%@2h...] ▲3
-    [[ "$plain" == *"5h[45%@2h"*"▲3"* ]]
+    # +N outside, tight: 5h[45%@2h...]+3
+    [[ "$plain" == *"5h[45%@2h"* ]]
+    [[ "$plain" == *"]+3"* ]]
+    rm -rf "$tmpdir"
+}
+
+# --- fetch error state (escalating cooldown + categorized indicator) ---
+
+@test "record_fetch_error: first failure = 120s cooldown, count 1" {
+    tmpdir=$(mktemp -d)
+    record_fetch_error "$tmpdir/usage.err" 429 ""
+    [ "$(jq -r '.count' "$tmpdir/usage.err")" = "1" ]
+    [ "$(jq -r '.cooldown' "$tmpdir/usage.err")" = "120" ]
+    [ "$(jq -r '.code' "$tmpdir/usage.err")" = "429" ]
+    rm -rf "$tmpdir"
+}
+
+@test "record_fetch_error: consecutive failures escalate 120-240-480-600 cap" {
+    tmpdir=$(mktemp -d)
+    record_fetch_error "$tmpdir/usage.err" 429 ""
+    record_fetch_error "$tmpdir/usage.err" 429 ""
+    [ "$(jq -r '.cooldown' "$tmpdir/usage.err")" = "240" ]
+    record_fetch_error "$tmpdir/usage.err" 429 ""
+    [ "$(jq -r '.cooldown' "$tmpdir/usage.err")" = "480" ]
+    record_fetch_error "$tmpdir/usage.err" 429 ""
+    [ "$(jq -r '.cooldown' "$tmpdir/usage.err")" = "600" ]
+    record_fetch_error "$tmpdir/usage.err" 429 ""
+    [ "$(jq -r '.cooldown' "$tmpdir/usage.err")" = "600" ]
+    [ "$(jq -r '.count' "$tmpdir/usage.err")" = "5" ]
+    rm -rf "$tmpdir"
+}
+
+@test "record_fetch_error: longer Retry-After extends the cooldown" {
+    tmpdir=$(mktemp -d)
+    record_fetch_error "$tmpdir/usage.err" 429 300
+    [ "$(jq -r '.cooldown' "$tmpdir/usage.err")" = "300" ]
+    rm -rf "$tmpdir"
+}
+
+@test "record_fetch_error: shorter or garbage Retry-After is ignored" {
+    tmpdir=$(mktemp -d)
+    record_fetch_error "$tmpdir/a.err" 429 30
+    [ "$(jq -r '.cooldown' "$tmpdir/a.err")" = "120" ]
+    # Old curl (< 7.83) passes the -w format string through literally.
+    record_fetch_error "$tmpdir/b.err" 429 '%header{retry-after}'
+    [ "$(jq -r '.cooldown' "$tmpdir/b.err")" = "120" ]
+    rm -rf "$tmpdir"
+}
+
+@test "fetch_error_remaining: fresh error blocks, expired or missing clears" {
+    tmpdir=$(mktemp -d)
+    jq -n --argjson at "$(date +%s)" '{at:$at,code:"429",count:1,cooldown:120}' >"$tmpdir/usage.err"
+    [ "$(fetch_error_remaining "$tmpdir/usage.err")" -gt 0 ]
+    jq -n --argjson at "$(($(date +%s) - 121))" '{at:$at,code:"429",count:1,cooldown:120}' >"$tmpdir/usage.err"
+    [ "$(fetch_error_remaining "$tmpdir/usage.err")" = "0" ]
+    [ "$(fetch_error_remaining "$tmpdir/missing.err")" = "0" ]
+    rm -rf "$tmpdir"
+}
+
+@test "fetch_error_remaining: legacy epoch err file gets the old 120s window" {
+    tmpdir=$(mktemp -d)
+    date +%s >"$tmpdir/usage.err"
+    [ "$(fetch_error_remaining "$tmpdir/usage.err")" -gt 0 ]
+    echo $(($(date +%s) - 121)) >"$tmpdir/usage.err"
+    [ "$(fetch_error_remaining "$tmpdir/usage.err")" = "0" ]
+    rm -rf "$tmpdir"
+}
+
+@test "fetch_error_badge: maps codes to !429 / !auth / !5xx / !net / !" {
+    tmpdir=$(mktemp -d)
+    record_fetch_error "$tmpdir/a" 429 "";  [ "$(fetch_error_badge "$tmpdir/a")" = "!429" ]
+    record_fetch_error "$tmpdir/b" 401 "";  [ "$(fetch_error_badge "$tmpdir/b")" = "!auth" ]
+    record_fetch_error "$tmpdir/c" 403 "";  [ "$(fetch_error_badge "$tmpdir/c")" = "!auth" ]
+    record_fetch_error "$tmpdir/d" 503 "";  [ "$(fetch_error_badge "$tmpdir/d")" = "!5xx" ]
+    record_fetch_error "$tmpdir/e" 000 "";  [ "$(fetch_error_badge "$tmpdir/e")" = "!net" ]
+    # Legacy bare-epoch err file carries no code: bare !
+    date +%s >"$tmpdir/f";                  [ "$(fetch_error_badge "$tmpdir/f")" = "!" ]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: rate-limited fetch shows !429 after quota, not bare !" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude/statusline"
+    echo '{"claudeAiOauth":{"accessToken":"fake"}}' > "$tmpdir/.claude/.credentials.json"
+    now=$(date +%s)
+    jq -n --argjson ts "$now" '{five_hour:{utilization:47},seven_day:{utilization:12},fetched_at:$ts}' >"$tmpdir/.claude/statusline/usage.cache"
+    jq -n --argjson at "$now" '{at:$at,code:"429",count:2,cooldown:240}' >"$tmpdir/.claude/statusline/usage.err"
+    result=$(echo '{"session_id":"sess-err","model":{"id":"claude-opus-4-8","display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.199"}' \
+        | HOME="$tmpdir" CLAUDE_DATA_DIR="$tmpdir/.claude/statusline" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh")
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"5h[47%"* ]]
+    [[ "$plain" == *"!429"* ]]
     rm -rf "$tmpdir"
 }
 

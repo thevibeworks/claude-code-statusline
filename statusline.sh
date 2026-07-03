@@ -369,7 +369,7 @@ DIM_CYAN='\033[2;36m'
 WHITE='\033[0;37m'
 BOLD_WHITE='\033[1;37m'
 # Reverse video for the quota bump flash — inverts fg/bg at whatever the
-# badge's current color is, so the ▲N glyph pops without adding a new hue.
+# badge's current color is, so the +N token pops without adding a new hue.
 REVERSE='\033[7m'
 NO_REVERSE='\033[27m'
 RESET='\033[0m'
@@ -570,6 +570,73 @@ get_user_profile() {
     fi
 }
 
+# --- fetch error state -------------------------------------------------------
+# Failed fetches leave a JSON err file: {at, code, count, cooldown}. Consecutive
+# failures escalate the cooldown (120s -> 240s -> 480s -> 600s cap) instead of
+# retrying into a still-throttled window every fixed 120s — observed live: 23%
+# of usage fetches 429'd in clusters exactly one backoff apart. A server
+# Retry-After (429s carry one) extends the cooldown when it's longer. The err
+# file survives until a fetch SUCCEEDS, so the count keeps escalating across
+# expired cooldowns; success removes it.
+
+record_fetch_error() {
+    local err_file="$1" http_code="$2" retry_after="$3"
+    local count=1
+    if [ -f "$err_file" ] && head -c1 "$err_file" 2>/dev/null | grep -q '{'; then
+        local prev=$(jq -r '.count // 0' "$err_file" 2>/dev/null)
+        [ "$prev" -ge 1 ] 2>/dev/null && count=$((prev + 1))
+    fi
+    local cooldown
+    if [ "$count" -ge 4 ]; then
+        cooldown=600
+    else
+        cooldown=$((120 * (1 << (count - 1))))
+    fi
+    # Sanitize Retry-After: digits only (old curl without %header{} support
+    # passes the literal format string through; headers can also be dates).
+    case "$retry_after" in *[!0-9]* | '') retry_after="" ;; esac
+    if [ -n "$retry_after" ] && [ "$retry_after" -gt "$cooldown" ] 2>/dev/null; then
+        cooldown="$retry_after"
+    fi
+    debug_log "fetch error: $(basename "$err_file"): code=${http_code:-?} retry_after=${retry_after:-none} consecutive=$count cooldown=${cooldown}s"
+    jq -n -c --argjson at "$(date +%s)" --arg code "${http_code:-}" \
+        --argjson count "$count" --argjson cooldown "$cooldown" \
+        '{at:$at,code:$code,count:$count,cooldown:$cooldown}' >"$err_file" 2>/dev/null
+}
+
+# Seconds of cooldown remaining; 0 = clear to retry. Legacy err files (bare
+# epoch from pre-v0.13.0) get the old fixed 120s window.
+fetch_error_remaining() {
+    local err_file="$1"
+    [ -f "$err_file" ] || { echo 0; return; }
+    local at=0 cooldown=120
+    if head -c1 "$err_file" 2>/dev/null | grep -q '{'; then
+        eval "$(jq -r '@sh "at=\(.at // 0)", @sh "cooldown=\(.cooldown // 120)"' "$err_file" 2>/dev/null)"
+    else
+        at=$(cat "$err_file" 2>/dev/null || echo 0)
+    fi
+    local remaining=$((at + cooldown - $(date +%s)))
+    [ "$remaining" -gt 0 ] 2>/dev/null || remaining=0
+    echo "$remaining"
+}
+
+# Short reason for the stale-data indicator: !429 (rate limited), !auth
+# (401/403), !5xx (server), !net (connection failed). Bare ! when the code
+# is unknown (legacy err file).
+fetch_error_badge() {
+    local err_file="$1"
+    [ -f "$err_file" ] || return
+    local code=""
+    head -c1 "$err_file" 2>/dev/null | grep -q '{' && code=$(jq -r '.code // ""' "$err_file" 2>/dev/null)
+    case "$code" in
+        429)     echo "!429" ;;
+        401|403) echo "!auth" ;;
+        5??)     echo "!5xx" ;;
+        000)     echo "!net" ;;
+        *)       echo "!" ;;
+    esac
+}
+
 # Usage quota is ACCOUNT-scoped (the /api/oauth/usage endpoint returns the
 # same 5h/7d/extra data regardless of session). Cache it once in a shared
 # file so N concurrent sessions share one fetch instead of issuing N
@@ -600,16 +667,14 @@ fetch_usage_for_session() {
         fi
     fi
 
-    # Exponential backoff on errors
-    if [ -f "$err_file" ]; then
-        local err_at=$(cat "$err_file" 2>/dev/null || echo 0)
-        local err_age=$(($(date +%s) - err_at))
-        if [ $err_age -lt 120 ]; then
-            debug_log "fetch_usage_for_session: in error backoff (${err_age}s < 120s)"
-            [ -f "$cache_file" ] && cat "$cache_file"
-            return 0
-        fi
-        rm -f "$err_file"
+    # Escalating cooldown on errors. The err file stays until a success so
+    # consecutive failures keep escalating; only the cooldown gates retries.
+    local err_remaining
+    err_remaining=$(fetch_error_remaining "$err_file")
+    if [ "$err_remaining" -gt 0 ] 2>/dev/null; then
+        debug_log "fetch_usage_for_session: in error cooldown (${err_remaining}s remaining)"
+        [ -f "$cache_file" ] && cat "$cache_file"
+        return 0
     fi
 
     if [ -f "$lock_file" ]; then
@@ -636,19 +701,24 @@ fetch_usage_for_session() {
 
     debug_log "fetch_usage_for_session: fetching (User-Agent: $ua)..."
 
-    local response=$(curl -s -w "\n%{http_code}" -X GET \
+    # %header{retry-after} needs curl >= 7.83; older curl emits the literal
+    # format string, which record_fetch_error's digit filter discards.
+    local response=$(curl -s -w "\n%{http_code} %header{retry-after}" -X GET \
         "https://api.anthropic.com/api/oauth/usage" \
         -H "Authorization: Bearer $token" \
         -H "Content-Type: application/json" \
         -H "User-Agent: $ua" \
         --max-time 5)
 
-    local http_code=$(echo "$response" | tail -1)
+    local status_line=$(echo "$response" | tail -1)
+    local http_code="${status_line%% *}"
+    local retry_after="${status_line#* }"
+    [ "$retry_after" = "$status_line" ] && retry_after=""
     local body=$(echo "$response" | sed '$d')
 
     rm -f "$lock_file"
 
-    debug_log "API RESPONSE: HTTP $http_code"
+    debug_log "API RESPONSE: HTTP $http_code${retry_after:+ (retry-after: $retry_after)}"
     debug_log "RESPONSE BODY: $body"
 
     if [ "$http_code" = "200" ]; then
@@ -665,8 +735,7 @@ fetch_usage_for_session() {
         build_seven_day_profile
         return 0
     else
-        debug_log "fetch_usage_for_session: API failed (code: $http_code)"
-        date +%s >"$err_file" 2>/dev/null
+        record_fetch_error "$err_file" "$http_code" "$retry_after"
         [ -f "$cache_file" ] && cat "$cache_file"
         return 1
     fi
@@ -699,14 +768,11 @@ fetch_prepaid_balance() {
         fi
     fi
 
-    if [ -f "$err_file" ]; then
-        local err_at=$(cat "$err_file" 2>/dev/null || echo 0)
-        local err_age=$(($(date +%s) - err_at))
-        if [ $err_age -lt 120 ]; then
-            [ -f "$cache_file" ] && cat "$cache_file"
-            return 0
-        fi
-        rm -f "$err_file"
+    local err_remaining
+    err_remaining=$(fetch_error_remaining "$err_file")
+    if [ "$err_remaining" -gt 0 ] 2>/dev/null; then
+        [ -f "$cache_file" ] && cat "$cache_file"
+        return 0
     fi
 
     if [ -f "$lock_file" ]; then
@@ -728,7 +794,7 @@ fetch_prepaid_balance() {
     touch "$lock_file"
 
     local ua="claude-code/${cli_version:-2.1.170}"
-    local response=$(curl -s -w "\n%{http_code}" -X GET \
+    local response=$(curl -s -w "\n%{http_code} %header{retry-after}" -X GET \
         "https://api.anthropic.com/api/oauth/organizations/${org_uuid}/prepaid/credits" \
         -H "Authorization: Bearer $token" \
         -H "Content-Type: application/json" \
@@ -736,12 +802,15 @@ fetch_prepaid_balance() {
         -H "x-organization-uuid: $org_uuid" \
         --max-time 5)
 
-    local http_code=$(echo "$response" | tail -1)
+    local status_line=$(echo "$response" | tail -1)
+    local http_code="${status_line%% *}"
+    local retry_after="${status_line#* }"
+    [ "$retry_after" = "$status_line" ] && retry_after=""
     local body=$(echo "$response" | sed '$d')
 
     rm -f "$lock_file"
 
-    debug_log "PREPAID API RESPONSE: HTTP $http_code"
+    debug_log "PREPAID API RESPONSE: HTTP $http_code${retry_after:+ (retry-after: $retry_after)}"
     debug_log "PREPAID RESPONSE BODY: $body"
 
     if [ "$http_code" = "200" ]; then
@@ -752,8 +821,7 @@ fetch_prepaid_balance() {
         cat "$cache_file"
         return 0
     else
-        debug_log "fetch_prepaid_balance: API failed (code: $http_code)"
-        date +%s >"$err_file" 2>/dev/null
+        record_fetch_error "$err_file" "$http_code" "$retry_after"
         [ -f "$cache_file" ] && cat "$cache_file"
         return 1
     fi
@@ -1655,10 +1723,11 @@ build_usage_display() {
             local rel=$(format_reset_relative "$five_reset")
             [ -n "$rel" ] && reset_suffix="${DIM}@${rel}${color}"
         fi
-        # Bump flash: reverse-video ▲N outside the brackets — spatially
-        # distinct and unmissable without adding a fourth color lane.
+        # Bump flash: reverse-video +N right after the badge — bound tight so
+        # it can't read as belonging to the next badge, unmissable without
+        # adding a fourth color lane. ASCII + (a ▲ glyph rendered poorly).
         local bump_part=""
-        [ "$five_bump" -gt 0 ] 2>/dev/null && bump_part=" ${color}${REVERSE}▲${five_bump}${NO_REVERSE}"
+        [ "$five_bump" -gt 0 ] 2>/dev/null && bump_part="${color}${REVERSE}+${five_bump}${NO_REVERSE}"
         parts+=("${DIM}5h${color}[${five_int}%${reset_suffix}]${bump_part}${RESET}")
     fi
 
@@ -1727,7 +1796,7 @@ build_usage_display() {
             reset_suffix="${DIM}@${rem}${color}"
         fi
         local bump_part=""
-        [ "$seven_bump" -gt 0 ] 2>/dev/null && bump_part=" ${color}${REVERSE}▲${seven_bump}${NO_REVERSE}"
+        [ "$seven_bump" -gt 0 ] 2>/dev/null && bump_part="${color}${REVERSE}+${seven_bump}${NO_REVERSE}"
         parts+=("${DIM}7d${color}[${seven_int}%${reset_suffix}]${bump_part}${RESET}")
     fi
 
@@ -2334,11 +2403,9 @@ if [ -n "$session_id" ] && [ "$_may_have_oauth" = true ]; then
         [ "$age" -ge "$ttl" ] && should_fetch=true
     fi
 
-    # Respect error backoff
-    if [ "$should_fetch" = true ] && [ -f "$err_file" ]; then
-        err_at=$(cat "$err_file" 2>/dev/null || echo 0)
-        err_age=$(($(date +%s) - err_at))
-        [ $err_age -lt 120 ] && should_fetch=false
+    # Respect the escalating error cooldown
+    if [ "$should_fetch" = true ] && [ "$(fetch_error_remaining "$err_file")" -gt 0 ] 2>/dev/null; then
+        should_fetch=false
     fi
 
     if [ "$should_fetch" = true ]; then
@@ -2368,7 +2435,7 @@ if [ -n "$session_id" ] && [ "$_may_have_oauth" = true ]; then
             if [ -f "$lock_file" ]; then
                 quota_component="${quota_component}${DIM}~${RESET}"
             elif [ -f "$err_file" ]; then
-                quota_component="${quota_component}${DIM_RED}!${RESET}"
+                quota_component="${quota_component}${DIM_RED}$(fetch_error_badge "$err_file")${RESET}"
             fi
         fi
 
@@ -2390,10 +2457,8 @@ if [ -n "$session_id" ] && [ "$_may_have_oauth" = true ]; then
                     [ "$prepaid_age" -ge 300 ] && should_fetch_prepaid=true
                 fi
 
-                if [ "$should_fetch_prepaid" = true ] && [ -f "$prepaid_err" ]; then
-                    prepaid_err_at=$(cat "$prepaid_err" 2>/dev/null || echo 0)
-                    prepaid_err_age=$(($(date +%s) - prepaid_err_at))
-                    [ $prepaid_err_age -lt 120 ] && should_fetch_prepaid=false
+                if [ "$should_fetch_prepaid" = true ] && [ "$(fetch_error_remaining "$prepaid_err")" -gt 0 ] 2>/dev/null; then
+                    should_fetch_prepaid=false
                 fi
 
                 if [ "$should_fetch_prepaid" = true ]; then
@@ -2410,7 +2475,7 @@ if [ -n "$session_id" ] && [ "$_may_have_oauth" = true ]; then
             if [ -f "$prepaid_lock" ]; then
                 extra_display="${extra_display}${DIM}~${RESET}"
             elif [ -f "$prepaid_err" ]; then
-                extra_display="${extra_display}${DIM_RED}!${RESET}"
+                extra_display="${extra_display}${DIM_RED}$(fetch_error_badge "$prepaid_err")${RESET}"
             fi
             extra_component="$extra_display"
         fi
