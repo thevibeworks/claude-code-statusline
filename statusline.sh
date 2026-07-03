@@ -25,6 +25,7 @@ debug_mode=false
 # build_usage_display); these gate the recovery color and extra visibility.
 FIVE_HOUR_RECOVERY_SECS=1800     # recovery color when reset <= 30min
 SEVEN_DAY_RECOVERY_SECS=43200    # recovery color when reset <= 12h
+QUOTA_BUMP_NOTICE_SECS=60        # how long a quota "+N" bump flash stays up
 SEVEN_DAY_WINDOW_SECS=604800     # weekly quota window (fixed 7d) for pace math
 EXTRA_AUTO_UTIL_PCT=50           # show extra when its own utilization >= 50%
 CACHE_BREAK_MIN_TOKENS=2000      # ignore cache drops below this (noise)
@@ -367,6 +368,10 @@ CYAN='\033[0;36m'
 DIM_CYAN='\033[2;36m'
 WHITE='\033[0;37m'
 BOLD_WHITE='\033[1;37m'
+# Attribute toggles for a brief emphasis at the CURRENT hue (quota bump flash).
+# 22 first clears any dim so bold applies cleanly even inside DIM_GREEN text.
+BOLD='\033[22;1m'
+NO_BOLD='\033[22m'
 RESET='\033[0m'
 
 # Usage quota tracking
@@ -1540,9 +1545,68 @@ seven_day_forecast() {
     }'
 }
 
+# Short-lived "+N" notice when a quota window's utilization climbs between
+# renders. State is per-session ("what THIS statusline last rendered"), so
+# concurrent sessions each get their own flash instead of racing over shared
+# account state. Echoes "<five_delta> <seven_delta>"; 0 = quiet. Rules per
+# window: first sighting is quiet; a climb records the increment and shows it
+# for QUOTA_BUMP_NOTICE_SECS; an unchanged value keeps a still-fresh notice
+# alive; a drop (window reset) clears silently — the fresh low number is its
+# own signal. A second climb inside the window overwrites the notice (latest
+# increment, not a running sum: "+N" answers "what just happened").
+quota_bump_notice() {
+    local five_cur="$1" seven_cur="$2" state_file="$3"
+    [ -n "$state_file" ] || { echo "0 0"; return 0; }
+    local now="${STATUSLINE_TEST_NOW_EPOCH:-$(date +%s)}"
+
+    local five_seen="" five_at=0 five_d=0 seven_seen="" seven_at=0 seven_d=0
+    if [ -f "$state_file" ]; then
+        eval "$(jq -r '
+            @sh "five_seen=\(.five.seen // "")",
+            @sh "five_at=\(.five.bump_at // 0)",
+            @sh "five_d=\(.five.delta // 0)",
+            @sh "seven_seen=\(.seven.seen // "")",
+            @sh "seven_at=\(.seven.bump_at // 0)",
+            @sh "seven_d=\(.seven.delta // 0)"
+        ' "$state_file" 2>/dev/null)"
+    fi
+
+    # _judge <cur> <seen> <bump_at> <delta> -> "<bump_at> <delta>" (delta 0 = quiet)
+    _judge() {
+        local cur="$1" seen="$2" at="${3:-0}" d="${4:-0}"
+        if [ -z "$seen" ] || [ -z "$cur" ]; then echo "0 0"; return; fi
+        if [ "$cur" -gt "$seen" ] 2>/dev/null; then
+            echo "$now $((cur - seen))"
+        elif [ "$cur" -lt "$seen" ] 2>/dev/null; then
+            echo "0 0"
+        elif [ "$d" -gt 0 ] 2>/dev/null && [ $((now - at)) -lt "$QUOTA_BUMP_NOTICE_SECS" ] 2>/dev/null; then
+            echo "$at $d"
+        else
+            echo "0 0"
+        fi
+    }
+
+    read -r five_at five_d <<<"$(_judge "$five_cur" "$five_seen" "$five_at" "$five_d")"
+    read -r seven_at seven_d <<<"$(_judge "$seven_cur" "$seven_seen" "$seven_at" "$seven_d")"
+
+    mkdir -p "$(dirname "$state_file")" 2>/dev/null
+    local tmp="${state_file}.tmp.$$"
+    jq -n -c \
+        --argjson fs "${five_cur:-0}" --argjson fa "$five_at" --argjson fd "$five_d" \
+        --argjson ss "${seven_cur:-0}" --argjson sa "$seven_at" --argjson sd "$seven_d" \
+        --argjson up "$now" \
+        '{five:{seen:$fs,bump_at:$fa,delta:$fd},
+          seven:{seen:$ss,bump_at:$sa,delta:$sd},
+          updated_at:$up}' >"$tmp" 2>/dev/null && mv -f "$tmp" "$state_file" 2>/dev/null
+    rm -f "$tmp" 2>/dev/null
+
+    echo "${five_d:-0} ${seven_d:-0}"
+}
+
 build_usage_display() {
     local usage_data="$1"
     local user_tier="${2:-}"  # MAX, PRO, ENT, TEAM, or empty
+    local bump_state_file="${3:-}"  # optional: enables the +N bump flash
 
     if [ -z "$usage_data" ]; then
         echo ""
@@ -1563,6 +1627,11 @@ build_usage_display() {
     local seven_int=$(printf '%.0f' "$seven_util" 2>/dev/null || echo 0)
     local opus_int=$(printf '%.0f' "$opus_util" 2>/dev/null || echo 0)
     local sonnet_int=$(printf '%.0f' "$sonnet_util" 2>/dev/null || echo 0)
+
+    local five_bump=0 seven_bump=0
+    if [ -n "$bump_state_file" ]; then
+        read -r five_bump seven_bump <<<"$(quota_bump_notice "$five_int" "$seven_int" "$bump_state_file")"
+    fi
 
     local parts=()
 
@@ -1586,7 +1655,11 @@ build_usage_display() {
             local rel=$(format_reset_relative "$five_reset")
             [ -n "$rel" ] && reset_suffix="${DIM}@${rel}${color}"
         fi
-        parts+=("${DIM}5h${color}[${five_int}%${reset_suffix}]${RESET}")
+        # Bump flash: bold "+N" at the badge's current hue — vivid without a
+        # new color, so the status lanes stay unambiguous.
+        local bump_part=""
+        [ "$five_bump" -gt 0 ] 2>/dev/null && bump_part="${BOLD}+${five_bump}${NO_BOLD}${color}"
+        parts+=("${DIM}5h${color}[${five_int}%${bump_part}${reset_suffix}]${RESET}")
     fi
 
     # 7d aggregate quota (if present and >0). Color comes from PACE, not level:
@@ -1653,7 +1726,9 @@ build_usage_display() {
             fi
             reset_suffix="${DIM}@${rem}${color}"
         fi
-        parts+=("${DIM}7d${color}[${seven_int}%${reset_suffix}]${RESET}")
+        local bump_part=""
+        [ "$seven_bump" -gt 0 ] 2>/dev/null && bump_part="${BOLD}+${seven_bump}${NO_BOLD}${color}"
+        parts+=("${DIM}7d${color}[${seven_int}%${bump_part}${reset_suffix}]${RESET}")
     fi
 
     # Model-specific 7d quotas
@@ -2237,6 +2312,9 @@ if [ -n "$session_id" ] && [ "$_may_have_oauth" = true ]; then
     cache_file="$CLAUDE_ACCOUNT_DIR/usage.cache"
     lock_file="$CLAUDE_ACCOUNT_DIR/usage.lock"
     err_file="$CLAUDE_ACCOUNT_DIR/usage.err"
+    # Per-session bump state: the "+N" flash compares against what THIS
+    # statusline last rendered (same lifecycle as _cache_health).
+    quota_state_file="$CLAUDE_CACHE_DIR/${stdin_session_id:-global}_quota_seen"
 
     five_int=0
     seven_int_cache=0
@@ -2283,7 +2361,7 @@ if [ -n "$session_id" ] && [ "$_may_have_oauth" = true ]; then
             [ -n "$rl_seven_pct" ] && seven_int_cache=$(printf '%.0f' "$rl_seven_pct" 2>/dev/null || echo "$seven_int_cache")
         fi
 
-        quota_display=$(build_usage_display "$usage_data" "$user_tier")
+        quota_display=$(build_usage_display "$usage_data" "$user_tier" "$quota_state_file")
         [ -n "$quota_display" ] && quota_component="$quota_display"
 
         if [ -n "$quota_component" ]; then
@@ -2344,7 +2422,7 @@ if [ -n "$session_id" ] && [ "$_may_have_oauth" = true ]; then
             --arg sr "${rl_seven_reset}" \
             '{five_hour:{utilization:$fp,resets_at:(if $fr == "" then null else $fr end)},
               seven_day:{utilization:$sp,resets_at:(if $sr == "" then null else $sr end)}}')
-        quota_display=$(build_usage_display "$stdin_usage" "$user_tier")
+        quota_display=$(build_usage_display "$stdin_usage" "$user_tier" "$quota_state_file")
         [ -n "$quota_display" ] && quota_component="$quota_display"
         five_int=$(printf '%.0f' "${rl_five_pct:-0}" 2>/dev/null || echo 0)
         seven_int_cache=$(printf '%.0f' "${rl_seven_pct:-0}" 2>/dev/null || echo 0)

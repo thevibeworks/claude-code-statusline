@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.12.0 — 2026-07-02 — quota bump flash (+N when 5h/7d usage climbs)
+
+### Added
+
+- **Bump flash**: when the 5h or 7d utilization climbs between renders, the
+  badge shows the increment in bold at its current color for ~60s:
+  `5h[44%+2@1h18m]` / `7d[10%+1]` — "you just burned 2%". Vivid without a
+  new hue, so the three color lanes stay unambiguous (bold is emphasis, not
+  a fourth status color).
+- `quota_bump_notice()` + per-session state file
+  (`sessions/<session_id>_quota_seen`, same lifecycle as `_cache_health`).
+  Per-session on purpose: the flash compares against what THIS statusline
+  last rendered, so concurrent sessions each get their own notice instead
+  of racing over shared account state.
+- Semantics: first sighting is quiet; a climb records the increment; an
+  unchanged value keeps a still-fresh notice alive; a second climb
+  overwrites (latest increment, not a running sum — "+N" answers "what just
+  happened"); a drop (window reset) clears silently, the fresh low number
+  being its own signal.
+- `QUOTA_BUMP_NOTICE_SECS` (60) constant; `BOLD`/`NO_BOLD` attribute
+  toggles (`ESC[22;1m` / `ESC[22m` — 22-first so bold applies cleanly even
+  inside recovery-dimmed text).
+
+### Fixed
+
+- Test helpers still defined the countdown constants and extracted
+  `format_reset_absolute` — both removed in v0.11.0; cleaned up.
+
+218 tests (9 new), shellcheck warning count unchanged.
+
 ## v0.11.0 — 2026-07-02 — always-on 5h countdown + post-compact bar reset
 
 Two changes driven by live use: "how long until my 5h window resets" was

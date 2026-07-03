@@ -1148,6 +1148,24 @@ JSON
     rm -rf "$tmpdir"
 }
 
+@test "integration: 5h utilization climb flashes +N on the next render" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    echo '{"claudeAiOauth":{"accessToken":"fake"}}' > "$tmpdir/.claude/.credentials.json"
+    five_reset=$(date -d '+3 hours 30 minutes' +%s)
+    seven_reset=$(date -d '+5 days' +%s)
+    payload() {
+        echo "{\"session_id\":\"sess-bump\",\"model\":{\"id\":\"claude-opus-4-8\",\"display_name\":\"Opus\"},\"cwd\":\"/tmp/test\",\"workspace\":{\"current_dir\":\"/tmp/test\"},\"cost\":{\"total_cost_usd\":0,\"total_lines_added\":0,\"total_lines_removed\":0,\"total_api_duration_ms\":0},\"version\":\"2.1.197\",\"context_window\":{\"used_percentage\":10,\"context_window_size\":200000},\"rate_limits\":{\"five_hour\":{\"used_percentage\":$1,\"resets_at\":$five_reset},\"seven_day\":{\"used_percentage\":12,\"resets_at\":$seven_reset}}}"
+    }
+    payload 40 | HOME="$tmpdir" CLAUDE_DATA_DIR="$tmpdir/.claude/statusline" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" >/dev/null
+    result=$(payload 43 | HOME="$tmpdir" CLAUDE_DATA_DIR="$tmpdir/.claude/statusline" CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh")
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"5h[43%+3@"* ]]
+    # State is per-session and lives beside the cache-health files.
+    [ -f "$tmpdir/sessions/sess-bump_quota_seen" ]
+    rm -rf "$tmpdir"
+}
+
 # --- get_reset_seconds ---
 
 @test "get_reset_seconds: future timestamp returns positive seconds" {
@@ -1204,6 +1222,79 @@ JSON
     result=$(build_usage_display "$usage" "")
     plain=$(strip_ansi "$result")
     [[ "$plain" == *"5h[30%]"* ]]
+}
+
+# --- quota bump notice (+N flash when utilization climbs between renders) ---
+
+@test "quota_bump_notice: first sighting is quiet" {
+    tmpdir=$(mktemp -d)
+    result=$(quota_bump_notice 42 10 "$tmpdir/state")
+    [ "$result" = "0 0" ]
+    rm -rf "$tmpdir"
+}
+
+@test "quota_bump_notice: climb emits the increment per window" {
+    tmpdir=$(mktemp -d)
+    quota_bump_notice 42 10 "$tmpdir/state" >/dev/null
+    result=$(quota_bump_notice 45 11 "$tmpdir/state")
+    [ "$result" = "3 1" ]
+    rm -rf "$tmpdir"
+}
+
+@test "quota_bump_notice: unchanged value keeps a fresh notice alive" {
+    tmpdir=$(mktemp -d)
+    STATUSLINE_TEST_NOW_EPOCH=1000 quota_bump_notice 42 10 "$tmpdir/state" >/dev/null
+    STATUSLINE_TEST_NOW_EPOCH=1010 quota_bump_notice 44 10 "$tmpdir/state" >/dev/null
+    result=$(STATUSLINE_TEST_NOW_EPOCH=1030 quota_bump_notice 44 10 "$tmpdir/state")
+    [ "$result" = "2 0" ]
+    rm -rf "$tmpdir"
+}
+
+@test "quota_bump_notice: notice expires after QUOTA_BUMP_NOTICE_SECS" {
+    tmpdir=$(mktemp -d)
+    STATUSLINE_TEST_NOW_EPOCH=1000 quota_bump_notice 42 10 "$tmpdir/state" >/dev/null
+    STATUSLINE_TEST_NOW_EPOCH=1010 quota_bump_notice 44 10 "$tmpdir/state" >/dev/null
+    result=$(STATUSLINE_TEST_NOW_EPOCH=1071 quota_bump_notice 44 10 "$tmpdir/state")
+    [ "$result" = "0 0" ]
+    rm -rf "$tmpdir"
+}
+
+@test "quota_bump_notice: window reset (drop) clears silently" {
+    tmpdir=$(mktemp -d)
+    quota_bump_notice 80 10 "$tmpdir/state" >/dev/null
+    quota_bump_notice 85 10 "$tmpdir/state" >/dev/null
+    result=$(quota_bump_notice 3 10 "$tmpdir/state")
+    [ "$result" = "0 0" ]
+    rm -rf "$tmpdir"
+}
+
+@test "quota_bump_notice: no state file disables the machinery" {
+    result=$(quota_bump_notice 42 10 "")
+    [ "$result" = "0 0" ]
+}
+
+@test "build_usage_display: bump renders +N inside the badge" {
+    tmpdir=$(mktemp -d)
+    usage1='{"five_hour":{"utilization":42},"seven_day":{"utilization":10}}'
+    usage2='{"five_hour":{"utilization":45},"seven_day":{"utilization":12}}'
+    build_usage_display "$usage1" "" "$tmpdir/state" >/dev/null
+    result=$(build_usage_display "$usage2" "" "$tmpdir/state")
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"5h[45%+3]"* ]]
+    [[ "$plain" == *"7d[12%+2]"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "build_usage_display: bump composes with the 5h countdown suffix" {
+    tmpdir=$(mktemp -d)
+    reset_time=$(date -u -d '+2 hours 30 minutes' '+%Y-%m-%dT%H:%M:%SZ')
+    usage1="{\"five_hour\":{\"utilization\":42,\"resets_at\":\"$reset_time\"},\"seven_day\":{\"utilization\":10}}"
+    usage2="{\"five_hour\":{\"utilization\":45,\"resets_at\":\"$reset_time\"},\"seven_day\":{\"utilization\":10}}"
+    build_usage_display "$usage1" "" "$tmpdir/state" >/dev/null
+    result=$(build_usage_display "$usage2" "" "$tmpdir/state")
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"5h[45%+3@2h"* ]]
+    rm -rf "$tmpdir"
 }
 
 @test "build_usage_display: 5h at 85% with reset in 20min uses recovery color" {
