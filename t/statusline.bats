@@ -230,47 +230,50 @@ setup() {
     [[ "$plain" != *"op["* ]]
 }
 
-@test "build_usage_display: scoped weekly limit shows for matching model" {
+@test "build_scoped_quota_display: scoped weekly limit shows for matching model" {
     usage='{"five_hour":{"utilization":10},"seven_day":{"utilization":5},"limits":[{"kind":"weekly_scoped","group":"weekly","percent":64,"resets_at":"2099-01-05T00:00:00Z","scope":{"model":{"id":null,"display_name":"Fable"},"surface":null},"is_active":false}]}'
-    result=$(build_usage_display "$usage" "MAX" "" "claude-fable-5")
+    result=$(build_scoped_quota_display "$usage" "claude-fable-5")
     plain=$(strip_ansi "$result")
-    [[ "$plain" == *"fb[64%]"* ]]
+    [[ "$plain" == "fb[64%]" ]]
 }
 
-@test "build_usage_display: scoped weekly limit hidden for non-matching model" {
+@test "build_scoped_quota_display: scoped weekly limit hidden for non-matching model" {
     usage='{"five_hour":{"utilization":10},"seven_day":{"utilization":5},"limits":[{"kind":"weekly_scoped","group":"weekly","percent":64,"resets_at":"2099-01-05T00:00:00Z","scope":{"model":{"id":null,"display_name":"Fable"},"surface":null},"is_active":false}]}'
-    result=$(build_usage_display "$usage" "MAX" "" "claude-opus-4-8")
-    plain=$(strip_ansi "$result")
-    [[ "$plain" != *"fb["* ]]
+    result=$(build_scoped_quota_display "$usage" "claude-opus-4-8")
+    [ -z "$result" ]
 }
 
-@test "build_usage_display: scoped limits supersede legacy per-model fields" {
+@test "build_usage_display: scoped limits suppress legacy per-model fields" {
     usage='{"five_hour":{"utilization":10},"seven_day":{"utilization":5},"seven_day_opus":{"utilization":20},"limits":[{"kind":"weekly_scoped","group":"weekly","percent":64,"resets_at":"2099-01-05T00:00:00Z","scope":{"model":{"id":null,"display_name":"Fable"},"surface":null},"is_active":false}]}'
-    result=$(build_usage_display "$usage" "MAX" "" "claude-fable-5")
+    result=$(build_usage_display "$usage" "MAX")
     plain=$(strip_ansi "$result")
-    [[ "$plain" == *"fb[64%]"* ]]
     [[ "$plain" != *"op["* ]]
 }
 
-@test "build_usage_display: scoped limit for opus renders op badge on opus session" {
+@test "build_scoped_quota_display: opus scope renders op badge on opus session" {
     usage='{"five_hour":{"utilization":10},"seven_day":{"utilization":5},"limits":[{"kind":"weekly_scoped","group":"weekly","percent":33,"resets_at":"2099-01-05T00:00:00Z","scope":{"model":{"id":null,"display_name":"Opus"},"surface":null},"is_active":false}]}'
-    result=$(build_usage_display "$usage" "MAX" "" "claude-opus-4-8")
+    result=$(build_scoped_quota_display "$usage" "claude-opus-4-8")
     plain=$(strip_ansi "$result")
-    [[ "$plain" == *"op[33%]"* ]]
+    [[ "$plain" == "op[33%]" ]]
 }
 
-@test "build_usage_display: unknown scoped model falls back to two-letter abbrev" {
+@test "build_scoped_quota_display: unknown scoped model falls back to two-letter abbrev" {
     usage='{"five_hour":{"utilization":10},"seven_day":{"utilization":5},"limits":[{"kind":"weekly_scoped","group":"weekly","percent":42,"resets_at":"2099-01-05T00:00:00Z","scope":{"model":{"id":null,"display_name":"Zephyr"},"surface":null},"is_active":false}]}'
-    result=$(build_usage_display "$usage" "MAX" "" "claude-zephyr-1")
+    result=$(build_scoped_quota_display "$usage" "claude-zephyr-1")
     plain=$(strip_ansi "$result")
-    [[ "$plain" == *"ze[42%]"* ]]
+    [[ "$plain" == "ze[42%]" ]]
 }
 
-@test "build_usage_display: zero-percent scoped limit is hidden" {
+@test "build_scoped_quota_display: zero-percent scoped limit is hidden" {
     usage='{"five_hour":{"utilization":10},"seven_day":{"utilization":5},"limits":[{"kind":"weekly_scoped","group":"weekly","percent":0,"resets_at":"2099-01-05T00:00:00Z","scope":{"model":{"id":null,"display_name":"Fable"},"surface":null},"is_active":false}]}'
-    result=$(build_usage_display "$usage" "MAX" "" "claude-fable-5")
-    plain=$(strip_ansi "$result")
-    [[ "$plain" != *"fb["* ]]
+    result=$(build_scoped_quota_display "$usage" "claude-fable-5")
+    [ -z "$result" ]
+}
+
+@test "build_scoped_quota_display: empty model or usage yields nothing" {
+    usage='{"limits":[{"kind":"weekly_scoped","percent":64,"scope":{"model":{"display_name":"Fable"}}}]}'
+    [ -z "$(build_scoped_quota_display "$usage" "")" ]
+    [ -z "$(build_scoped_quota_display "" "claude-fable-5")" ]
 }
 
 @test "build_usage_display: on-pace 7d hides runway and reset suffix" {

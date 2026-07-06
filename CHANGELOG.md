@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.15.1 — 2026-07-05 — scoped quota badge moves next to the model
+
+`fb[67%]` now renders right after the model+context block instead of at the
+tail of the 5h/7d cluster:
+
+```
+260128_ccreverse-up +131/-16 $10.53 fabl5[1m][█░░░░░12%] fb[67%] [MAX|you] 5h[95%@23:00] 7d[55%]
+```
+
+The scoped quota is a property of the model the session is running — the eye
+looks for it where the model is, not in the account-wide quota cluster. It is
+still a weekly number (same reset as the 7d badge), just scoped to one model.
+
+- Extracted into `build_scoped_quota_display`; `build_usage_display` keeps
+  only the legacy-field suppression check.
+- Test count: 249.
+
 ## v0.15.0 — 2026-07-05 — model-scoped weekly quota (`fb[65%]`)
 
 The usage API moved per-model weekly limits out of dedicated fields
