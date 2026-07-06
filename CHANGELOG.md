@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.15.0 — 2026-07-05 — model-scoped weekly quota (`fb[65%]`)
+
+The usage API moved per-model weekly limits out of dedicated fields
+(`seven_day_opus` / `seven_day_sonnet` — both now arrive null) into a generic
+`limits[]` array: `kind=weekly_scoped` entries carrying
+`scope.model.display_name`. The old `op`/`sn` badges silently died with that
+contract change; this release reads the new shape.
+
+- Parse `limits[]` weekly_scoped entries generically — any model family the
+  API scopes a weekly limit to, current or future (Fable 5 being the one that
+  surfaced the change).
+- Render only the scope matching the model **this session** is running:
+  `fb[65%]` on a Fable 5 session, `op[33%]` on Opus. Other models' scoped
+  quotas stay hidden — the limit that constrains the session is signal, the
+  rest is noise.
+- Badge labels follow the existing `op`/`sn` convention: `fb` (fable), `hk`
+  (haiku); unknown families degrade to their first two letters rather than
+  hiding the quota behind an unmapped name.
+- Legacy `seven_day_opus`/`seven_day_sonnet` rendering is kept for old cached
+  responses but skipped whenever scoped limits exist (the new contract
+  supersedes it).
+- `build_usage_display` gains the session model as an optional 4th argument;
+  both call sites pass stdin's `model.id`.
+
+6 new tests (248 total).
+
 ## v0.14.0 — 2026-07-02 — 5h reset back to wall-clock (@14:30)
 
 v0.11.0 re-made a mistake v0.7.0 had already fixed and documented: it turned

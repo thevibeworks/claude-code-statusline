@@ -1693,10 +1693,24 @@ quota_bump_notice() {
     echo "${five_d:-0} ${seven_d:-0}"
 }
 
+# Two-letter badge label for a model-scoped limit, following the op/sn
+# convention. Unknown families degrade to their first two letters rather
+# than hiding the quota behind a name we haven't mapped yet.
+model_scope_abbrev() {
+    case "$1" in
+    opus*) echo "op" ;;
+    sonnet*) echo "sn" ;;
+    haiku*) echo "hk" ;;
+    fable*) echo "fb" ;;
+    *) printf '%.2s\n' "$1" ;;
+    esac
+}
+
 build_usage_display() {
     local usage_data="$1"
     local user_tier="${2:-}"  # MAX, PRO, ENT, TEAM, or empty
     local bump_state_file="${3:-}"  # optional: enables the +N bump flash
+    local current_model="${4:-}"  # model id/name of this session; gates scoped badges
 
     if [ -z "$usage_data" ]; then
         echo ""
@@ -1824,18 +1838,49 @@ build_usage_display() {
         parts+=("${DIM}7d${color}[${seven_int}%${reset_suffix}]${bump_part}${RESET}")
     fi
 
-    # Model-specific 7d quotas
+    # Model-scoped weekly quotas (limits[] kind=weekly_scoped, the contract
+    # that replaced seven_day_opus/sonnet — those now arrive null). Only the
+    # scope matching the model THIS session is burning renders: that is the
+    # number constraining you right now; other models' quotas are noise.
+    # Match is a substring test so scope "Fable" hits claude-fable-5.
+    local has_scoped=false
+    local scoped_tsv
+    scoped_tsv=$(echo "$usage_data" | jq -r '
+        .limits[]? | select(.kind == "weekly_scoped" and (.scope.model.display_name // "") != "")
+        | [(.scope.model.display_name | ascii_downcase), (.percent // 0)] | @tsv' 2>/dev/null)
+    if [ -n "$scoped_tsv" ]; then
+        has_scoped=true
+        local model_lc
+        model_lc=$(printf '%s' "$current_model" | tr '[:upper:]' '[:lower:]')
+        local scope_name scope_pct
+        while IFS=$'\t' read -r scope_name scope_pct; do
+            [ -n "$scope_name" ] || continue
+            case "$model_lc" in
+            *"$scope_name"*)
+                local scope_int=$(printf '%.0f' "$scope_pct" 2>/dev/null || echo 0)
+                if [ "$scope_int" -gt 0 ] 2>/dev/null; then
+                    local color=$(get_seven_day_color "$scope_int")
+                    parts+=("${DIM}$(model_scope_abbrev "$scope_name")${color}[${scope_int}%]${RESET}")
+                fi
+                ;;
+            esac
+        done <<<"$scoped_tsv"
+    fi
+
+    # Legacy model-specific 7d quotas (pre-limits[] responses only)
     # MAX users: show opus only (per your spec: "no need to show sonnet for max users")
     # Others: show sonnet
-    if [ "$user_tier" = "MAX" ]; then
-        if [ "$opus_int" -gt 0 ] 2>/dev/null; then
-            local color=$(get_seven_day_color "$opus_int")
-            parts+=("${DIM}op${color}[${opus_int}%]${RESET}")
-        fi
-    else
-        if [ "$sonnet_int" -gt 0 ] 2>/dev/null; then
-            local color=$(get_seven_day_color "$sonnet_int")
-            parts+=("${DIM}sn${color}[${sonnet_int}%]${RESET}")
+    if [ "$has_scoped" = false ]; then
+        if [ "$user_tier" = "MAX" ]; then
+            if [ "$opus_int" -gt 0 ] 2>/dev/null; then
+                local color=$(get_seven_day_color "$opus_int")
+                parts+=("${DIM}op${color}[${opus_int}%]${RESET}")
+            fi
+        else
+            if [ "$sonnet_int" -gt 0 ] 2>/dev/null; then
+                local color=$(get_seven_day_color "$sonnet_int")
+                parts+=("${DIM}sn${color}[${sonnet_int}%]${RESET}")
+            fi
         fi
     fi
 
@@ -2452,7 +2497,7 @@ if [ -n "$session_id" ] && [ "$_may_have_oauth" = true ]; then
             [ -n "$rl_seven_pct" ] && seven_int_cache=$(printf '%.0f' "$rl_seven_pct" 2>/dev/null || echo "$seven_int_cache")
         fi
 
-        quota_display=$(build_usage_display "$usage_data" "$user_tier" "$quota_state_file")
+        quota_display=$(build_usage_display "$usage_data" "$user_tier" "$quota_state_file" "${model_id:-$model_display}")
         [ -n "$quota_display" ] && quota_component="$quota_display"
 
         if [ -n "$quota_component" ]; then
@@ -2511,7 +2556,7 @@ if [ -n "$session_id" ] && [ "$_may_have_oauth" = true ]; then
             --arg sr "${rl_seven_reset}" \
             '{five_hour:{utilization:$fp,resets_at:(if $fr == "" then null else $fr end)},
               seven_day:{utilization:$sp,resets_at:(if $sr == "" then null else $sr end)}}')
-        quota_display=$(build_usage_display "$stdin_usage" "$user_tier" "$quota_state_file")
+        quota_display=$(build_usage_display "$stdin_usage" "$user_tier" "$quota_state_file" "${model_id:-$model_display}")
         [ -n "$quota_display" ] && quota_component="$quota_display"
         five_int=$(printf '%.0f' "${rl_five_pct:-0}" 2>/dev/null || echo 0)
         seven_int_cache=$(printf '%.0f' "${rl_seven_pct:-0}" 2>/dev/null || echo 0)
