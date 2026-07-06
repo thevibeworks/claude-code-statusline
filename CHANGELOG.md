@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.16.0 — 2026-07-06 — atomic fetch locks (multi-instance 429 stampede)
+
+Launching several Claude Code instances together produced 429 bursts. Two
+compounding causes, confirmed against a mitm capture of CLI v2.1.201:
+
+1. **Each CLI instance already fires 2 usage requests on boot** (two internal
+   clients: `claude-cli/... (external, cli)` and `claude-code/...`). N
+   instances = 2N requests before any statusline fetch.
+2. **The statusline's lock was check-then-touch, not atomic** — and the
+   `touch` happened *after* `get_oauth_token`, hundreds of ms after the
+   check. Every freshly launched instance passed the check inside that
+   window and fetched concurrently, adding up to N more requests to the
+   same burst.
+
+The statusline can only fix its own share:
+
+- New `acquire_lock`: noclobber (`set -C`) create — atomic acquire-or-fail,
+  with stale-lock reaping (orphaned locks from crashed fetchers).
+- Lock is acquired **before** the token read in `fetch_usage_for_session`
+  and `fetch_prepaid_balance`; released on every early-return path.
+- `refresh_oauth_credentials_file` uses it too: two concurrent OAuth
+  refreshes are worse than a missed one — with rotating refresh tokens the
+  loser's grant can invalidate the winner's.
+- Regression test: 8 concurrent fetches with a deliberately slow token read
+  make exactly 1 API call (fails on the old code). Plus a 20-contender
+  single-winner lock test.
+
+New: `docs/api/oauth-usage.md` — the observed `/api/oauth/usage` wire
+contract (request headers, both CLI client forms, full response schema,
+`limits[]` semantics, 429 obligations), synced with Claude Code v2.1.201.
+Sanitized; no credentials or account identifiers.
+
+5 new tests (254 total).
+
 ## v0.15.1 — 2026-07-05 — scoped quota badge moves next to the model
 
 `fb[67%]` now renders right after the model+context block instead of at the

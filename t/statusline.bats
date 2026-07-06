@@ -407,10 +407,14 @@ JSON
 
     STATUSLINE_TEST_NOW_MS=1000000
     CLAUDE_CACHE_DIR="$tmpdir"
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
     export STATUSLINE_TEST_NOW_MS
     export CLAUDE_CACHE_DIR
 
     result=$(refresh_oauth_credentials_file "$cred_file")
+
+    # refresh must not leave its lock behind (blocks the next refresh 30s)
+    [ ! -f "$tmpdir/oauth_refresh.lock" ]
 
     [ "$result" = "new-access" ]
     [ "$(jq -r '.claudeAiOauth.accessToken' "$cred_file")" = "new-access" ]
@@ -1865,6 +1869,70 @@ JSON
     touch "$lock"
     reap_stale_lock "$lock" 15
     [ -f "$lock" ]
+    rm -rf "$tmpdir"
+}
+
+# --- acquire_lock: atomic fetch gate (multi-instance 429 stampede) ----------
+
+@test "acquire_lock: acquires when no lock exists" {
+    tmpdir=$(mktemp -d)
+    acquire_lock "$tmpdir/usage.lock" 10
+    [ -f "$tmpdir/usage.lock" ]
+    rm -rf "$tmpdir"
+}
+
+@test "acquire_lock: fails while a fresh lock is held" {
+    tmpdir=$(mktemp -d)
+    touch "$tmpdir/usage.lock"
+    ! acquire_lock "$tmpdir/usage.lock" 10
+    rm -rf "$tmpdir"
+}
+
+@test "acquire_lock: reaps and takes over a stale lock" {
+    tmpdir=$(mktemp -d)
+    lock="$tmpdir/usage.lock"
+    touch "$lock"
+    touch -d '@1' "$lock" 2>/dev/null || touch -t 200001010000 "$lock"
+    acquire_lock "$lock" 10
+    [ -f "$lock" ]
+    rm -rf "$tmpdir"
+}
+
+@test "acquire_lock: exactly one winner under concurrent contention" {
+    tmpdir=$(mktemp -d)
+    lock="$tmpdir/usage.lock"
+    winners="$tmpdir/winners"
+    for i in $(seq 1 20); do
+        ( acquire_lock "$lock" 60 && echo "$i" >> "$winners" ) 3>&- &
+    done
+    wait
+    [ -f "$winners" ]
+    [ "$(wc -l < "$winners")" -eq 1 ]
+    rm -rf "$tmpdir"
+}
+
+@test "fetch_usage_for_session: concurrent renders make exactly one API call" {
+    # Recreates the multi-instance launch stampede: the slow token read is
+    # the window where the old check-then-touch let every instance through.
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    CURL_CALLS="$tmpdir/curl_calls"
+    get_oauth_token() { sleep 0.1; echo "test-token"; }
+    log_usage_snapshot() { :; }
+    build_seven_day_profile() { :; }
+    curl() {
+        sleep 0.5
+        echo x >> "$CURL_CALLS"
+        printf '{"five_hour":{"utilization":10},"seven_day":{"utilization":5}}\n200 '
+    }
+    for i in $(seq 1 8); do
+        fetch_usage_for_session "s$i" >/dev/null 2>&1 3>&- &
+    done
+    wait
+    [ "$(wc -l < "$CURL_CALLS")" -eq 1 ]
+    [ -f "$tmpdir/usage.cache" ]
+    [ "$(jq -r '.five_hour.utilization' "$tmpdir/usage.cache")" = "10" ]
+    [ ! -f "$tmpdir/usage.lock" ]
     rm -rf "$tmpdir"
 }
 

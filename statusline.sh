@@ -407,12 +407,9 @@ refresh_oauth_credentials_file() {
 
     mkdir -p "$CLAUDE_ACCOUNT_DIR"
     local lock_file="$CLAUDE_ACCOUNT_DIR/oauth_refresh.lock"
-    if [ -f "$lock_file" ]; then
-        local lock_age=$(($(date +%s) - $(stat -c %Y "$lock_file" 2>/dev/null || stat -f %m "$lock_file" 2>/dev/null || echo 0)))
-        [ "$lock_age" -lt 30 ] && return 1
-        rm -f "$lock_file"
-    fi
-    touch "$lock_file"
+    # Atomic: two concurrent refreshes are worse than a missed one — with
+    # rotating refresh tokens the loser's grant can invalidate the winner's.
+    acquire_lock "$lock_file" 30 || return 1
 
     scope_string=$(jq -r '.claudeAiOauth.scopes // [] | join(" ")' "$cred_file" 2>/dev/null)
     if [ -z "$scope_string" ]; then
@@ -677,24 +674,24 @@ fetch_usage_for_session() {
         return 0
     fi
 
-    if [ -f "$lock_file" ]; then
-        local lock_age=$(($(date +%s) - $(stat -c %Y "$lock_file" 2>/dev/null || stat -f %m "$lock_file" 2>/dev/null || echo 0)))
-        if [ $lock_age -lt 10 ]; then
-            debug_log "fetch_usage_for_session: lock active, skip"
-            [ -f "$cache_file" ] && cat "$cache_file"
-            return 0
-        fi
-        rm -f "$lock_file"
+    # Acquire the lock BEFORE the token read: get_oauth_token can take
+    # hundreds of ms (file reads, possibly a refresh round-trip), and N
+    # instances launched together all sat in that gap under the old
+    # check-then-touch, then fetched concurrently — the main source of 429
+    # bursts (each CLI already fires 2 usage requests of its own on boot).
+    if ! acquire_lock "$lock_file" 10; then
+        debug_log "fetch_usage_for_session: lock contended, skip"
+        [ -f "$cache_file" ] && cat "$cache_file"
+        return 0
     fi
 
     local token=$(get_oauth_token)
     if [ -z "$token" ]; then
         debug_log "fetch_usage_for_session: no token available"
+        rm -f "$lock_file"
         [ -f "$cache_file" ] && cat "$cache_file"
         return 1
     fi
-
-    touch "$lock_file"
 
     # Use CLI version from input for User-Agent, fall back to generic
     local ua="claude-code/${cli_version:-2.1.170}"
@@ -775,23 +772,19 @@ fetch_prepaid_balance() {
         return 0
     fi
 
-    if [ -f "$lock_file" ]; then
-        local lock_age=$(($(date +%s) - $(stat -c %Y "$lock_file" 2>/dev/null || stat -f %m "$lock_file" 2>/dev/null || echo 0)))
-        if [ $lock_age -lt 10 ]; then
-            [ -f "$cache_file" ] && cat "$cache_file"
-            return 0
-        fi
-        rm -f "$lock_file"
+    # Same atomic-acquire-before-token-read as fetch_usage_for_session.
+    if ! acquire_lock "$lock_file" 10; then
+        [ -f "$cache_file" ] && cat "$cache_file"
+        return 0
     fi
 
     local token=$(get_oauth_token)
     if [ -z "$token" ]; then
         debug_log "fetch_prepaid_balance: no token available"
+        rm -f "$lock_file"
         [ -f "$cache_file" ] && cat "$cache_file"
         return 1
     fi
-
-    touch "$lock_file"
 
     local ua="claude-code/${cli_version:-2.1.170}"
     local response=$(curl -s -w "\n%{http_code} %header{retry-after}" -X GET \
@@ -1238,6 +1231,29 @@ get_adaptive_ttl() {
     elif [ "$five_int" -ge 20 ]; then echo 120
     else echo 300
     fi
+}
+
+# Atomically acquire a lock file, or return 1 if another process holds a
+# fresh one. noclobber (set -C) makes create-if-absent a single atomic step —
+# the old check-then-touch pattern left a window (hundreds of ms when a slow
+# token read sat between check and touch) where N freshly launched instances
+# all passed the check and stampeded the API with concurrent fetches.
+# A lock older than $2 is presumed orphaned (fetcher died), reaped, and
+# re-contended once; losing that race just skips this cycle — the winner is
+# fetching anyway.
+acquire_lock() {
+    local lock_file="$1" max_age="${2:-10}"
+    if (set -C; : >"$lock_file") 2>/dev/null; then
+        return 0
+    fi
+    local mtime age
+    mtime=$(stat -c %Y "$lock_file" 2>/dev/null || stat -f %m "$lock_file" 2>/dev/null || echo 0)
+    age=$(($(date +%s) - mtime))
+    if [ "$age" -ge "$max_age" ] 2>/dev/null; then
+        rm -f "$lock_file"
+        (set -C; : >"$lock_file") 2>/dev/null && return 0
+    fi
+    return 1
 }
 
 # Remove a lock left behind by a fetch that died before cleanup. Without this,

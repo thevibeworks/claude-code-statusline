@@ -109,7 +109,7 @@ red, matching its Claude Code TUI color) = model family; everything else is
 | OAuth + macOS Keychain | -- | Yes |
 | Quota bump flash (+N) | -- | Yes |
 | Model-scoped weekly quota (`fb`/`op`/`sn`) | -- | Yes |
-| 249 bats tests + CI | -- | Yes |
+| 254 bats tests + CI | -- | Yes |
 
 ## Configuration
 
@@ -282,7 +282,7 @@ run. Setting only `CLAUDE_CACHE_DIR` keeps the legacy single-dir behavior.
 npm exec --yes bats -- t/
 ```
 
-249 tests across `t/statusline.bats` (237 statusline + integration) and
+254 tests across `t/statusline.bats` (242 statusline + integration) and
 `t/install.bats` (12 installer). CI runs on push and PR to `main`.
 
 ## Project Structure
@@ -298,6 +298,7 @@ t/helpers.bash               Sources real functions from statusline.sh
 CHANGELOG.md                 Release notes
 CONTRIBUTING.md              Contribution guide
 docs/devlog/                 Implementation history
+docs/api/oauth-usage.md      Observed /api/oauth/usage contract (synced: CLI v2.1.201)
 ```
 
 ## Contributing
