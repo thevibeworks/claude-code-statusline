@@ -12,6 +12,8 @@
   <img src="assets/statusline-preview.svg" alt="Claude Code Statusline" width="100%">
 </p>
 
+<p align="center"><a href="https://thevibeworks.github.io/claude-code-statusline/"><b>Live animated demo →</b></a></p>
+
 One Bash file that plugs into the official `statusLine` command hook. Shows
 what matters: active model, context window, session cost, 5h / 7d quota with
 reset times, prompt-cache health, extra-usage spend, git activity, and subscription tier.

@@ -1,0 +1,38 @@
+# Claude Code Statusline
+
+> One bash file that renders live quota (5h/7d windows with reset times,
+> per-model weekly limits), context pressure, session cost, prompt-cache
+> health, and git activity in Claude Code's statusLine hook. 265 bats tests,
+> deps are jq + curl, no daemon, no telemetry.
+
+Key facts for agents:
+- Everything lives in `statusline.sh` (~2900 lines, plain bash). Install
+  copies it to `~/.claude/statusline.sh` and wires `settings.json`.
+- State lives under `~/.claude/statusline/` (account-scoped caches) and
+  `~/.claude/statusline/sessions/` (per-session state). Never commit these.
+- Quota data comes from `GET https://api.anthropic.com/api/oauth/usage`
+  with the user's OAuth token; the observed wire contract is versioned in
+  docs/api/oauth-usage.md and re-synced against CLI captures.
+- Tests extract real functions from statusline.sh via an awk whitelist in
+  t/helpers.bash — new functions MUST be added there or tests silently skip.
+- `STATUSLINE_NO_FETCH=1` renders from cache/stdin only (tests export it;
+  also for offline use).
+
+## Docs
+
+- [README](https://github.com/thevibeworks/claude-code-statusline/blob/main/README.md): signals, themes, configuration flags, install
+- [Wire contract](https://github.com/thevibeworks/claude-code-statusline/blob/main/docs/api/oauth-usage.md): observed /api/oauth/usage request/response schema, rate-limit obligations
+- [CHANGELOG](https://github.com/thevibeworks/claude-code-statusline/blob/main/CHANGELOG.md): per-release rationale, not just diffs
+- [CONTRIBUTING](https://github.com/thevibeworks/claude-code-statusline/blob/main/CONTRIBUTING.md): test harness rules, style
+
+## Source
+
+- [statusline.sh](https://github.com/thevibeworks/claude-code-statusline/blob/main/statusline.sh): the entire product
+- [install.sh](https://github.com/thevibeworks/claude-code-statusline/blob/main/install.sh): installer (curl | bash entrypoint)
+- [t/statusline.bats](https://github.com/thevibeworks/claude-code-statusline/blob/main/t/statusline.bats): 253 statusline tests
+- [t/install.bats](https://github.com/thevibeworks/claude-code-statusline/blob/main/t/install.bats): 12 installer tests
+
+## Optional
+
+- [claude-watch.sh](https://github.com/thevibeworks/claude-code-statusline/blob/main/claude-watch.sh): standalone live usage/cost watcher
+- [Site](https://thevibeworks.github.io/claude-code-statusline/): animated demo of the line

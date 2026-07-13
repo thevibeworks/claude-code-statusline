@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Code Statusline — quota, context, cost. Live, in one bash file.</title>
+<meta name="description" content="Live 5h/7d quota with reset times, per-model weekly limits, context pressure, session cost, cache health, and git activity in your Claude Code prompt. One bash file, 265 tests, no daemon, no telemetry.">
+<style>
+  :root {
+    --bg: #0b0c0e;
+    --panel: #101216;
+    --panel-edge: rgba(255,255,255,.07);
+    --fg: #d6d8dc;
+    --dim: #6f7480;
+    --dim2: #4c515c;
+    --grn: #7ec699;
+    --dgrn: #4f8a66;
+    --ylw: #e2c08d;
+    --red: #e06c75;
+    --dred: #9e5a61;
+    --cyn: #74b8c7;
+    --acc: #d0a215;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font: 16px/1.6 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 0 20px; }
+  a { color: var(--cyn); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, .mono { font-family: var(--mono); }
+
+  header.hero { padding: 72px 0 28px; text-align: center; }
+  .hero h1 { font-size: 28px; margin: 0 0 10px; letter-spacing: -.01em; }
+  .hero p.sub { color: var(--dim); margin: 0 auto 8px; max-width: 620px; }
+  .hero .facts { color: var(--dim2); font-size: 14px; font-family: var(--mono); }
+
+  /* terminal */
+  .term {
+    background: #0e0f12; border: 1px solid var(--panel-edge);
+    border-radius: 10px; overflow: hidden; margin: 28px 0 10px;
+    text-align: left; box-shadow: 0 12px 40px rgba(0,0,0,.45);
+  }
+  .term .bar {
+    display: flex; align-items: center; gap: 6px;
+    padding: 10px 14px; border-bottom: 1px solid rgba(255,255,255,.05);
+  }
+  .term .bar i { width: 10px; height: 10px; border-radius: 50%; background: rgba(255,255,255,.14); }
+  .term:hover .bar i:nth-child(1) { background: #ff5f57; }
+  .term:hover .bar i:nth-child(2) { background: #febc2e; }
+  .term:hover .bar i:nth-child(3) { background: #28c840; }
+  .term .bar span { margin-left: auto; color: var(--dim2); font-size: 12px; font-family: var(--mono); }
+  .term .screen {
+    padding: 18px 18px 14px; font-family: var(--mono); font-size: 14.5px;
+    white-space: nowrap; overflow-x: auto; min-height: 3.2em;
+  }
+  .term .caption {
+    padding: 0 18px 14px; color: var(--dim2); font-size: 12.5px;
+    font-family: var(--mono); min-height: 1.6em;
+  }
+  .term .caption b { color: var(--dim); font-weight: 500; }
+
+  /* ANSI palette for the simulated line */
+  .d  { color: var(--dim); }
+  .d2 { color: var(--dim2); }
+  .g  { color: var(--grn); }
+  .dg { color: var(--dgrn); }
+  .y  { color: var(--ylw); }
+  .r  { color: var(--red); }
+  .dr { color: var(--dred); }
+  .c  { color: var(--cyn); }
+  .w  { color: #eceef1; }
+  .rev-g { color: #0e0f12; background: var(--grn); border-radius: 2px; padding: 0 1px; }
+  .rev-y { color: #0e0f12; background: var(--ylw); border-radius: 2px; padding: 0 1px; }
+  .rev-d { color: #0e0f12; background: var(--dim);  border-radius: 2px; padding: 0 1px; }
+  .flash { animation: pop .46s ease-out; display: inline-block; }
+  @keyframes pop { 0% { transform: translateY(4px); opacity: 0; } 100% { transform: none; opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) { .flash { animation: none; } }
+
+  .install {
+    display: flex; align-items: center; gap: 10px; justify-content: center;
+    margin: 22px auto 0; flex-wrap: wrap;
+  }
+  .install code {
+    background: var(--panel); border: 1px solid var(--panel-edge);
+    border-radius: 8px; padding: 10px 14px; font-size: 13.5px; color: var(--fg);
+    overflow-x: auto; max-width: 100%;
+  }
+  .install button {
+    background: var(--panel); color: var(--dim); border: 1px solid var(--panel-edge);
+    border-radius: 8px; padding: 10px 14px; font: 13px var(--mono); cursor: pointer;
+  }
+  .install button:hover { color: var(--fg); border-color: rgba(255,255,255,.2); }
+
+  section { padding: 44px 0 8px; }
+  section h2 { font-size: 15px; letter-spacing: .14em; text-transform: uppercase; color: var(--dim); margin: 0 0 18px; }
+
+  /* anatomy */
+  .anatomy { border: 1px solid var(--panel-edge); border-radius: 10px; overflow: hidden; }
+  .anatomy .line { padding: 16px 18px; font: 14.5px var(--mono); white-space: nowrap; overflow-x: auto; background: #0e0f12; border-bottom: 1px solid var(--panel-edge); }
+  .anatomy table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  .anatomy td { padding: 10px 18px; border-top: 1px solid rgba(255,255,255,.04); vertical-align: top; }
+  .anatomy td:first-child { font-family: var(--mono); white-space: nowrap; width: 1%; padding-right: 24px; }
+  .anatomy tr:first-child td { border-top: 0; }
+  .anatomy td.desc { color: var(--dim); }
+  .anatomy td.desc b { color: var(--fg); font-weight: 500; }
+
+  /* values */
+  .vals { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 14px; }
+  .val { background: var(--panel); border: 1px solid var(--panel-edge); border-radius: 10px; padding: 18px; }
+  .val h3 { margin: 0 0 8px; font-size: 15px; }
+  .val p { margin: 0; color: var(--dim); font-size: 14px; }
+  .val p code { font-size: 12.5px; color: var(--fg); }
+
+  .not { color: var(--dim); font-size: 14.5px; max-width: 640px; }
+  .not li { margin: 6px 0; }
+
+  footer { padding: 48px 0 56px; color: var(--dim2); font-size: 13.5px; text-align: center; }
+  footer a { color: var(--dim); margin: 0 8px; }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <h1>Claude Code Statusline</h1>
+    <p class="sub">Quota, context, cost, model, and git — live in your Claude Code prompt.
+    Know when the 5h window resets, how deep the weekly limit runs, and what this session costs, without leaving the terminal.</p>
+    <p class="facts">one bash file &middot; 265 tests &middot; deps: jq + curl &middot; no daemon &middot; no telemetry</p>
+
+    <div class="term">
+      <div class="bar"><i></i><i></i><i></i><span>claude</span></div>
+      <div class="screen" id="line" aria-live="off"></div>
+      <div class="caption" id="cap"></div>
+    </div>
+
+    <div class="install">
+      <code id="cmd">curl -fsSL https://raw.githubusercontent.com/thevibeworks/claude-code-statusline/main/install.sh | bash</code>
+      <button id="copy" type="button">copy</button>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+<section>
+  <h2>Anatomy of the line</h2>
+  <div class="anatomy">
+    <div class="line"><span class="d">my-project</span>&nbsp;&nbsp;<span class="dg">+131</span><span class="d">/</span><span class="dr">-16</span> <span class="d">6m $7.53</span> <span class="w">fabl5[1m]</span><span class="d">xh</span><span class="g">[█░░░░░12%]</span> <span class="d">fb</span><span class="y">[67%]</span> <span class="d">[<span class="w">MAX</span>|you]</span> <span class="d">5h</span><span class="g">[38%<span class="d">@14:00</span>]</span> <span class="d">7d</span><span class="y">[55%<span class="d">@2d</span>]</span></div>
+    <table>
+      <tr><td><span class="dg">+131</span><span class="d">/</span><span class="dr">-16</span> <span class="d">6m $7.53</span></td>
+          <td class="desc"><b>Session activity.</b> Lines added/removed, API time, session cost — cost flashes its increment (<span class="mono rev-d">+.37</span>) for a minute after each jump.</td></tr>
+      <tr><td><span class="w">fabl5[1m]</span><span class="d">xh</span><span class="g">[█░░░░░12%]</span></td>
+          <td class="desc"><b>Model + context.</b> Abbreviated model, 1M-window tag, reasoning-effort badge, context pressure bar. On 1M models the bar also carries the premium-pricing band. After <code>/compact</code> the bar snaps to <code>[░░░░░░0%]</code> and flashes the drop.</td></tr>
+      <tr><td><span class="d">fb</span><span class="y">[67%]</span></td>
+          <td class="desc"><b>Model-scoped weekly quota.</b> When the API carries a per-model weekly limit for the model you're running (Fable here), it hugs the model block. Other models' limits stay hidden — only the one constraining <i>this</i> session is signal.</td></tr>
+      <tr><td><span class="d">5h</span><span class="g">[38%<span class="d">@14:00</span>]</span></td>
+          <td class="desc"><b>5-hour window.</b> Wall-clock reset time, deliberately not a countdown: the line only re-renders on activity, so <code>@1h38m</code> would decay into a lie during idle gaps. <code>@14:00</code> stays true in a frozen frame.</td></tr>
+      <tr><td><span class="d">7d</span><span class="y">[55%<span class="d">@2d</span>]</span></td>
+          <td class="desc"><b>7-day window, forecast-colored.</b> A learned per-weekday burn profile projects whether quota outlasts the window — your heavy Tuesday counts more than a generic average. Red means "at your pace, dry before the reset".</td></tr>
+      <tr><td><span class="mono d">cache~ &nbsp;!net &nbsp;!429</span></td>
+          <td class="desc"><b>Truth badges.</b> Prompt-cache health, and stale-data markers that say <i>why</i> a fetch failed (network, rate limit, auth) instead of silently showing old numbers.</td></tr>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>Built like it matters</h2>
+  <div class="vals">
+    <div class="val"><h3>Numbers that don't lie</h3>
+      <p>Wall-clock resets instead of decaying countdowns. A visible <code>[░░░░░░0%]</code> instead of a hidden bar. Stale data is always badged, never passed off as fresh.</p></div>
+    <div class="val"><h3>Polite to the API</h3>
+      <p>N concurrent Claude Code instances share one cached fetch behind an atomic lock — at most one usage request per account per TTL window. Escalating backoff honors <code>Retry-After</code>.</p></div>
+    <div class="val"><h3>Works behind TLS inspection</h3>
+      <p>Corporate mitm proxy or a local tracer: it builds a combined CA bundle from <code>NODE_EXTRA_CA_CERTS</code> automatically, so fetches survive where plain curl dies.</p></div>
+    <div class="val"><h3>Documented wire contract</h3>
+      <p>The <a href="https://github.com/thevibeworks/claude-code-statusline/blob/main/docs/api/oauth-usage.md">observed <code>/api/oauth/usage</code> schema</a> is versioned in-repo and re-synced against CLI captures, so parser changes check against ground truth.</p></div>
+    <div class="val"><h3>265 tests on one bash file</h3>
+      <p>bats suite covering quota math, lock contention (20-contender single-winner), forecast pacing, ANSI rendering, and the installer. CI on every push.</p></div>
+    <div class="val"><h3>Nothing running in the background</h3>
+      <p>No daemon, no telemetry, no npm. It runs when Claude Code renders the prompt, reads stdin + one cached API call, prints a line, exits.</p></div>
+  </div>
+</section>
+
+<section>
+  <h2>What it is not</h2>
+  <ul class="not">
+    <li>Not a general-purpose prompt framework — it renders one line for Claude Code's <code>statusLine</code> hook, nothing else.</li>
+    <li>Quota badges need an OAuth (subscription) login; API-key accounts get everything except the quota cluster.</li>
+    <li>Bash + jq + curl on Linux/macOS. No Windows-native support (WSL works).</li>
+  </ul>
+</section>
+
+</main>
+
+<footer>
+  <a href="https://github.com/thevibeworks/claude-code-statusline">GitHub</a> ·
+  <a href="https://github.com/thevibeworks/claude-code-statusline/blob/main/CHANGELOG.md">Changelog</a> ·
+  <a href="https://github.com/thevibeworks/claude-code-statusline/blob/main/docs/api/oauth-usage.md">Wire contract</a> ·
+  MIT © thevibeworks
+</footer>
+
+<script>
+(function () {
+  var line = document.getElementById('line');
+  var cap = document.getElementById('cap');
+
+  // One simulated session, rendered exactly like the real line renders:
+  // a new frame per refresh, +X flashes appearing when values jump.
+  // s() = plain segment, f() = flash segment (reverse video, pop-in).
+  function s(c, t) { return '<span class="' + c + '">' + t + '</span>'; }
+  function f(c, t) { return '<span class="' + c + ' flash">' + t + '</span>'; }
+  var P = s('d', 'my-project') + '&nbsp;&nbsp;';
+
+  var frames = [
+    { d: 2200, c: 'session starts — fresh context, quota from the shared account cache',
+      h: P + s('w','fabl5[1m]') + s('d','xh') + s('g','[░░░░░░0%]') + ' ' + s('d','fb') + s('y','[64%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[38%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[55%') + s('d','@2d') + s('y',']') },
+    { d: 2400, c: 'first turns land — lines, time, cost appear',
+      h: P + s('dg','+12') + s('d','/') + s('dr','-3') + ' ' + s('d','2m $0.48') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[█░░░░░6%]') + ' ' + s('d','fb') + s('y','[64%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[38%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[55%') + s('d','@2d') + s('y',']') },
+    { d: 3000, c: 'refresh changes a value → it flashes the delta for 60s: <b>+.31 cost, +9 context</b>',
+      h: P + s('dg','+58') + s('d','/') + s('dr','-11') + ' ' + s('d','4m $0.79') + f('rev-d','+.31') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[█░░░░░15%]') + f('rev-g','+9') + ' ' + s('d','fb') + s('y','[64%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[38%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[55%') + s('d','@2d') + s('y',']') },
+    { d: 3000, c: 'quota climbs between renders → <b>5h[40%]+2</b> — "you just burned 2%"',
+      h: P + s('dg','+58') + s('d','/') + s('dr','-11') + ' ' + s('d','9m $2.14') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[██░░░░34%]') + ' ' + s('d','fb') + s('y','[65%]') + f('rev-y','+1') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[40%') + s('d','@14:00') + s('g',']') + f('rev-g','+2') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']') },
+    { d: 2600, c: 'context pressure turns the bar yellow — time to think about compacting',
+      h: P + s('dg','+131') + s('d','/') + s('dr','-16') + ' ' + s('d','14m $5.90') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('y','[█████░86%]') + ' ' + s('d','fb') + s('y','[65%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[41%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']') },
+    { d: 3400, c: '/compact — the bar snaps visibly to 0% and flashes the drop: <b>-86</b>',
+      h: P + s('dg','+131') + s('d','/') + s('dr','-16') + ' ' + s('d','14m $5.90') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[░░░░░░0%]') + f('rev-g','-86') + ' ' + s('d','fb') + s('y','[65%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[41%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']') },
+    { d: 3000, c: 'back to work — same line, always current, never in the way',
+      h: P + s('dg','+142') + s('d','/') + s('dr','-19') + ' ' + s('d','17m $7.53') + f('rev-d','+1.63') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[█░░░░░7%]') + ' ' + s('d','fb') + s('y','[66%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[42%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']') }
+  ];
+
+  var i = 0, timer = null;
+  var reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function show(n) {
+    line.innerHTML = frames[n].h;
+    cap.innerHTML = frames[n].c;
+  }
+  function step() {
+    show(i);
+    var d = frames[i].d;
+    i = (i + 1) % frames.length;
+    timer = setTimeout(step, d);
+  }
+  if (reduced) { show(3); } else { step(); }
+
+  document.getElementById('copy').addEventListener('click', function () {
+    var btn = this;
+    navigator.clipboard.writeText(document.getElementById('cmd').textContent).then(function () {
+      btn.textContent = 'copied';
+      setTimeout(function () { btn.textContent = 'copy'; }, 1500);
+    });
+  });
+})();
+</script>
+
+</body>
+</html>
