@@ -6,3 +6,7 @@ sessions/
 
 # design mockups (not shipped)
 assets/palette-retheme-mockup.svg
+
+# local captures and secrets — never version
+.cctrace/
+.env

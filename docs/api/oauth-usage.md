@@ -4,8 +4,9 @@ The endpoint this statusline polls for 5h / 7d / per-model quota. This file
 documents the observed wire contract so parser changes can be checked against
 ground truth instead of guesswork.
 
-- Synced with: **Claude Code v2.1.201** (captured 2026-07-06 via a local
-  mitm reverse proxy in front of the official CLI)
+- Synced with: **Claude Code v2.1.207** (captured 2026-07-13 via a local
+  mitm reverse proxy in front of the official CLI; first captured against
+  v2.1.201 on 2026-07-06 — no schema change between the two)
 - All credentials, org IDs, and request IDs below are redacted or fabricated.
 - Fields marked *reserved* were observed only as `null`; names are as sent by
   the server.
@@ -16,12 +17,16 @@ ground truth instead of guesswork.
 GET https://api.anthropic.com/api/oauth/usage
 ```
 
+Headers as sent by claude-cli v2.1.207:
+
 | Header | Value | Notes |
 |--------|-------|-------|
 | `Authorization` | `Bearer <oauth access token>` | The `claudeAiOauth.accessToken` from Claude Code credentials |
-| `Content-Type` | `application/json` | |
-| `User-Agent` | see below | |
-| `anthropic-beta` | `oauth-2025-04-20` | sent by one of the CLI's two internal clients, not required |
+| `anthropic-beta` | `oauth-2025-04-20` | |
+| `Accept` | `application/json, text/plain, */*` | |
+| `Accept-Encoding` | `identity` | |
+| `Content-Type` | `application/json` | sent even though the GET has no body |
+| `User-Agent` | `claude-cli/<version> (external, cli)` | see below |
 
 No query parameters. No request body.
 
@@ -37,9 +42,22 @@ user-agent: claude-code/2.1.201
 
 Both received 200 with identical schema. This matters for rate-limit math:
 launching N Claude Code instances produces 2N usage requests from the CLIs
-alone before any statusline fetch happens. The statusline mimics the second
-form (`claude-code/<version>`) and adds at most one request per account per
-TTL window (shared cache + atomic lock, see below).
+alone before any statusline fetch happens. The statusline mirrors the first
+form exactly (`claude-cli/<version> (external, cli)` plus the header set
+above, version taken from the running CLI's stdin payload) and adds at most
+one request per account per TTL window (shared cache + atomic lock, see
+below).
+
+### Transport note: mitm proxies
+
+When the CLI runs behind a TLS-inspecting proxy it trusts (cctrace, corporate
+inspection), the proxy's CA typically arrives via `NODE_EXTRA_CA_CERTS` —
+which only Node honors, *in addition to* the system store. Non-Node tooling
+that replays this request (curl, python, go) inherits `HTTPS_PROXY` but not
+the trust, and fails instantly with an SSL verification error (curl exit 60,
+`http_code` 000). curl has no additive flag: build a combined bundle
+(system CAs + the extra cert) and pass it with `--cacert`. This statusline
+does that automatically (`curl_ca_bundle` in `statusline.sh`).
 
 ## Response — 200
 

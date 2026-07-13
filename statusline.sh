@@ -396,6 +396,33 @@ oauth_token_expired() {
     [ $((now_ms + 300000)) -ge "$expiry" ]
 }
 
+# Node trusts NODE_EXTRA_CA_CERTS in ADDITION to the system store; curl has no
+# additive flag. When the CLI runs behind a trusted mitm proxy (cctrace,
+# corporate TLS inspection), the statusline inherits HTTPS_PROXY but curl
+# rejects the proxy's certificate -> instant HTTP 000 -> persistent !net,
+# while the CLI itself keeps working. Splice the extra cert onto a copy of
+# the system bundle and point --cacert at it. Prints the combined bundle
+# path, or nothing when no extra CA is configured.
+curl_ca_bundle() {
+    [ -n "$NODE_EXTRA_CA_CERTS" ] && [ -r "$NODE_EXTRA_CA_CERTS" ] || return 0
+    local bundle="$CLAUDE_ACCOUNT_DIR/ca-bundle.pem"
+    if [ ! -f "$bundle" ] || [ "$NODE_EXTRA_CA_CERTS" -nt "$bundle" ]; then
+        mkdir -p "$CLAUDE_ACCOUNT_DIR"
+        local sys="" candidate
+        for candidate in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/cert.pem; do
+            [ -r "$candidate" ] && { sys="$candidate"; break; }
+        done
+        local tmp="${bundle}.tmp.$$"
+        if [ -n "$sys" ]; then
+            cat "$sys" "$NODE_EXTRA_CA_CERTS" >"$tmp" 2>/dev/null
+        else
+            cat "$NODE_EXTRA_CA_CERTS" >"$tmp" 2>/dev/null
+        fi
+        mv -f "$tmp" "$bundle" 2>/dev/null || rm -f "$tmp"
+    fi
+    [ -r "$bundle" ] && printf '%s\n' "$bundle"
+}
+
 refresh_oauth_credentials_file() {
     local cred_file="$1"
     local refresh_token scope scope_string payload response http_code body
@@ -426,10 +453,13 @@ refresh_oauth_credentials_file() {
             scope:$scope
         }')
 
+    local ca_bundle
+    ca_bundle=$(curl_ca_bundle)
     response=$(curl -sS -w "\n%{http_code}" -X POST \
         "https://platform.claude.com/v1/oauth/token" \
         -H "Content-Type: application/json" \
         --data "$payload" \
+        ${ca_bundle:+--cacert "$ca_bundle"} \
         --max-time 15)
 
     http_code=$(echo "$response" | tail -1)
@@ -539,20 +569,37 @@ get_user_profile() {
         fi
     fi
 
+    # Synchronous fetch: honor the no-network switch (see STATUSLINE_NO_FETCH).
+    if [ -n "${STATUSLINE_NO_FETCH:-}" ]; then
+        [ -f "$profile_cache" ] && cat "$profile_cache"
+        return 0
+    fi
+
     mkdir -p "$CLAUDE_ACCOUNT_DIR"
 
     debug_log "get_user_profile: fetching from API..."
 
-    local response=$(curl -s -w "\n%{http_code}" -X GET \
+    local ca_bundle
+    ca_bundle=$(curl_ca_bundle)
+    local response=$(curl -s -w "\n%{http_code}|%{errormsg}" -X GET \
         "https://api.anthropic.com/api/oauth/profile" \
         -H "Authorization: Bearer $token" \
+        -H "anthropic-beta: oauth-2025-04-20" \
+        -H "Accept: application/json, text/plain, */*" \
+        -H "Accept-Encoding: identity" \
         -H "Content-Type: application/json" \
+        -H "User-Agent: claude-cli/${cli_version:-2.1.207} (external, cli)" \
+        ${ca_bundle:+--cacert "$ca_bundle"} \
         --max-time 5)
 
-    local http_code=$(echo "$response" | tail -1)
+    local status_line=$(echo "$response" | tail -1)
+    local errmsg="${status_line#*|}"
+    [ "$errmsg" = "$status_line" ] && errmsg=""
+    case "$errmsg" in *'%{errormsg}'*) errmsg="" ;; esac
+    local http_code="${status_line%%|*}"
     local body=$(echo "$response" | sed '$d')
 
-    debug_log "API RESPONSE: HTTP $http_code"
+    debug_log "API RESPONSE: HTTP $http_code${errmsg:+ curl: $errmsg}"
     debug_log "RESPONSE BODY: $body"
 
     if [ "$http_code" = "200" ]; then
@@ -577,7 +624,7 @@ get_user_profile() {
 # expired cooldowns; success removes it.
 
 record_fetch_error() {
-    local err_file="$1" http_code="$2" retry_after="$3"
+    local err_file="$1" http_code="$2" retry_after="$3" errmsg="${4:-}"
     local count=1
     if [ -f "$err_file" ] && head -c1 "$err_file" 2>/dev/null | grep -q '{'; then
         local prev=$(jq -r '.count // 0' "$err_file" 2>/dev/null)
@@ -595,10 +642,13 @@ record_fetch_error() {
     if [ -n "$retry_after" ] && [ "$retry_after" -gt "$cooldown" ] 2>/dev/null; then
         cooldown="$retry_after"
     fi
-    debug_log "fetch error: $(basename "$err_file"): code=${http_code:-?} retry_after=${retry_after:-none} consecutive=$count cooldown=${cooldown}s"
+    debug_log "fetch error: $(basename "$err_file"): code=${http_code:-?} retry_after=${retry_after:-none} consecutive=$count cooldown=${cooldown}s${errmsg:+ msg=$errmsg}"
+    # msg keeps curl's own error text (SSL failure, DNS, refused connection):
+    # code 000 alone is undiagnosable — `cat usage.err` should say why.
     jq -n -c --argjson at "$(date +%s)" --arg code "${http_code:-}" \
         --argjson count "$count" --argjson cooldown "$cooldown" \
-        '{at:$at,code:$code,count:$count,cooldown:$cooldown}' >"$err_file" 2>/dev/null
+        --arg msg "$errmsg" \
+        '{at:$at,code:$code,count:$count,cooldown:$cooldown} + (if $msg != "" then {msg:$msg} else {} end)' >"$err_file" 2>/dev/null
 }
 
 # Seconds of cooldown remaining; 0 = clear to retry. Legacy err files (bare
@@ -693,21 +743,33 @@ fetch_usage_for_session() {
         return 1
     fi
 
-    # Use CLI version from input for User-Agent, fall back to generic
-    local ua="claude-code/${cli_version:-2.1.170}"
+    # Headers mirror claude-cli exactly (verified against a cctrace capture
+    # of CLI 2.1.207; see docs/api/oauth-usage.md).
+    local ua="claude-cli/${cli_version:-2.1.207} (external, cli)"
+    local ca_bundle
+    ca_bundle=$(curl_ca_bundle)
 
     debug_log "fetch_usage_for_session: fetching (User-Agent: $ua)..."
 
-    # %header{retry-after} needs curl >= 7.83; older curl emits the literal
-    # format string, which record_fetch_error's digit filter discards.
-    local response=$(curl -s -w "\n%{http_code} %header{retry-after}" -X GET \
+    # %header{retry-after} needs curl >= 7.83, %{errormsg} >= 7.75; older
+    # curl emits the literal format string, which the digit filter in
+    # record_fetch_error and the errmsg sanitizer below discard.
+    local response=$(curl -s -w "\n%{http_code} %header{retry-after}|%{errormsg}" -X GET \
         "https://api.anthropic.com/api/oauth/usage" \
         -H "Authorization: Bearer $token" \
+        -H "anthropic-beta: oauth-2025-04-20" \
+        -H "Accept: application/json, text/plain, */*" \
+        -H "Accept-Encoding: identity" \
         -H "Content-Type: application/json" \
         -H "User-Agent: $ua" \
+        ${ca_bundle:+--cacert "$ca_bundle"} \
         --max-time 5)
 
     local status_line=$(echo "$response" | tail -1)
+    local errmsg="${status_line#*|}"
+    [ "$errmsg" = "$status_line" ] && errmsg=""
+    case "$errmsg" in *'%{errormsg}'*) errmsg="" ;; esac
+    status_line="${status_line%%|*}"
     local http_code="${status_line%% *}"
     local retry_after="${status_line#* }"
     [ "$retry_after" = "$status_line" ] && retry_after=""
@@ -715,7 +777,7 @@ fetch_usage_for_session() {
 
     rm -f "$lock_file"
 
-    debug_log "API RESPONSE: HTTP $http_code${retry_after:+ (retry-after: $retry_after)}"
+    debug_log "API RESPONSE: HTTP $http_code${retry_after:+ (retry-after: $retry_after)}${errmsg:+ curl: $errmsg}"
     debug_log "RESPONSE BODY: $body"
 
     if [ "$http_code" = "200" ]; then
@@ -732,7 +794,7 @@ fetch_usage_for_session() {
         build_seven_day_profile
         return 0
     else
-        record_fetch_error "$err_file" "$http_code" "$retry_after"
+        record_fetch_error "$err_file" "$http_code" "$retry_after" "$errmsg"
         [ -f "$cache_file" ] && cat "$cache_file"
         return 1
     fi
@@ -786,16 +848,26 @@ fetch_prepaid_balance() {
         return 1
     fi
 
-    local ua="claude-code/${cli_version:-2.1.170}"
-    local response=$(curl -s -w "\n%{http_code} %header{retry-after}" -X GET \
+    local ua="claude-cli/${cli_version:-2.1.207} (external, cli)"
+    local ca_bundle
+    ca_bundle=$(curl_ca_bundle)
+    local response=$(curl -s -w "\n%{http_code} %header{retry-after}|%{errormsg}" -X GET \
         "https://api.anthropic.com/api/oauth/organizations/${org_uuid}/prepaid/credits" \
         -H "Authorization: Bearer $token" \
+        -H "anthropic-beta: oauth-2025-04-20" \
+        -H "Accept: application/json, text/plain, */*" \
+        -H "Accept-Encoding: identity" \
         -H "Content-Type: application/json" \
         -H "User-Agent: $ua" \
         -H "x-organization-uuid: $org_uuid" \
+        ${ca_bundle:+--cacert "$ca_bundle"} \
         --max-time 5)
 
     local status_line=$(echo "$response" | tail -1)
+    local errmsg="${status_line#*|}"
+    [ "$errmsg" = "$status_line" ] && errmsg=""
+    case "$errmsg" in *'%{errormsg}'*) errmsg="" ;; esac
+    status_line="${status_line%%|*}"
     local http_code="${status_line%% *}"
     local retry_after="${status_line#* }"
     [ "$retry_after" = "$status_line" ] && retry_after=""
@@ -803,7 +875,7 @@ fetch_prepaid_balance() {
 
     rm -f "$lock_file"
 
-    debug_log "PREPAID API RESPONSE: HTTP $http_code${retry_after:+ (retry-after: $retry_after)}"
+    debug_log "PREPAID API RESPONSE: HTTP $http_code${retry_after:+ (retry-after: $retry_after)}${errmsg:+ curl: $errmsg}"
     debug_log "PREPAID RESPONSE BODY: $body"
 
     if [ "$http_code" = "200" ]; then
@@ -814,7 +886,7 @@ fetch_prepaid_balance() {
         cat "$cache_file"
         return 0
     else
-        record_fetch_error "$err_file" "$http_code" "$retry_after"
+        record_fetch_error "$err_file" "$http_code" "$retry_after" "$errmsg"
         [ -f "$cache_file" ] && cat "$cache_file"
         return 1
     fi
@@ -1651,6 +1723,68 @@ seven_day_forecast() {
     }'
 }
 
+# Generalized change flash: signed delta between the current value and the
+# last value THIS session rendered, held for QUOTA_BUMP_NOTICE_SECS after the
+# change so the refresh right after a jump still shows it. One JSON state
+# file holds every component ({key: {seen, at, delta}}); integer values only,
+# callers scale floats first (cost -> cents). Unlike quota_bump_notice below
+# (climb-only, the 5h/7d flash), this one also reports drops — a negative
+# context delta after /compact is the whole point. Echoes the delta; 0 = quiet.
+delta_flash() {
+    local key="$1" cur="$2" state_file="$3"
+    [ -n "$state_file" ] && [ -n "$key" ] || { echo 0; return 0; }
+    case "$cur" in '' | *[!0-9-]*) echo 0; return 0 ;; esac
+    local now="${STATUSLINE_TEST_NOW_EPOCH:-$(date +%s)}"
+
+    local seen="" at=0 d=0
+    if [ -f "$state_file" ]; then
+        eval "$(jq -r --arg k "$key" '
+            .[$k] // {} |
+            @sh "seen=\(.seen // "")",
+            @sh "at=\(.at // 0)",
+            @sh "d=\(.delta // 0)"
+        ' "$state_file" 2>/dev/null)"
+    fi
+
+    if [ -z "$seen" ]; then
+        at=0 d=0 # first sighting is quiet
+    elif [ "$cur" -ne "$seen" ] 2>/dev/null; then
+        at=$now d=$((cur - seen))
+    elif [ "$d" -ne 0 ] 2>/dev/null && [ $((now - at)) -lt "$QUOTA_BUMP_NOTICE_SECS" ] 2>/dev/null; then
+        : # unchanged value keeps a still-fresh flash alive
+    else
+        at=0 d=0
+    fi
+
+    mkdir -p "$(dirname "$state_file")" 2>/dev/null
+    local tmp="${state_file}.tmp.$$"
+    if [ -f "$state_file" ]; then
+        jq -c --arg k "$key" \
+            --argjson v "{\"seen\":$cur,\"at\":$at,\"delta\":$d}" \
+            '. + {($k): $v}' "$state_file" >"$tmp" 2>/dev/null
+    else
+        jq -n -c --arg k "$key" \
+            --argjson v "{\"seen\":$cur,\"at\":$at,\"delta\":$d}" \
+            '{($k): $v}' >"$tmp" 2>/dev/null
+    fi
+    if [ -s "$tmp" ]; then
+        mv -f "$tmp" "$state_file" 2>/dev/null
+    else
+        rm -f "$tmp" 2>/dev/null
+    fi
+    echo "$d"
+}
+
+# Renders a delta_flash value in the shared flash idiom: reverse-video +N/-N
+# bound tight to its component, same as the 5h/7d bump. Empty when quiet.
+delta_flash_part() {
+    local d="$1" color="$2"
+    [ "$d" -ne 0 ] 2>/dev/null || return 0
+    local sign="+"
+    [ "$d" -lt 0 ] && { sign="-"; d=$((-d)); }
+    printf '%s' "${color}${REVERSE}${sign}${d}${NO_REVERSE}${RESET}"
+}
+
 # Short-lived "+N" notice when a quota window's utilization climbs between
 # renders. State is per-session ("what THIS statusline last rendered"), so
 # concurrent sessions each get their own flash instead of racing over shared
@@ -1732,6 +1866,7 @@ model_scope_abbrev() {
 build_scoped_quota_display() {
     local usage_data="$1"
     local current_model="$2"
+    local flash_state="${3:-}" # optional: enables the +N change flash
     [ -n "$usage_data" ] || return 0
     [ -n "$current_model" ] || return 0
 
@@ -1751,7 +1886,11 @@ build_scoped_quota_display() {
             local scope_int=$(printf '%.0f' "$scope_pct" 2>/dev/null || echo 0)
             if [ "$scope_int" -gt 0 ] 2>/dev/null; then
                 local color=$(get_seven_day_color "$scope_int")
-                printf '%s' "${DIM}$(model_scope_abbrev "$scope_name")${color}[${scope_int}%]${RESET}"
+                local flash=""
+                if [ -n "$flash_state" ]; then
+                    flash=$(delta_flash_part "$(delta_flash scoped "$scope_int" "$flash_state")" "$color")
+                fi
+                printf '%s' "${DIM}$(model_scope_abbrev "$scope_name")${color}[${scope_int}%]${RESET}${flash}"
                 return 0
             fi
             ;;
@@ -2270,6 +2409,8 @@ fi
 
 context_info=""
 context_pct=""
+# One state file drives every component's +X/-X change flash (see delta_flash).
+flash_state_file="$CLAUDE_CACHE_DIR/${stdin_session_id:-global}_flash_seen"
 
 # Primary: use pre-calculated percentage from CLI (v2.1.132+)
 if [ -n "$ctx_pct" ]; then
@@ -2364,6 +2505,11 @@ if [ -n "$context_pct" ] && [ "$context_pct" -ge 0 ] 2>/dev/null; then
         context_info="${bar_color}[${progress_bar}${context_pct}%]${RESET}"
         ;;
     esac
+
+    # Unified change flash: [█░░12%]+3 while filling, [░░░░0%]-58 right
+    # after /compact — the drop is the interesting one.
+    ctx_delta=$(delta_flash ctx "$context_pct" "$flash_state_file")
+    context_info="${context_info}$(delta_flash_part "$ctx_delta" "$bar_color")"
 fi
 
 # Compact effort badge: lo / md / xh / max / ultra / auto. Lowercase keeps it
@@ -2436,6 +2582,19 @@ fi
 if awk -v c="${cost_usd:-0}" 'BEGIN{exit !((c+0)>=0.005)}' 2>/dev/null; then
     cost_formatted=$(printf "%.2f" "$cost_usd" | sed 's/\.00$//')
     cost_component="${DIM}\$${cost_formatted}${RESET}"
+    # Change flash in cents: $7.53+.12 (dollars only when the jump is >= $1).
+    cost_cents=$(awk -v c="${cost_usd:-0}" 'BEGIN{printf "%d", (c*100)+0.5}' 2>/dev/null)
+    cost_delta=$(delta_flash cost "$cost_cents" "$flash_state_file")
+    if [ "${cost_delta:-0}" -ne 0 ] 2>/dev/null; then
+        cost_sign="+"
+        [ "$cost_delta" -lt 0 ] && { cost_sign="-"; cost_delta=$((-cost_delta)); }
+        if [ "$cost_delta" -ge 100 ]; then
+            cost_delta_text=$(printf '%s%d.%02d' "$cost_sign" $((cost_delta / 100)) $((cost_delta % 100)))
+        else
+            cost_delta_text=$(printf '%s.%02d' "$cost_sign" "$cost_delta")
+        fi
+        cost_component="${cost_component}${DIM}${REVERSE}${cost_delta_text}${NO_REVERSE}${RESET}"
+    fi
 fi
 
 add_component() {
@@ -2505,6 +2664,11 @@ if [ -n "$session_id" ] && [ "$_may_have_oauth" = true ]; then
         should_fetch=false
     fi
 
+    # STATUSLINE_NO_FETCH: render purely from cache/stdin, never spawn a
+    # network fetch. The test harness exports it so integration tests don't
+    # fire real API calls (or race teardown with a background fetch).
+    [ -n "${STATUSLINE_NO_FETCH:-}" ] && should_fetch=false
+
     if [ "$should_fetch" = true ]; then
         reap_stale_lock "$lock_file" 15
         [ ! -f "$lock_file" ] && (fetch_usage_for_session "$session_id" >/dev/null 2>&1 &)
@@ -2530,7 +2694,7 @@ if [ -n "$session_id" ] && [ "$_may_have_oauth" = true ]; then
 
         # Model-scoped weekly quota hugs the model+context block (it's a
         # property of the model this session runs, not of the 5h/7d cluster).
-        scoped_display=$(build_scoped_quota_display "$usage_data" "${model_id:-$model_display}")
+        scoped_display=$(build_scoped_quota_display "$usage_data" "${model_id:-$model_display}" "$flash_state_file")
         [ -n "$scoped_display" ] && model_component="${model_component} ${scoped_display}"
 
         if [ -n "$quota_component" ]; then
@@ -2562,6 +2726,7 @@ if [ -n "$session_id" ] && [ "$_may_have_oauth" = true ]; then
                 if [ "$should_fetch_prepaid" = true ] && [ "$(fetch_error_remaining "$prepaid_err")" -gt 0 ] 2>/dev/null; then
                     should_fetch_prepaid=false
                 fi
+                [ -n "${STATUSLINE_NO_FETCH:-}" ] && should_fetch_prepaid=false
 
                 if [ "$should_fetch_prepaid" = true ]; then
                     reap_stale_lock "$prepaid_lock" 30

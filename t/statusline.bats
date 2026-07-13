@@ -1300,6 +1300,68 @@ JSON
 
 # --- quota bump notice (+N flash when utilization climbs between renders) ---
 
+# --- delta_flash (unified per-component +X/-X change flash) ---
+
+@test "delta_flash: first sighting is quiet" {
+    tmpdir=$(mktemp -d)
+    [ "$(delta_flash cost 753 "$tmpdir/flash")" = "0" ]
+    rm -rf "$tmpdir"
+}
+
+@test "delta_flash: increase emits +delta, decrease emits -delta" {
+    tmpdir=$(mktemp -d)
+    delta_flash ctx 12 "$tmpdir/flash" >/dev/null
+    [ "$(delta_flash ctx 15 "$tmpdir/flash")" = "3" ]
+    delta_flash ctx 70 "$tmpdir/flash" >/dev/null
+    [ "$(delta_flash ctx 12 "$tmpdir/flash")" = "-58" ]
+    rm -rf "$tmpdir"
+}
+
+@test "delta_flash: unchanged value keeps a fresh flash, expiry clears it" {
+    tmpdir=$(mktemp -d)
+    STATUSLINE_TEST_NOW_EPOCH=1000 delta_flash ctx 12 "$tmpdir/flash" >/dev/null
+    STATUSLINE_TEST_NOW_EPOCH=1010 delta_flash ctx 15 "$tmpdir/flash" >/dev/null
+    [ "$(STATUSLINE_TEST_NOW_EPOCH=1030 delta_flash ctx 15 "$tmpdir/flash")" = "3" ]
+    [ "$(STATUSLINE_TEST_NOW_EPOCH=1071 delta_flash ctx 15 "$tmpdir/flash")" = "0" ]
+    rm -rf "$tmpdir"
+}
+
+@test "delta_flash: components are independent in one state file" {
+    tmpdir=$(mktemp -d)
+    delta_flash cost 753 "$tmpdir/flash" >/dev/null
+    delta_flash ctx 12 "$tmpdir/flash" >/dev/null
+    [ "$(delta_flash cost 765 "$tmpdir/flash")" = "12" ]
+    [ "$(delta_flash ctx 12 "$tmpdir/flash")" = "0" ]
+    rm -rf "$tmpdir"
+}
+
+@test "delta_flash: garbage input or missing state file stays quiet" {
+    tmpdir=$(mktemp -d)
+    [ "$(delta_flash ctx "" "$tmpdir/flash")" = "0" ]
+    [ "$(delta_flash ctx "12.5" "$tmpdir/flash")" = "0" ]
+    [ "$(delta_flash ctx 12 "")" = "0" ]
+    rm -rf "$tmpdir"
+}
+
+@test "delta_flash_part: renders reverse-video sign, quiet on zero" {
+    plain=$(strip_ansi "$(delta_flash_part 3 "$GREEN")")
+    [ "$plain" = "+3" ]
+    plain=$(strip_ansi "$(delta_flash_part -58 "$GREEN")")
+    [ "$plain" = "-58" ]
+    [ -z "$(delta_flash_part 0 "$GREEN")" ]
+}
+
+@test "build_scoped_quota_display: flash on scoped pct change" {
+    tmpdir=$(mktemp -d)
+    usage='{"limits":[{"kind":"weekly_scoped","percent":67,"scope":{"model":{"display_name":"Fable"}}}]}'
+    plain=$(strip_ansi "$(build_scoped_quota_display "$usage" "claude-fable-5" "$tmpdir/flash")")
+    [ "$plain" = "fb[67%]" ]
+    usage='{"limits":[{"kind":"weekly_scoped","percent":69,"scope":{"model":{"display_name":"Fable"}}}]}'
+    plain=$(strip_ansi "$(build_scoped_quota_display "$usage" "claude-fable-5" "$tmpdir/flash")")
+    [ "$plain" = "fb[69%]+2" ]
+    rm -rf "$tmpdir"
+}
+
 @test "quota_bump_notice: first sighting is quiet" {
     tmpdir=$(mktemp -d)
     result=$(quota_bump_notice 42 10 "$tmpdir/state")
@@ -1443,6 +1505,57 @@ JSON
     record_fetch_error "$tmpdir/e" 000 "";  [ "$(fetch_error_badge "$tmpdir/e")" = "!net" ]
     # Legacy bare-epoch err file carries no code: bare !
     date +%s >"$tmpdir/f";                  [ "$(fetch_error_badge "$tmpdir/f")" = "!" ]
+    rm -rf "$tmpdir"
+}
+
+@test "record_fetch_error: keeps curl's error message for diagnosis" {
+    tmpdir=$(mktemp -d)
+    record_fetch_error "$tmpdir/usage.err" 000 "" "SSL certificate problem: unable to get local issuer certificate"
+    [ "$(jq -r '.msg' "$tmpdir/usage.err")" = "SSL certificate problem: unable to get local issuer certificate" ]
+    # No message -> no msg field (old file shape preserved)
+    record_fetch_error "$tmpdir/b.err" 429 ""
+    [ "$(jq -r 'has("msg")' "$tmpdir/b.err")" = "false" ]
+    rm -rf "$tmpdir"
+}
+
+# --- curl CA bundle (mitm proxy trust via NODE_EXTRA_CA_CERTS) ---
+
+@test "curl_ca_bundle: empty when NODE_EXTRA_CA_CERTS unset or unreadable" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    NODE_EXTRA_CA_CERTS=""
+    [ -z "$(curl_ca_bundle)" ]
+    NODE_EXTRA_CA_CERTS="$tmpdir/nonexistent.pem"
+    [ -z "$(curl_ca_bundle)" ]
+    rm -rf "$tmpdir"
+}
+
+@test "curl_ca_bundle: combined bundle contains the extra cert" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir/acct"
+    NODE_EXTRA_CA_CERTS="$tmpdir/mitm-ca.pem"
+    echo "FAKE-MITM-CA" >"$NODE_EXTRA_CA_CERTS"
+    bundle=$(curl_ca_bundle)
+    [ -n "$bundle" ]
+    [ -f "$bundle" ]
+    grep -q "FAKE-MITM-CA" "$bundle"
+    rm -rf "$tmpdir"
+}
+
+@test "curl_ca_bundle: rebuilds when the extra cert changes" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir/acct"
+    NODE_EXTRA_CA_CERTS="$tmpdir/mitm-ca.pem"
+    echo "OLD-CA" >"$NODE_EXTRA_CA_CERTS"
+    bundle=$(curl_ca_bundle)
+    grep -q "OLD-CA" "$bundle"
+    # Backdate the bundle so the -nt mtime comparison sees a newer cert
+    # regardless of filesystem timestamp resolution.
+    touch -t 200001010000 "$bundle"
+    echo "NEW-CA" >"$NODE_EXTRA_CA_CERTS"
+    bundle=$(curl_ca_bundle)
+    grep -q "NEW-CA" "$bundle"
+    ! grep -q "OLD-CA" "$bundle"
     rm -rf "$tmpdir"
 }
 

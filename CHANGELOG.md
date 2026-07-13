@@ -1,5 +1,48 @@
 # Changelog
 
+## v0.17.0 — 2026-07-13 — mitm proxy trust, diagnosable !net, unified +X flash
+
+**Fix: every API fetch died behind a trusted mitm proxy (persistent `!net`).**
+When the CLI runs under a TLS-inspecting proxy it trusts (cctrace, corporate
+inspection), the statusline inherits `HTTPS_PROXY` but curl does not honor
+`NODE_EXTRA_CA_CERTS` (Node-only, additive) — every fetch failed instantly
+with an SSL verify error (HTTP 000), while the CLI kept working. Observed
+live: 19 consecutive failures, quota frozen for 11 hours behind `!net`.
+
+- New `curl_ca_bundle`: splices the extra cert onto a copy of the system CA
+  bundle (curl has no additive flag) and passes it via `--cacert` on all
+  four outbound requests (usage, profile, prepaid, OAuth refresh).
+- `!net` is now diagnosable: curl's own error text (`%{errormsg}`) is logged
+  and recorded in the err file — `cat usage.err` says *why* (SSL, DNS,
+  refused), not just `code 000`.
+
+**Request-header parity with the CLI.** All OAuth API calls now mirror
+claude-cli exactly (verified against a v2.1.207 capture): UA
+`claude-cli/<version> (external, cli)` with the version of the running CLI,
+plus `anthropic-beta: oauth-2025-04-20`, `Accept`, `Accept-Encoding:
+identity`. `docs/api/oauth-usage.md` re-synced to v2.1.207 (no schema change
+since 2.1.201) and now documents the mitm transport pitfall.
+
+**New: unified +X change flash.** The reverse-video flash the 5h/7d badges
+already had is now a generic mechanism (`delta_flash`, one state file per
+session) wired into more components — each flashes its change for 60s after
+a refresh alters it:
+
+- cost: `$7.90+.37` (cents-precise, dollars shown when the jump is >= $1)
+- context: `[█░░░░░30%]+9`, and `[░░░░░░3%]-27` right after /compact —
+  the drop is the point
+- model-scoped quota: `fb[69%]+2`
+
+**Test hygiene: `STATUSLINE_NO_FETCH`.** Integration tests isolate the cache
+dirs but `$HOME` (and so real credentials) leaks through — once the SSL fix
+landed, a bare cache dir made tests fire *real* API fetches whose background
+writes raced teardown (`rm -rf: Directory not empty`, flaky ~1/8). The test
+harness now exports `STATUSLINE_NO_FETCH=1`, honored by the script's main
+flow: render purely from cache/stdin, never spawn a network fetch. Also
+useful standalone for air-gapped/offline setups.
+
+11 new tests (265 total).
+
 ## v0.16.0 — 2026-07-06 — atomic fetch locks (multi-instance 429 stampede)
 
 Launching several Claude Code instances together produced 429 bursts. Two
