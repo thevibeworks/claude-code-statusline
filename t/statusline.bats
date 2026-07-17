@@ -708,6 +708,16 @@ EOF
     [[ "$plain" == *"7d[75%@5d]"* ]]
 }
 
+@test "build_usage_display: pressure inside the last day shows wall-clock reset" {
+    # < 24h to reset: the old @Nh/@<1h countdown decayed by the hour in a
+    # frozen frame — the badge now uses the 5h idiom, absolute @HH:MM.
+    reset_time=$(date -u -d '+6 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":10},\"seven_day\":{\"utilization\":90,\"resets_at\":\"$reset_time\"}}"
+    plain=$(strip_ansi "$(build_usage_display "$usage" "")")
+    expected=$(_fmt_epoch "$(_epoch_from_ts "$reset_time")" '%H:%M')
+    [[ "$plain" == *"7d[90%@${expected}]"* ]]
+}
+
 # --- get_adaptive_ttl ---
 
 @test "get_adaptive_ttl: low usage = 5 min" {
@@ -1782,10 +1792,63 @@ JSON
     STATUSLINE_TEST_NOW_EPOCH=1778728000
     export STATUSLINE_TEST_NOW_EPOCH
     result=$(get_cache_health 200000 0 1 "$tmpdir/cache_health" "1h")
-    [[ "$result" == "ok|1h|1778728000" ]]
+    [[ "$result" == "ok|1h|1778728000|0" ]]
     [ "$(jq -r '.ttl_class' "$tmpdir/cache_health")" = "1h" ]
     [ "$(jq -r '.last_active_at' "$tmpdir/cache_health")" = "1778728000" ]
     unset STATUSLINE_TEST_NOW_EPOCH
+    rm -rf "$tmpdir"
+}
+
+@test "get_cache_health: unchanged usage does not slide the expiry anchor" {
+    # Renders also fire on vim/permission/model changes carrying the SAME
+    # usage; re-stamping there would let a frozen frame claim a warm cache
+    # after it already died (see the anchor comment in get_cache_health).
+    tmpdir=$(mktemp -d)
+    STATUSLINE_TEST_NOW_EPOCH=1000 get_cache_health 200000 500 1 "$tmpdir/ch" >/dev/null
+    result=$(STATUSLINE_TEST_NOW_EPOCH=4000 get_cache_health 200000 500 1 "$tmpdir/ch")
+    [ "$result" = "ok||1000|0" ]
+    [ "$(jq -r '.last_active_at' "$tmpdir/ch")" = "1000" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_cache_health: changed usage re-stamps the expiry anchor" {
+    tmpdir=$(mktemp -d)
+    STATUSLINE_TEST_NOW_EPOCH=1000 get_cache_health 200000 500 1 "$tmpdir/ch" >/dev/null
+    STATUSLINE_TEST_NOW_EPOCH=1500 get_cache_health 200500 800 1 "$tmpdir/ch" >/dev/null
+    [ "$(jq -r '.last_active_at' "$tmpdir/ch")" = "1500" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_cache_health: activity after a gap past the TTL is a break (idle expiry)" {
+    tmpdir=$(mktemp -d)
+    STATUSLINE_TEST_NOW_EPOCH=1000 get_cache_health 200000 500 1 "$tmpdir/ch" >/dev/null
+    # 2h later the 1h cache is long dead. The read=0 rewrite frame was
+    # skipped (300ms debounce) — the changed numbers + stale anchor alone
+    # must flag the rewrite, sized at the re-cached prefix.
+    result=$(STATUSLINE_TEST_NOW_EPOCH=8200 get_cache_health 201000 800 1 "$tmpdir/ch")
+    [ "$result" = "break||8200|201800" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_cache_health: activity within the TTL window is not a break" {
+    tmpdir=$(mktemp -d)
+    STATUSLINE_TEST_NOW_EPOCH=1000 get_cache_health 200000 500 1 "$tmpdir/ch" >/dev/null
+    result=$(STATUSLINE_TEST_NOW_EPOCH=3000 get_cache_health 201000 800 1 "$tmpdir/ch")
+    [[ "$result" == ok\|* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "get_cache_health: break is held for the notice window, then clears" {
+    tmpdir=$(mktemp -d)
+    echo "200000" > "$tmpdir/ch"
+    STATUSLINE_TEST_NOW_EPOCH=1000 get_cache_health 0 200100 1 "$tmpdir/ch" >/dev/null
+    # 30s later the cache is warm again, but the break notice must survive
+    # the render that replaced the one-frame rewrite signal.
+    result=$(STATUSLINE_TEST_NOW_EPOCH=1030 get_cache_health 200100 900 1 "$tmpdir/ch")
+    [[ "$result" == break\|* ]]
+    [[ "$result" == *"|200100" ]]
+    result=$(STATUSLINE_TEST_NOW_EPOCH=1090 get_cache_health 200100 900 1 "$tmpdir/ch")
+    [[ "$result" == ok\|* ]]
     rm -rf "$tmpdir"
 }
 
@@ -1804,7 +1867,7 @@ JSON
     STATUSLINE_TEST_NOW_EPOCH=1740
     export STATUSLINE_TEST_NOW_EPOCH
     result=$(get_cache_health 0 0 1 "$tmpdir/cache_health")
-    [[ "$result" == "break|5m|1000" ]]
+    [[ "$result" == "break|5m|1000|0" ]]
     unset STATUSLINE_TEST_NOW_EPOCH
     rm -rf "$tmpdir"
 }
@@ -1827,21 +1890,65 @@ JSON
     rm -rf "$tmpdir"
 }
 
-@test "build_cache_indicator: auto hides healthy ttl metadata" {
-    result=$(build_cache_indicator "ok|1h|1778728000" "auto")
-    [ -z "$result" ]
+@test "build_cache_indicator: auto stays silent while healthy (any size)" {
+    # "quiet until it bites": the deadline is always ~1 TTL out mid-session,
+    # so auto spends no width on it. Silent regardless of prefix size.
+    [ -z "$(build_cache_indicator "ok|1h|1778728000|0" "auto")" ]
+    [ -z "$(build_cache_indicator "ok||1778728000|0" "auto")" ]
 }
 
-@test "build_cache_indicator: always shows ttl and observed time" {
-    result=$(build_cache_indicator "ok|1h|1778728000" "always")
+@test "build_cache_indicator: always shows expiry deadline (anchor + observed ttl)" {
+    result=$(TZ=UTC build_cache_indicator "ok|1h|1778728000|0" "always")
     plain=$(strip_ansi "$result")
-    [[ "$plain" =~ ^cache:1h@[0-9]{2}:[0-9]{2}$ ]]
+    expected=$(TZ=UTC _fmt_epoch $((1778728000 + 3600)) '%H:%M')
+    [ "$plain" = "${CACHE_GLYPH}:1h@${expected}" ]
 }
 
-@test "build_cache_indicator: building shows ttl metadata" {
-    result=$(build_cache_indicator "building|5m|1778728000" "auto")
+@test "build_cache_indicator: unobserved ttl assumes the default, no class shown" {
+    # bare @HH:MM = assumed TTL; the :1h/:5m provenance appears only when
+    # the usage breakdown actually reported the class.
+    result=$(TZ=UTC build_cache_indicator "ok||1778728000|0" "always")
     plain=$(strip_ansi "$result")
-    [[ "$plain" =~ ^cache:5m@[0-9]{2}:[0-9]{2}~$ ]]
+    expected=$(TZ=UTC _fmt_epoch $((1778728000 + 3600)) '%H:%M')
+    [ "$plain" = "${CACHE_GLYPH}@${expected}" ]
+}
+
+@test "build_cache_indicator: building is a bare cache~ in auto" {
+    result=$(build_cache_indicator "building|5m|1778728000|0" "auto")
+    plain=$(strip_ansi "$result")
+    [ "$plain" = "${CACHE_GLYPH}~" ]
+}
+
+@test "build_cache_indicator: building carries the deadline under --cache always" {
+    result=$(TZ=UTC build_cache_indicator "building|5m|1778728000|0" "always")
+    plain=$(strip_ansi "$result")
+    expected=$(TZ=UTC _fmt_epoch $((1778728000 + 300)) '%H:%M')
+    [ "$plain" = "${CACHE_GLYPH}:5m@${expected}~" ]
+}
+
+@test "build_cache_indicator: break shows the rewrite size" {
+    result=$(build_cache_indicator "break|1h|1778728000|195000" "auto")
+    plain=$(strip_ansi "$result")
+    [ "$plain" = "${CACHE_GLYPH}!195k" ]
+}
+
+@test "build_cache_indicator: sub-1k break renders bare cache!" {
+    result=$(build_cache_indicator "break|1h|1778728000|900" "auto")
+    plain=$(strip_ansi "$result")
+    [ "$plain" = "${CACHE_GLYPH}!" ]
+}
+
+@test "build_cache_indicator: a heavy (>200k) rewrite renders bold red" {
+    # the >200k premium-band miss the user asked to highlight
+    result=$(build_cache_indicator "break|1h|1778728000|419000" "auto")
+    [ "$(strip_ansi "$result")" = "${CACHE_GLYPH}!419k" ]
+    [[ "$result" == *'\033[1;31m'* ]]
+}
+
+@test "build_cache_indicator: a sub-200k rewrite stays plain red, not bold" {
+    result=$(build_cache_indicator "break|1h|1778728000|150000" "auto")
+    [[ "$result" != *'\033[1;31m'* ]]
+    [[ "$result" == *'\033[0;31m'* ]]
 }
 
 # --- integration: cache health indicator ---
@@ -1853,19 +1960,34 @@ JSON
     result=$(echo '{"model":{"id":"claude-opus-4-6[1m]","display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.150","context_window":{"used_percentage":21,"context_window_size":1000000,"current_usage":{"input_tokens":1,"output_tokens":58,"cache_creation_input_tokens":200100,"cache_read_input_tokens":0}}}' \
         | CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
     plain=$(strip_ansi "$result")
-    [[ "$plain" == *"cache!"* ]]
+    [[ "$plain" == *"${CACHE_GLYPH}!"* ]]
     rm -rf "$tmpdir"
 }
 
-@test "integration: healthy cache shows no indicator" {
+@test "integration: healthy long-context cache stays silent in auto mode" {
+    # "quiet until it bites": a warm 209k cache spends zero width. The
+    # freeze-safe deadline is available on demand via --cache always
+    # (asserted separately); auto shows nothing until the rewrite happens.
     tmpdir=$(mktemp -d)
     mkdir -p "$tmpdir/sessions"
-    echo "200000" > "$tmpdir/sessions/test-session-id_cache_health"
+    # Fresh anchor: a stale one would (correctly) fire idle-expiry. This
+    # asserts the warm, actively-worked case shows nothing.
+    echo "{\"cache_read\":200000,\"last_active_at\":$(date +%s)}" > "$tmpdir/sessions/test-session-id_cache_health"
     result=$(echo '{"model":{"id":"claude-opus-4-6[1m]","display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.150","context_window":{"used_percentage":21,"context_window_size":1000000,"current_usage":{"input_tokens":1,"output_tokens":58,"cache_creation_input_tokens":173,"cache_read_input_tokens":209703}}}' \
         | CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
     plain=$(strip_ansi "$result")
-    [[ "$plain" != *"cache!"* ]]
-    [[ "$plain" != *"cache~"* ]]
+    [[ "$plain" != *"${CACHE_GLYPH}"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: --cache always surfaces the deadline on a warm cache" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/sessions"
+    echo "{\"cache_read\":200000,\"ttl_class\":\"1h\",\"last_active_at\":$(date +%s)}" > "$tmpdir/sessions/test-session-id_cache_health"
+    result=$(echo '{"model":{"id":"claude-opus-4-6[1m]","display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.150","context_window":{"used_percentage":21,"context_window_size":1000000,"current_usage":{"input_tokens":1,"output_tokens":58,"cache_creation_input_tokens":173,"cache_read_input_tokens":209703}}}' \
+        | CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test --cache always)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" =~ ${CACHE_GLYPH}:1h@[0-9]{2}:[0-9]{2} ]]
     rm -rf "$tmpdir"
 }
 
@@ -1875,17 +1997,21 @@ JSON
     result=$(echo '{"model":{"id":"claude-opus-4-6[1m]","display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.150","context_window":{"used_percentage":5,"context_window_size":1000000,"current_usage":{"input_tokens":1,"output_tokens":10,"cache_creation_input_tokens":50000,"cache_read_input_tokens":0}}}' \
         | CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
     plain=$(strip_ansi "$result")
-    [[ "$plain" == *"cache~"* ]]
+    # auto building is a bare marker (the deadline is --cache always only)
+    [[ "$plain" == *"${CACHE_GLYPH}~"* ]]
+    [[ "$plain" != *"@"* ]]
     rm -rf "$tmpdir"
 }
 
 @test "integration: first turn building with 1h breakdown shows ttl class" {
+    # The ttl-class provenance rides on the deadline, which only --cache
+    # always renders; auto building is a bare cache~.
     tmpdir=$(mktemp -d)
     mkdir -p "$tmpdir/sessions"
     result=$(echo '{"model":{"id":"claude-opus-4-6[1m]","display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.150","context_window":{"used_percentage":5,"context_window_size":1000000,"current_usage":{"input_tokens":1,"output_tokens":10,"cache_creation_input_tokens":50000,"cache_creation":{"ephemeral_1h_input_tokens":50000,"ephemeral_5m_input_tokens":0},"cache_read_input_tokens":0}}}' \
-        | CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
+        | CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test --cache always)
     plain=$(strip_ansi "$result")
-    [[ "$plain" == *"cache:1h@"* ]]
+    [[ "$plain" == *"${CACHE_GLYPH}:1h@"* ]]
     [[ "$plain" == *"~"* ]]
     rm -rf "$tmpdir"
 }
@@ -1893,13 +2019,15 @@ JSON
 @test "integration: --cache always shows healthy ttl metadata" {
     tmpdir=$(mktemp -d)
     mkdir -p "$tmpdir/sessions"
-    cat > "$tmpdir/sessions/test-session-id_cache_health" <<'JSON'
-{"cache_read":200000,"ttl_class":"1h","last_active_at":1778728000}
+    # Anchor must be fresh: a stale anchor + new usage is (correctly) an
+    # idle-expiry break now, which is not what this test is about.
+    cat > "$tmpdir/sessions/test-session-id_cache_health" <<JSON
+{"cache_read":200000,"ttl_class":"1h","last_active_at":$(date +%s)}
 JSON
     result=$(echo '{"model":{"id":"claude-opus-4-6[1m]","display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.150","context_window":{"used_percentage":21,"context_window_size":1000000,"current_usage":{"input_tokens":1,"output_tokens":58,"cache_creation_input_tokens":173,"cache_read_input_tokens":209703}}}' \
         | CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test --cache always)
     plain=$(strip_ansi "$result")
-    [[ "$plain" == *"cache:1h@"* ]]
+    [[ "$plain" == *"${CACHE_GLYPH}:1h@"* ]]
     rm -rf "$tmpdir"
 }
 
@@ -1910,7 +2038,7 @@ JSON
     result=$(echo '{"model":{"id":"claude-opus-4-6[1m]","display_name":"Opus"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.150","context_window":{"used_percentage":21,"context_window_size":1000000,"current_usage":{"input_tokens":1,"output_tokens":58,"cache_creation_input_tokens":200100,"cache_read_input_tokens":0}}}' \
         | CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test --cache off)
     plain=$(strip_ansi "$result")
-    [[ "$plain" != *"cache!"* ]]
+    [[ "$plain" != *"${CACHE_GLYPH}!"* ]]
     [ "$(cat "$tmpdir/sessions/test-session-id_cache_health")" = "200000" ]
     rm -rf "$tmpdir"
 }

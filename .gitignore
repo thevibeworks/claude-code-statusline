@@ -7,6 +7,9 @@ sessions/
 # design mockups (not shipped)
 assets/palette-retheme-mockup.svg
 
+# devlogs — working notes, not project content
+docs/devlog/
+
 # local captures and secrets — never version
 .cctrace/
 .env

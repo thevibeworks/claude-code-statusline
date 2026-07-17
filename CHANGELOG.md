@@ -1,5 +1,53 @@
 # Changelog
 
+## v0.18.0 — 2026-07-15 — freeze-safe cache expiry deadline, 7d hybrid reset
+
+**Fix: the 7d pressure suffix no longer decays in a frozen frame.** The
+badge kept a relative countdown (`@6h`, `@<1h`) inside the last day —
+the same decaying-countdown mistake the 5h badge fixed twice (v0.6,
+v0.11), and it showed only under pressure, i.e. exactly when a stale
+`@<1h` convinces you you're still capped after relief already arrived.
+Now hybrid: day-relative `@Nd` while >= 24h out (decays one day per day;
+mild, and the narrowest honest form), wall-clock `@04:00` inside the last
+day — the 5h badge's idiom, unambiguous under 24h via next-occurrence
+reading, and true no matter how stale the frame is. Zero width cost.
+(Resolves the open decision in
+docs/devlog/2026-07-15-statusline-refresh-mechanism.org.)
+
+**New: prompt-cache expiry warning that survives an idle gap — "quiet until
+it bites".** Claude Code re-renders the statusline only on activity (mount,
+new assistant message, mode/model change — no timer; see
+docs/devlog/2026-07-15-statusline-refresh-mechanism.org), so nothing can
+appear *during* the idle gap where the cache actually dies. And while active
+the cache is always freshly ~1 TTL from expiry, so there is no honest
+"expiring soon" to render. So `auto` stays silent while healthy — no width
+on a deadline that's always ~an hour out — and speaks only when a rewrite
+actually happened:
+
+- **`≡!419k` on resume**: the first post-idle render sees activity after
+  a gap longer than the TTL and reports the rewrite, sized at the re-cached
+  prefix (observed live: 68min idle -> `read=0 write=87869`, the full
+  context re-cached at ~20x the read rate; on subscriptions it burns 5h/7d
+  quota too). **Bold red past 200k** — the premium-band miss. Fires even
+  when the 300ms render debounce skipped the `read=0` turn, because the
+  detector keys off the stale activity anchor, not the one-frame collapse.
+  Held 60s wall-clock so a busy turn's refresh doesn't erase it.
+- **Anchor-slide fix**: the activity anchor re-stamps only when the usage
+  numbers change. Renders also fire on vim/permission/model changes carrying
+  the previous turn's usage; re-stamping there slid the anchor forward and a
+  frozen frame would claim a warm cache after it died.
+- **`--cache always` keeps the freeze-safe deadline** `≡@15:20` (last
+  request + TTL) for anyone who wants to read "resume or start fresh?" from
+  the frozen frame before typing. Wall-clock, never a countdown.
+- **TTL default matches how the CLI actually caches** (from CC source +
+  live traces): claude.ai subscriber REPL sessions get `ttl:"1h"` on every
+  breakpoint; API-key / custom-endpoint auth stays on the stock 5m cache.
+  `FORCE_PROMPT_CACHING_5M` / `ENABLE_PROMPT_CACHING_1H` honored. An
+  observed `ephemeral_1h/5m` breakdown overrides and renders its class as
+  provenance (`≡:5m@14:25`); the CLI does not forward the breakdown
+  today. Known gap: subscriber sessions bootstrapped on overage latch 5m
+  server-side — invisible here; `≡!Nk` still reports the miss.
+
 ## v0.17.0 — 2026-07-13 — mitm proxy trust, diagnosable !net, unified +X flash
 
 **Fix: every API fetch died behind a trusted mitm proxy (persistent `!net`).**

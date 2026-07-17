@@ -68,9 +68,9 @@ Then add to `~/.claude/settings.json`:
 ## What It Shows
 
 ```text
-project (main*)  +84/-14 1h30m $6.72 opus4.8[1m][███░░░26%] cache:1h@14:20~ [MAX|you] 5h[87%@14:30] 7d[75%@2d] ex[$16.29/$200 8% bal$4.66]
-   |       |       |      |     |       |                        |                 |              |             |              |
- path   branch   edits   time  cost   model+context             cache             user         5h quota      7d quota      extra usage
+project (main*)  +84/-14 1h30m $6.72 opus4.8[1m][███░░░26%] [MAX|you] 5h[87%@14:30] 7d[75%@2d] ex[$16.29/$200 8% bal$4.66]
+   |       |       |      |     |       |                     |             |             |              |
+ path   branch   edits   time  cost   model+context          user        5h quota      7d quota      extra usage
 ```
 
 Every component earns its place:
@@ -84,9 +84,9 @@ Every component earns its place:
 | Effort | Compact lowercase badge: `lo` / `md` / `xh` / `max` / `ultra` / `auto` (`high` is the default and stays hidden). Dim for routine levels; `max` / `ultra` use the pressure color; `fast` shows in fast mode. |
 | Context bar | Merged with model. Green / yellow / red by window pressure. On 1M models the bar also carries the premium input-pricing band: yellow past 200k tokens, red past 800k — the % alone looks calm (320k = 32%) while every request bills at the premium rate. A real 0% (e.g. right after `/compact` resets the window) renders a visibly empty bar `[░░░░░░0%]` — the snap to empty *is* the refresh signal; the bar hides only when no context data exists at all. Changes flash for ~60s in reverse video: `[█░░░░░30%]+9` while filling, `[░░░░░░3%]-27` right after a compaction. Cost flashes the same way, cents-precise: `$7.90+.37`. |
 | User tier | Neutral white-weight (MAX bold, PRO normal, dim otherwise) — identity, never a status color. Truncated display name. |
-| Quota | Integer percentages. The 5h badge always carries its reset time while a window is live — `5h[42%@14:30]` reads "42% used, resets at 14:30" — because on a 5h horizon the reset is the number you plan the current sitting around. Wall-clock, not a countdown, on purpose: Claude Code only re-renders the statusline on activity, so a relative "@1h38m" silently decays into a lie during idle gaps, while "@14:30" stays true in a frozen frame. (The 7d badge stays relative — `@5d` decays at day granularity, slower than any idle gap.) When a window's utilization climbs between renders, a reverse-video `+N` token appears right after the badge for ~60s: `5h[44%@14:32]+2` means "you just burned 2%". A drop (window reset) stays quiet — the fresh low number is its own signal. **7d is forecast, not leveled**: a learned per-weekday burn profile (EWMA over your own usage history) plus your recent 24h burn project whether the quota outlasts the window — your heavy Tuesday counts more than a generic average. The verdict is color alone; under pressure the badge shows explicit time remaining in the window: `7d[44%@5d]` red means "at your pace, dry days before the reset 5 days from now". Cold start (<14 days history) falls back to window-average pacing. Recovery color when reset is imminent. **Model-scoped weekly quota**: when the usage API carries a per-model weekly limit (`limits[]`, `kind=weekly_scoped`) for the model your session is running, it renders right after the model+context block — `fabl5[1m][12%] fb[67%]` on a Fable 5 session, `op[33%]` on Opus — because the quota is a property of the model you're running, not of the account-wide 5h/7d cluster. It's a weekly number (same reset as the 7d badge), scoped to one model. Other models' scoped quotas stay hidden: only the limit constraining *this* session is signal. Supersedes the legacy `seven_day_opus`/`seven_day_sonnet` fields, which the API now sends as null. |
+| Quota | Integer percentages. The 5h badge always carries its reset time while a window is live — `5h[42%@14:30]` reads "42% used, resets at 14:30" — because on a 5h horizon the reset is the number you plan the current sitting around. Wall-clock, not a countdown, on purpose: Claude Code only re-renders the statusline on activity, so a relative "@1h38m" silently decays into a lie during idle gaps, while "@14:30" stays true in a frozen frame. (The 7d badge is hybrid: day-relative `@5d` while the reset is >= 24h out — decays one day per day, mild and narrow — switching to the same wall-clock `@04:00` inside the last day, where an `@6h`/`@<1h` countdown decayed by the hour exactly when pressure keeps the suffix visible.) When a window's utilization climbs between renders, a reverse-video `+N` token appears right after the badge for ~60s: `5h[44%@14:32]+2` means "you just burned 2%". A drop (window reset) stays quiet — the fresh low number is its own signal. **7d is forecast, not leveled**: a learned per-weekday burn profile (EWMA over your own usage history) plus your recent 24h burn project whether the quota outlasts the window — your heavy Tuesday counts more than a generic average. The verdict is color alone; under pressure the badge shows when relief arrives: `7d[44%@5d]` red means "at your pace, dry days before the reset 5 days from now"; inside the last day it reads `7d[92%@04:00]` — resets at 04:00. Cold start (<14 days history) falls back to window-average pacing. Recovery color when reset is imminent. **Model-scoped weekly quota**: when the usage API carries a per-model weekly limit (`limits[]`, `kind=weekly_scoped`) for the model your session is running, it renders right after the model+context block — `fabl5[1m][12%] fb[67%]` on a Fable 5 session, `op[33%]` on Opus — because the quota is a property of the model you're running, not of the account-wide 5h/7d cluster. It's a weekly number (same reset as the 7d badge), scoped to one model. Other models' scoped quotas stay hidden: only the limit constraining *this* session is signal. Supersedes the legacy `seven_day_opus`/`seven_day_sonnet` fields, which the API now sends as null. |
 | Extra usage | Monthly spend, limit, prepaid balance. `--extra auto` shows when quota runs out. |
-| Cache health | Detects observed prompt-cache rebuilds and cache-read drops. `cache!` on break, `cache~` when building. If a future Claude Code stdin includes TTL breakdown, `--cache always` can show `cache:1h@14:20`; current stdin usually exposes aggregate cache tokens only. Hidden when healthy by default. |
+| Cache health | **Quiet until it bites.** Claude Code never re-renders an idle session, and while you work the prompt cache is always freshly ~1 TTL from expiry — so a proactive "expiring soon" isn't honestly observable, and `auto` spends no width on it. It speaks only when a rewrite actually happens: `≡!419k` the instant you resume onto a dead cache (idle longer than the TTL) or a mid-session prefix collapse — a 419k-token re-cache at ~20x the read rate (and the same burn on your 5h/7d quota on subscriptions). **Bold red past 200k** — the premium-band miss. `≡~` while a large prefix rebuilds. `--cache always` additionally keeps the freeze-safe deadline `≡@15:20` (last request + TTL; a past time in a frozen frame reads "expired at 15:20"). TTL defaults to 1h (claude.ai subscriber sessions) or 5m (API-key auth); an observed usage breakdown overrides it. The `≡` glyph (U+2261) reads as stacked cache layers — one terminal column, quiet and distinct. |
 
 **Color follows three lanes** so a glance is unambiguous: **status**
 (green/yellow/red) = pressure *only* — quota, context, cache, the premium
@@ -112,7 +112,7 @@ red, matching its Claude Code TUI color) = model family; everything else is
 | Change flash on every refresh (`+.37` cost, `+9`/`-27` context, `+N` quota) | -- | Yes |
 | Model-scoped weekly quota (`fb`/`op`/`sn`) | -- | Yes |
 | Works behind trusted mitm proxies (NODE_EXTRA_CA_CERTS) | -- | Yes |
-| 265 bats tests + CI | -- | Yes |
+| 266 bats tests + CI | -- | Yes |
 
 ## Configuration
 
@@ -161,23 +161,45 @@ when it matters.
 ### Prompt Cache
 
 ```text
---cache auto        opus4.8[1m][21%]                      (healthy, hidden)
---cache auto        opus4.8[1m][21%] cache~               (cache is rebuilding)
---cache auto        opus4.8[1m][21%] cache!               (cache-read collapse observed)
---cache always      opus4.8[1m][21%] cache:1h@14:20       (when TTL breakdown exists)
+--cache auto        fabl5[1m][42%]                        (healthy: silent — no width spent)
+--cache auto        fabl5[1m][5%] ≡~                      (a large prefix is rebuilding)
+--cache auto        fabl5[1m][43%] ≡!419k                 (resume onto a dead cache: 419k rewrite; BOLD red >200k)
+--cache always      opus4.8[1m][21%] ≡:1h@14:20           (opt in to the freeze-safe deadline; :1h = observed TTL)
 --cache off         opus4.8[1m][21%]                      (disabled; no state writes)
 ```
 
-Cache state is based on Claude Code's per-turn usage tokens:
-`cache_read_input_tokens`, `cache_creation_input_tokens`, and `input_tokens`.
-The statusline can prove that a cache was read, rebuilt, or likely broke after a
-turn. It cannot know server-side `expire_at` before the next request, so it shows
-absolute last-observed cache activity (`@14:20`) rather than a live countdown.
-Current Claude Code statusline stdin usually exposes aggregate cache tokens only,
-not `cache_creation.ephemeral_1h_input_tokens` / `ephemeral_5m_input_tokens`.
-The script accepts those fields for forward compatibility, but TTL class
-(`5m` / `1h`) is shown only when observed in actual usage breakdown. Local
-environment variables are intent, not proof of what the server accepted.
+**Why healthy is silent.** The server refreshes the cache TTL on every request,
+so while you work the cache is always freshly ~1 TTL from expiry — there is no
+honest "expiring soon" to show, and a deadline that's always ~an hour out is
+pure width. The expiry only becomes *real* during an idle gap, and Claude Code
+renders the statusline only on activity — so no warning can appear while you're
+away. The honest moment is when you come back: the first post-idle render sees
+activity resume after a gap longer than the TTL and reports the rewrite as
+`≡!Nk`, sized at the re-cached prefix (`≡!419k`), **bold red past
+200k** — the expensive premium-band miss. This fires even when the 300ms render
+debounce skipped the `read=0` turn, because the detector keys off the stale
+activity anchor, not the one-frame collapse; breaks are held ~60s so a busy
+turn's refresh doesn't erase them. A cache miss re-caches the whole prefix at
+~20x the cache-read rate, and on subscription plans the same multiplier lands
+on your 5h/7d quota.
+
+The activity anchor is the last observed *usage change*, not the last render —
+Claude Code also re-runs the statusline on vim/permission/model changes with
+unchanged usage, and re-stamping there would fake a warm cache.
+
+**The freeze-safe deadline, on demand.** `--cache always` adds `≡@15:20`
+(last request + TTL): a past time in a frozen frame reads "expired at 15:20",
+so you can decide *before* typing whether to resume this session or start
+fresh. Wall-clock, never a countdown — "expires in 43m" rendered an hour ago is
+a lie, "@15:20" stays true however stale the frame is. Claude Code's statusline
+stdin exposes aggregate cache tokens only, not the `ephemeral_1h/5m` breakdown,
+so the TTL is assumed from how the CLI actually requests caching (verified in
+traces): **1h for claude.ai subscriber sessions, 5m for API-key /
+custom-endpoint auth** (the CLI's `FORCE_PROMPT_CACHING_5M` /
+`ENABLE_PROMPT_CACHING_1H` overrides are honored). An observed breakdown wins
+and renders its class as provenance (`≡:5m@14:25`). Known gap: a subscriber
+session that started while on overage is latched to 5m server-side, invisible
+here — the `≡!Nk` badge still reports the miss after the fact.
 
 ### Quota Polling
 

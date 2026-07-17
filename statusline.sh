@@ -30,6 +30,32 @@ SEVEN_DAY_WINDOW_SECS=604800     # weekly quota window (fixed 7d) for pace math
 EXTRA_AUTO_UTIL_PCT=50           # show extra when its own utilization >= 50%
 CACHE_BREAK_MIN_TOKENS=2000      # ignore cache drops below this (noise)
 CACHE_BREAK_DROP_PCT=5           # cache read must drop >5% to count as break
+CACHE_HEAVY_TOKENS=200000        # break badge turns bold-red past this: the
+                                 # >200k premium-band prefix, an expensive rewrite
+# Cache-badge marker. Triple bar (U+2261 IDENTICAL TO): three stacked
+# horizontal lines read as layered cache tiers. Single-column text glyph, so
+# the padding math is unaffected. Swap for ☰ (U+2630) or Ξ (U+039E) if a
+# font tofus it.
+CACHE_GLYPH="${CACHE_GLYPH:-≡}"
+
+# Unobserved-TTL default for the cache expiry deadline. Mirrors the CLI's own
+# rule (should1hCacheTTL, CC source): claude.ai subscribers in the REPL get
+# cache_control ttl:"1h" (confirmed on every breakpoint in live traces);
+# API-key / custom-endpoint auth stays on the stock 5m cache. The CLI's own
+# FORCE_PROMPT_CACHING_5M / ENABLE_PROMPT_CACHING_1H overrides win when set.
+# An observed ephemeral_1h/5m usage breakdown always overrides this default.
+# Known gap: a subscriber session that bootstrapped on overage latches 5m,
+# which we cannot see — the cache!Nk break badge still reports the miss.
+_env_truthy() { case "$1" in 1|true|yes|on) return 0 ;; *) return 1 ;; esac; }
+if _env_truthy "${FORCE_PROMPT_CACHING_5M:-}"; then
+    CACHE_TTL_DEFAULT="5m"
+elif _env_truthy "${ENABLE_PROMPT_CACHING_1H:-}"; then
+    CACHE_TTL_DEFAULT="1h"
+elif [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
+    CACHE_TTL_DEFAULT="5m"
+else
+    CACHE_TTL_DEFAULT="1h"
+fi
 
 # Owner-only by default: caches and the debug log hold account PII (email,
 # uuid, org, paths). umask 077 keeps every file/dir we create unreadable to
@@ -360,6 +386,10 @@ term_width=$(tput cols 2>/dev/null || echo 80)
 YELLOW='\033[0;33m'
 GREEN='\033[0;32m'
 RED='\033[0;31m'
+# Bold red — one notch louder than pressure red (0;31), still the STATUS lane
+# (distinct from fable's identity bright-red 0;91). Used only for a heavy cache
+# rewrite (>= CACHE_HEAVY_TOKENS): the expensive miss deserves extra weight.
+BOLD_RED='\033[1;31m'
 DIM='\033[2m'
 DIM_GREEN='\033[2;32m'
 DIM_RED='\033[2;31m'
@@ -1049,6 +1079,16 @@ should_show_extra() {
     esac
 }
 
+# Cache health state machine. Tracks the per-session cached-prefix numbers in
+# a small JSON state file and classifies each render:
+#   ok        warm cache, no anomaly
+#   building  first write of a fresh prefix (read = 0, creation > 0)
+#   break     the cached prefix shrank hard (drop rule), OR new activity landed
+#             after an idle gap longer than the TTL (the rewrite happened even
+#             when the 300ms render debounce skipped the read=0 frame), OR a
+#             recent break still held for QUOTA_BUMP_NOTICE_SECS
+#   none      no usage numbers at all this render
+# Echoes "state|ttl_class|last_active_at|break_tokens".
 get_cache_health() {
     local cache_read="${1:-0}" cache_creation="${2:-0}" uncached="${3:-0}"
     local state_file="${4:-}" ttl_class="${5:-}" cache_creation_1h="${6:-0}" cache_creation_5m="${7:-0}"
@@ -1072,8 +1112,10 @@ get_cache_health() {
     fi
 
     local prev_cache_read=""
+    local prev_cache_creation=""
     local prev_ttl_class=""
     local last_active_at=""
+    local break_at=0 break_tokens=0
     local now_epoch="${STATUSLINE_TEST_NOW_EPOCH:-$(date +%s)}"
 
     if [ -n "$ttl_class" ] && [ "$ttl_class" != "5m" ] && [ "$ttl_class" != "1h" ]; then
@@ -1090,8 +1132,11 @@ get_cache_health() {
         if jq -e 'type == "object"' "$state_file" >/dev/null 2>&1; then
             eval "$(jq -r '
                 @sh "prev_cache_read=\(.cache_read // "")",
+                @sh "prev_cache_creation=\(.cache_creation // "")",
                 @sh "prev_ttl_class=\(.ttl_class // "")",
-                @sh "last_active_at=\(.last_active_at // "")"
+                @sh "last_active_at=\(.last_active_at // "")",
+                @sh "break_at=\(.break_at // 0)",
+                @sh "break_tokens=\(.break_tokens // 0)"
             ' "$state_file" 2>/dev/null)"
         else
             prev_cache_read=$(cat "$state_file" 2>/dev/null)
@@ -1101,8 +1146,57 @@ get_cache_health() {
 
     [ -z "$ttl_class" ] && ttl_class="$prev_ttl_class"
 
+    # Anchor for the expiry deadline: the last REQUEST, not the last render.
+    # Renders also fire on vim/permission/model changes carrying the previous
+    # message's usage unchanged; re-stamping there slides the anchor forward
+    # and a frozen frame would claim a warm cache after it already died.
+    # Stamp only when the usage numbers actually moved (new API activity).
+    local usage_changed=""
     if [ "$cache_read" -gt 0 ] || [ "$cache_creation" -gt 0 ]; then
-        last_active_at="$now_epoch"
+        if [ "$cache_read" != "${prev_cache_read:-}" ] || [ "$cache_creation" != "${prev_cache_creation:-}" ]; then
+            usage_changed=1
+        fi
+    fi
+    local prev_active="${last_active_at:-}"
+    [ -n "$usage_changed" ] && last_active_at="$now_epoch"
+
+    local ttl_secs=3600
+    [ "${ttl_class:-$CACHE_TTL_DEFAULT}" = "5m" ] && ttl_secs=300
+
+    local state="ok"
+    if [ -z "$prev_cache_read" ] || [ "$prev_cache_read" -le 0 ] 2>/dev/null; then
+        if [ "$cache_read" -le 0 ] && [ "$cache_creation" -gt 0 ]; then
+            state="building"
+        fi
+    else
+        local drop=$((prev_cache_read - cache_read))
+        local threshold=$((prev_cache_read * (100 - CACHE_BREAK_DROP_PCT) / 100))
+        if [ "$drop" -gt "$CACHE_BREAK_MIN_TOKENS" ] && [ "$cache_read" -lt "$threshold" ]; then
+            state="break"
+            break_at="$now_epoch"
+            break_tokens="$cache_creation"
+        elif [ -n "$usage_changed" ] && [ -n "$prev_active" ] \
+             && [ $((now_epoch - prev_active)) -gt "$ttl_secs" ] 2>/dev/null; then
+            # Idle expiry: activity after a gap longer than the TTL means the
+            # whole prefix was re-written, whether or not any render caught
+            # the read=0 frame. Size estimate: the prefix that got re-cached.
+            state="break"
+            break_at="$now_epoch"
+            break_tokens=$((cache_read + cache_creation))
+        elif [ "$cache_read" -le 0 ] && [ "$cache_creation" -gt "$CACHE_BREAK_MIN_TOKENS" ]; then
+            state="building"
+        fi
+    fi
+
+    # A break is HELD for QUOTA_BUMP_NOTICE_SECS: the single render that
+    # catches the rewrite is often replaced within seconds during a busy turn.
+    if [ "$state" != "break" ]; then
+        if [ "${break_at:-0}" -gt 0 ] 2>/dev/null && [ $((now_epoch - break_at)) -lt "$QUOTA_BUMP_NOTICE_SECS" ] 2>/dev/null; then
+            state="break"
+        else
+            break_at=0
+            break_tokens=0
+        fi
     fi
 
     if [ -n "$state_file" ]; then
@@ -1114,6 +1208,8 @@ get_cache_health() {
             --argjson uncached "$uncached" \
             --arg ttl "$ttl_class" \
             --argjson last_active "${last_active_at:-0}" \
+            --argjson break_at "${break_at:-0}" \
+            --argjson break_tokens "${break_tokens:-0}" \
             --argjson updated_at "$now_epoch" \
             '{
                 cache_read: $cache_read,
@@ -1121,34 +1217,14 @@ get_cache_health() {
                 uncached: $uncached,
                 ttl_class: (if $ttl == "" then null else $ttl end),
                 last_active_at: (if $last_active > 0 then $last_active else null end),
+                break_at: (if $break_at > 0 then $break_at else null end),
+                break_tokens: (if $break_tokens > 0 then $break_tokens else null end),
                 updated_at: $updated_at
             }' > "$tmp_state" 2>/dev/null && mv -f "$tmp_state" "$state_file" 2>/dev/null
         rm -f "$tmp_state" 2>/dev/null
     fi
 
-    if [ -z "$prev_cache_read" ] || [ "$prev_cache_read" -le 0 ] 2>/dev/null; then
-        if [ "$cache_read" -le 0 ] && [ "$cache_creation" -gt 0 ]; then
-            echo "building|${ttl_class}|${last_active_at}"
-            return
-        fi
-        echo "ok|${ttl_class}|${last_active_at}"
-        return
-    fi
-
-    local drop=$((prev_cache_read - cache_read))
-    local threshold=$((prev_cache_read * (100 - CACHE_BREAK_DROP_PCT) / 100))
-
-    if [ "$drop" -gt "$CACHE_BREAK_MIN_TOKENS" ] && [ "$cache_read" -lt "$threshold" ]; then
-        echo "break|${ttl_class}|${last_active_at}"
-        return
-    fi
-
-    if [ "$cache_read" -le 0 ] && [ "$cache_creation" -gt "$CACHE_BREAK_MIN_TOKENS" ]; then
-        echo "building|${ttl_class}|${last_active_at}"
-        return
-    fi
-
-    echo "ok|${ttl_class}|${last_active_at}"
+    echo "${state}|${ttl_class}|${last_active_at}|${break_tokens}"
 }
 
 infer_cache_ttl_class() {
@@ -1196,37 +1272,67 @@ _fmt_epoch() {
     return 0
 }
 
-format_cache_active_time() {
-    local ts="${1:-}"
-    [ -z "$ts" ] || [ "$ts" = "null" ] || [ "$ts" = "0" ] && return
-    _fmt_epoch "$ts" '%H:%M'
-}
-
+# Cache badge — "quiet until it bites". Claude Code never re-renders an idle
+# session, and while active the cache is always freshly ~1 TTL from expiry, so
+# a proactive "expiring soon" is not honestly observable for a 1h (subscriber)
+# cache: the expiry only becomes real during an idle gap that produces no
+# render to warn in. So auto mode stays SILENT while healthy — no width spent
+# on a deadline that's always ~an hour out mid-session — and speaks only when
+# the rewrite actually happened:
+#   cache!<size>  a resume landing on a dead cache (idle-expiry break) or a
+#                 mid-session prefix collapse. <size> = re-cached tokens; the
+#                 miss bills at ~20x the read rate (and burns 5h/7d quota on
+#                 subscriptions). BOLD red past CACHE_HEAVY_TOKENS — the >200k
+#                 premium-band rewrite the user asked to highlight.
+#   cache~        a large prefix is (re)building this turn.
+# --cache always keeps the freeze-safe absolute deadline (cache@HH:MM = last
+# request + TTL): a past time in a frozen frame reads "expired at HH:MM", the
+# same wall-clock idiom as the 5h @reset. TTL: the CLI does not forward the
+# ephemeral_1h/5m breakdown today (ttl_class stays null), so an unobserved TTL
+# assumes CACHE_TTL_DEFAULT; an observed class renders as provenance
+# (cache:5m@…) and overrides it.
 build_cache_indicator() {
     local health_result="$1" mode="${2:-auto}"
-    local state ttl_class last_active_at active_time
-    IFS='|' read -r state ttl_class last_active_at <<<"$health_result"
+    local state ttl_class last_active_at break_tokens
+    IFS='|' read -r state ttl_class last_active_at break_tokens <<<"$health_result"
 
     case "$mode" in
         "off") return ;;
     esac
 
-    active_time=$(format_cache_active_time "$last_active_at")
+    # Absolute expiry deadline (last request + TTL) — rendered only in `always`.
+    local ttl_secs=3600
+    [ "${ttl_class:-$CACHE_TTL_DEFAULT}" = "5m" ] && ttl_secs=300
     local meta=""
-    if [ -n "$ttl_class" ]; then
-        meta=":${ttl_class}"
-        [ -n "$active_time" ] && meta="${meta}@${active_time}"
+    if [ -n "$last_active_at" ] && [ "$last_active_at" -gt 0 ] 2>/dev/null; then
+        local deadline
+        deadline=$(_fmt_epoch $((last_active_at + ttl_secs)) '%H:%M')
+        [ -n "$deadline" ] && meta="@${deadline}"
     fi
+    [ -n "$ttl_class" ] && [ -n "$meta" ] && meta=":${ttl_class}${meta}"
 
     case "$state" in
         "break")
-            echo "${RED}cache!${RESET}"
+            # Rewrite size quantifies the hit: ≡!195k = a 195k-token prefix
+            # was re-cached at the write rate. Bold past the heavy threshold
+            # — a >200k premium-band miss is the expensive one.
+            local size=""
+            [ "${break_tokens:-0}" -ge 1000 ] 2>/dev/null && size="$((break_tokens / 1000))k"
+            local col="$RED"
+            [ "${break_tokens:-0}" -ge "$CACHE_HEAVY_TOKENS" ] 2>/dev/null && col="$BOLD_RED"
+            echo "${col}${CACHE_GLYPH}!${size}${RESET}"
             ;;
         "building")
-            echo "${DIM_YELLOW}cache${meta}~${RESET}"
+            if [ "$mode" = "always" ]; then
+                echo "${DIM_YELLOW}${CACHE_GLYPH}${meta}~${RESET}"
+            else
+                echo "${DIM_YELLOW}${CACHE_GLYPH}~${RESET}"
+            fi
             ;;
         "ok")
-            [ "$mode" = "always" ] && [ -n "$meta" ] && echo "${DIM}cache${meta}${RESET}"
+            # Healthy: silent in auto (the deadline is always ~1 TTL out while
+            # active — noise), shown only when explicitly requested.
+            [ "$mode" = "always" ] && [ -n "$meta" ] && echo "${DIM}${CACHE_GLYPH}${meta}${RESET}"
             ;;
     esac
     return 0
@@ -1937,7 +2043,8 @@ build_usage_display() {
     # deadline. WALL-CLOCK (@14:30), not a countdown: the statusline only
     # re-renders on activity, so "@1h38m" decays into a lie during idle gaps
     # while "@14:30" stays true in a frozen frame (see format_reset_absolute).
-    # The 7d badge keeps relative @Nd — day granularity outlives any idle gap.
+    # The 7d badge is hybrid: day-relative @Nd while >= 24h out, wall-clock
+    # @HH:MM inside the last day (see the 7d reset_suffix below).
     # Recovery color (DIM_GREEN) when high usage + reset <= 30min.
     if [ "$five_int" -gt 0 ] 2>/dev/null; then
         local color=$(get_usage_color "$five_int")
@@ -2007,22 +2114,26 @@ build_usage_display() {
             color="$DIM_GREEN"
         fi
 
-        # Under pressure, be explicit about how long the window still has to
-        # run: @Nd / @Nh REMAINING (timezone-proof, unlike a day name). Shown
-        # whenever the verdict warns — abnormal burn 5 days out included —
-        # or usage is already high. On-pace badges stay a bare 7d[NN%].
+        # Under pressure, be explicit about when relief arrives. Hybrid form:
+        # >= 24h out stays day-relative (@Nd — decays one day per day in a
+        # frozen frame; mild, and the narrowest honest form), but inside the
+        # last day it switches to the 5h badge's wall-clock idiom (@04:00).
+        # The old @Nh/@<1h countdown decayed by the hour during idle — worst
+        # exactly when pressure keeps this suffix visible, convincing you
+        # you're still capped after relief already arrived. Under 24h a bare
+        # @HH:MM is unambiguous (next occurrence), same as the 5h badge.
+        # Shown whenever the verdict warns — abnormal burn 5 days out
+        # included — or usage is already high. On-pace badges stay 7d[NN%].
         local reset_suffix=""
         if [ -n "$reset_secs" ] && [ "$reset_secs" -gt 0 ] 2>/dev/null \
            && { [ "$sev_level" != "green" ] || [ "$seven_int" -ge 85 ] 2>/dev/null; }; then
             local rem=""
             if [ "$reset_secs" -ge 86400 ]; then
                 rem="$(( reset_secs / 86400 ))d"
-            elif [ "$reset_secs" -ge 3600 ]; then
-                rem="$(( reset_secs / 3600 ))h"
             else
-                rem="<1h"
+                rem=$(format_reset_absolute "$seven_reset")
             fi
-            reset_suffix="${DIM}@${rem}${color}"
+            [ -n "$rem" ] && reset_suffix="${DIM}@${rem}${color}"
         fi
         local bump_part=""
         [ "$seven_bump" -gt 0 ] 2>/dev/null && bump_part="${color}${REVERSE}+${seven_bump}${NO_REVERSE}"
