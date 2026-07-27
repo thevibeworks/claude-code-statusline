@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.18.0 — 2026-07-27 — freeze-safe cache expiry, account identity, 7d hybrid reset
 
 **New: account identity for multi-account credential overlays.** One
 `~/.claude` used to imply one account; deva-style runners broke that by
@@ -22,7 +22,10 @@ are sanitized to a filesystem-safe charset before touching a path. The
 chip also renders for API-key/custom-endpoint sessions, which skip the
 OAuth quota block — exactly the sessions only a tag can tell apart.
 
-## v0.18.0 — 2026-07-15 — freeze-safe cache expiry deadline, 7d hybrid reset
+**Fix: the ≡ cache badge no longer disappears next to the bright context
+bar.** An all-dim badge was invisible in real use; the glyph now keeps
+full weight (yellow while building, white for the `--cache always`
+deadline) with only the trailing meta dim.
 
 **Fix: the 7d pressure suffix no longer decays in a frozen frame.** The
 badge kept a relative countdown (`@6h`, `@<1h`) inside the last day —
@@ -69,6 +72,8 @@ actually happened:
   provenance (`≡:5m@14:25`); the CLI does not forward the breakdown
   today. Known gap: subscriber sessions bootstrapped on overage latch 5m
   server-side — invisible here; `≡!Nk` still reports the miss.
+
+22 new tests (287 total).
 
 ## v0.17.0 — 2026-07-13 — mitm proxy trust, diagnosable !net, unified +X flash
 
