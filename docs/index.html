@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Claude Code Statusline — quota, context, cost. Live, in one bash file.</title>
-<meta name="description" content="Live 5h/7d quota with reset times, per-model weekly limits, context pressure, session cost, cache health, and git activity in your Claude Code prompt. One bash file, 265 tests, no daemon, no telemetry.">
+<meta name="description" content="Live 5h/7d quota with reset times, per-model weekly limits, context pressure, session cost, prompt-cache expiry detection, and git activity in your Claude Code prompt. One bash file, 266 tests, no daemon, no telemetry.">
 <style>
   :root {
     --bg: #0b0c0e;
@@ -71,6 +71,7 @@
   .y  { color: var(--ylw); }
   .r  { color: var(--red); }
   .dr { color: var(--dred); }
+  .br { color: var(--red); font-weight: bold; }
   .c  { color: var(--cyn); }
   .w  { color: #eceef1; }
   .rev-g { color: #0e0f12; background: var(--grn); border-radius: 2px; padding: 0 1px; }
@@ -129,7 +130,7 @@
     <h1>Claude Code Statusline</h1>
     <p class="sub">Quota, context, cost, model, and git — live in your Claude Code prompt.
     Know when the 5h window resets, how deep the weekly limit runs, and what this session costs, without leaving the terminal.</p>
-    <p class="facts">one bash file &middot; 265 tests &middot; deps: jq + curl &middot; no daemon &middot; no telemetry</p>
+    <p class="facts">one bash file &middot; 266 tests &middot; deps: jq + curl &middot; no daemon &middot; no telemetry</p>
 
     <div class="term">
       <div class="bar"><i></i><i></i><i></i><span>claude</span></div>
@@ -149,7 +150,7 @@
 <section>
   <h2>Anatomy of the line</h2>
   <div class="anatomy">
-    <div class="line"><span class="d">my-project</span>&nbsp;&nbsp;<span class="dg">+131</span><span class="d">/</span><span class="dr">-16</span> <span class="d">6m $7.53</span> <span class="w">fabl5[1m]</span><span class="d">xh</span><span class="g">[█░░░░░12%]</span> <span class="d">fb</span><span class="y">[67%]</span> <span class="d">[<span class="w">MAX</span>|you]</span> <span class="d">5h</span><span class="g">[38%<span class="d">@14:00</span>]</span> <span class="d">7d</span><span class="y">[55%<span class="d">@2d</span>]</span></div>
+    <div class="line"><span class="d">my-project</span>&nbsp;&nbsp;<span class="dg">+131</span><span class="d">/</span><span class="dr">-16</span> <span class="d">6m $7.53</span> <span class="w">fabl5[1m]</span><span class="d">xh</span><span class="g">[█░░░░░12%]</span> <span class="br">≡!419k</span> <span class="d">fb</span><span class="y">[67%]</span> <span class="d">[<span class="w">MAX</span>|you]</span> <span class="d">5h</span><span class="g">[38%<span class="d">@14:00</span>]</span> <span class="d">7d</span><span class="y">[55%<span class="d">@2d</span>]</span></div>
     <table>
       <tr><td><span class="dg">+131</span><span class="d">/</span><span class="dr">-16</span> <span class="d">6m $7.53</span></td>
           <td class="desc"><b>Session activity.</b> Lines added/removed, API time, session cost — cost flashes its increment (<span class="mono rev-d">+.37</span>) for a minute after each jump.</td></tr>
@@ -161,8 +162,8 @@
           <td class="desc"><b>5-hour window.</b> Wall-clock reset time, deliberately not a countdown: the line only re-renders on activity, so <code>@1h38m</code> would decay into a lie during idle gaps. <code>@14:00</code> stays true in a frozen frame.</td></tr>
       <tr><td><span class="d">7d</span><span class="y">[55%<span class="d">@2d</span>]</span></td>
           <td class="desc"><b>7-day window, forecast-colored.</b> A learned per-weekday burn profile projects whether quota outlasts the window — your heavy Tuesday counts more than a generic average. Red means "at your pace, dry before the reset".</td></tr>
-      <tr><td><span class="mono d">cache~ &nbsp;!net &nbsp;!429</span></td>
-          <td class="desc"><b>Truth badges.</b> Prompt-cache health, and stale-data markers that say <i>why</i> a fetch failed (network, rate limit, auth) instead of silently showing old numbers.</td></tr>
+      <tr><td><span class="mono"><span class="br">≡!419k</span>&nbsp; <span class="y">≡~</span>&nbsp; <span class="d">!net</span></span></td>
+          <td class="desc"><b>Truth badges.</b> <code>≡!419k</code> — prompt-cache break on resume (bold red past 200k); <code>≡~</code> — rebuilding; stale-data markers say <i>why</i> a fetch failed. Silent while healthy.</td></tr>
     </table>
   </div>
 </section>
@@ -172,13 +173,15 @@
   <div class="vals">
     <div class="val"><h3>Numbers that don't lie</h3>
       <p>Wall-clock resets instead of decaying countdowns. A visible <code>[░░░░░░0%]</code> instead of a hidden bar. Stale data is always badged, never passed off as fresh.</p></div>
+    <div class="val"><h3>Cache break detection</h3>
+      <p>Resume after an idle gap longer than the TTL and <code>≡!419k</code> fires — the full-prefix rewrite you can't see coming, sized and colored by severity. Silent while healthy; no width wasted on a warm cache.</p></div>
     <div class="val"><h3>Polite to the API</h3>
       <p>N concurrent Claude Code instances share one cached fetch behind an atomic lock — at most one usage request per account per TTL window. Escalating backoff honors <code>Retry-After</code>.</p></div>
     <div class="val"><h3>Works behind TLS inspection</h3>
       <p>Corporate mitm proxy or a local tracer: it builds a combined CA bundle from <code>NODE_EXTRA_CA_CERTS</code> automatically, so fetches survive where plain curl dies.</p></div>
     <div class="val"><h3>Documented wire contract</h3>
       <p>The <a href="https://github.com/thevibeworks/claude-code-statusline/blob/main/docs/api/oauth-usage.md">observed <code>/api/oauth/usage</code> schema</a> is versioned in-repo and re-synced against CLI captures, so parser changes check against ground truth.</p></div>
-    <div class="val"><h3>265 tests on one bash file</h3>
+    <div class="val"><h3>266 tests on one bash file</h3>
       <p>bats suite covering quota math, lock contention (20-contender single-winner), forecast pacing, ANSI rendering, and the installer. CI on every push.</p></div>
     <div class="val"><h3>Nothing running in the background</h3>
       <p>No daemon, no telemetry, no npm. It runs when Claude Code renders the prompt, reads stdin + one cached API call, prints a line, exits.</p></div>
@@ -229,7 +232,13 @@
     { d: 3400, c: '/compact — the bar snaps visibly to 0% and flashes the drop: <b>-86</b>',
       h: P + s('dg','+131') + s('d','/') + s('dr','-16') + ' ' + s('d','14m $5.90') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[░░░░░░0%]') + f('rev-g','-86') + ' ' + s('d','fb') + s('y','[65%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[41%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']') },
     { d: 3000, c: 'back to work — same line, always current, never in the way',
-      h: P + s('dg','+142') + s('d','/') + s('dr','-19') + ' ' + s('d','17m $7.53') + f('rev-d','+1.63') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[█░░░░░7%]') + ' ' + s('d','fb') + s('y','[66%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[42%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']') }
+      h: P + s('dg','+142') + s('d','/') + s('dr','-19') + ' ' + s('d','17m $7.53') + f('rev-d','+1.63') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[█░░░░░7%]') + ' ' + s('d','fb') + s('y','[66%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[42%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']') },
+    { d: 3200, c: 'came back after 2h idle — cache expired, 419k-token rewrite at 20× the read rate: <b>≡!419k</b>',
+      h: P + s('dg','+142') + s('d','/') + s('dr','-19') + ' ' + s('d','17m $7.53') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[█░░░░░7%]') + ' ' + f('br','≡!419k') + ' ' + s('d','fb') + s('y','[66%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[42%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']') },
+    { d: 2800, c: 'prefix rebuilding — ≡~ clears once the cache is warm again',
+      h: P + s('dg','+152') + s('d','/') + s('dr','-22') + ' ' + s('d','19m $8.71') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[██░░░░14%]') + ' ' + s('y','≡~') + ' ' + s('d','fb') + s('y','[67%]') + f('rev-y','+1') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[43%') + s('d','@14:00') + s('g',']') + f('rev-g','+1') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']') },
+    { d: 3000, c: 'cache warm, indicator gone — auto stays silent while healthy, zero width',
+      h: P + s('dg','+168') + s('d','/') + s('dr','-25') + ' ' + s('d','22m $10.40') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[██░░░░21%]') + ' ' + s('d','fb') + s('y','[67%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[43%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']') }
   ];
 
   var i = 0, timer = null;

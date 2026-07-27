@@ -1354,16 +1354,19 @@ build_cache_indicator() {
             echo "${col}${CACHE_GLYPH}!${size}${RESET}"
             ;;
         "building")
+            # Glyph at full weight, trailing meta dim: an all-dim badge
+            # disappears next to the bright context bar (reported in real use).
             if [ "$mode" = "always" ]; then
-                echo "${DIM_YELLOW}${CACHE_GLYPH}${meta}~${RESET}"
+                echo "${YELLOW}${CACHE_GLYPH}${DIM_YELLOW}${meta}~${RESET}"
             else
-                echo "${DIM_YELLOW}${CACHE_GLYPH}~${RESET}"
+                echo "${YELLOW}${CACHE_GLYPH}${DIM_YELLOW}~${RESET}"
             fi
             ;;
         "ok")
             # Healthy: silent in auto (the deadline is always ~1 TTL out while
-            # active — noise), shown only when explicitly requested.
-            [ "$mode" = "always" ] && [ -n "$meta" ] && echo "${DIM}${CACHE_GLYPH}${meta}${RESET}"
+            # active — noise), shown only when explicitly requested. The glyph
+            # keeps full weight so the badge stays findable; meta stays dim.
+            [ "$mode" = "always" ] && [ -n "$meta" ] && echo "${WHITE}${CACHE_GLYPH}${DIM}${meta}${RESET}"
             ;;
     esac
     return 0
