@@ -294,6 +294,8 @@ run. Setting only `CLAUDE_CACHE_DIR` keeps the legacy single-dir behavior.
 | `CLAUDE_7D_WORKDAYS` | unset | Skip weekends in the 7d pace deadline — quota you won't spend Sat/Sun no longer counts against runway (opt-in; the limit itself stays calendar-based) |
 | `CLAUDE_DATA_DIR` | `~/.claude/statusline` | Account-scoped cache + usage log location |
 | `CLAUDE_CACHE_DIR` | `$CLAUDE_DATA_DIR/sessions` | Per-session cache-health state |
+| `STATUSLINE_ACCOUNT` | unset | Account label for multi-account setups: renders an `@label` chip and moves account caches to `accounts/<label>/` so concurrent accounts stop sharing one quota cache |
+| `DEVA_AUTH_TAG` | unset | Same as above, set automatically by [deva](https://github.com/thevibeworks/deva) from `--auth-with` (`auth-file-<stem>` -> `@<stem>`); `auth-default` means single-account and is ignored |
 | `DEBUG_LOG` | `~/.claude/statusline/logs/statusline.log` | Debug log path |
 | `DEBUG_LOG_MAX_BYTES` | `1048576` | Debug log size cap before rotation |
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | `32000` | Output token reserve |

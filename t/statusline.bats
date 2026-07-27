@@ -356,6 +356,37 @@ setup() {
     rm -rf "$tmpdir"
 }
 
+@test "build_user_info: account tag beats profile display name" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_CACHE_DIR="$tmpdir"
+    echo '{"account":{"display_name":"examplename"}}' > "$tmpdir/profile.cache"
+    ACCOUNT_TAG="work"
+    result=$(build_user_info "MAX")
+    plain=$(strip_ansi "$result")
+    [ "$plain" = "[MAX|@work]" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_user_info: tag-only chip when no tier" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_CACHE_DIR="$tmpdir"
+    ACCOUNT_TAG="work"
+    result=$(build_user_info "")
+    plain=$(strip_ansi "$result")
+    [ "$plain" = "[@work]" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_user_info: long tag truncated at 12" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_CACHE_DIR="$tmpdir"
+    ACCOUNT_TAG="api-key-1a2b3c4d"
+    result=$(build_user_info "")
+    plain=$(strip_ansi "$result")
+    [ "$plain" = "[@api-key-1a2.]" ]
+    rm -rf "$tmpdir"
+}
+
 # --- format_money_minor currencies ---
 
 @test "format_money_minor: EUR uses euro symbol" {
@@ -2257,4 +2288,79 @@ JSON
     out=$(echo '{"model":{"id":"claude-fable-5","display_name":"F"},"cwd":"/t","workspace":{"current_dir":"/t"},"version":"2.1.170","cost":{"total_cost_usd":0.004}}' \
         | bash "$SCRIPT_DIR/statusline.sh" --test)
     [[ "$(strip_ansi "$out")" != *'$0'* ]]
+}
+
+# --- account scoping (multi-account credential overlays) --------------------
+
+@test "integration: DEVA_AUTH_TAG renders account chip" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    out=$(echo '{"model":{"id":"claude-opus-4-6","display_name":"Opus"},"cwd":"/t","workspace":{"current_dir":"/t"},"version":"2.1.174","cost":{"total_cost_usd":0}}' \
+        | HOME="$tmpdir" DEVA_AUTH_TAG="auth-file-work" bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$out")
+    [[ "$plain" == *"[@work]"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: auth-default tag renders no chip" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    out=$(echo '{"model":{"id":"claude-opus-4-6","display_name":"Opus"},"cwd":"/t","workspace":{"current_dir":"/t"},"version":"2.1.174","cost":{"total_cost_usd":0}}' \
+        | HOME="$tmpdir" DEVA_AUTH_TAG="auth-default" bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$out")
+    [[ "$plain" != *"@"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: STATUSLINE_ACCOUNT beats DEVA_AUTH_TAG" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    out=$(echo '{"model":{"id":"claude-opus-4-6","display_name":"Opus"},"cwd":"/t","workspace":{"current_dir":"/t"},"version":"2.1.174","cost":{"total_cost_usd":0}}' \
+        | HOME="$tmpdir" STATUSLINE_ACCOUNT="self" DEVA_AUTH_TAG="auth-file-work" bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$out")
+    [[ "$plain" == *"[@self]"* ]]
+    [[ "$plain" != *"@work"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: hostile tag is neutralized, no chip, no scoping" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    out=$(echo '{"model":{"id":"claude-opus-4-6","display_name":"Opus"},"cwd":"/t","workspace":{"current_dir":"/t"},"version":"2.1.174","cost":{"total_cost_usd":0}}' \
+        | HOME="$tmpdir" DEVA_AUTH_TAG="../../evil" bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$out")
+    [[ "$plain" != *"@"* ]]
+    [ ! -e "$tmpdir/.claude/statusline/accounts" ]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: tagged session reads quota from its scoped cache, not the shared one" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude/statusline/accounts/work"
+    printf '{"claudeAiOauth":{"accessToken":"tok"}}' > "$tmpdir/.claude/.credentials.json"
+    now=$(date +%s)
+    # Decoy in the legacy shared location: a fresh cache for the OTHER account.
+    printf '{"five_hour":{"utilization":77},"seven_day":{"utilization":77},"fetched_at":%s}' "$now" \
+        > "$tmpdir/.claude/statusline/usage.cache"
+    printf '{"five_hour":{"utilization":42},"seven_day":{"utilization":41},"fetched_at":%s}' "$now" \
+        > "$tmpdir/.claude/statusline/accounts/work/usage.cache"
+    out=$(echo '{"session_id":"acct-test","model":{"id":"claude-opus-4-6","display_name":"Opus"},"cwd":"/t","workspace":{"current_dir":"/t"},"version":"2.1.174","cost":{"total_cost_usd":0}}' \
+        | HOME="$tmpdir" DEVA_AUTH_TAG="auth-file-work" bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$out")
+    [[ "$plain" == *"5h[42%]"* ]]
+    [[ "$plain" != *"77%"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: untagged session still reads the shared cache (back-compat)" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude/statusline"
+    printf '{"claudeAiOauth":{"accessToken":"tok"}}' > "$tmpdir/.claude/.credentials.json"
+    printf '{"five_hour":{"utilization":33},"seven_day":{"utilization":31},"fetched_at":%s}' "$(date +%s)" \
+        > "$tmpdir/.claude/statusline/usage.cache"
+    out=$(echo '{"session_id":"acct-test2","model":{"id":"claude-opus-4-6","display_name":"Opus"},"cwd":"/t","workspace":{"current_dir":"/t"},"version":"2.1.174","cost":{"total_cost_usd":0}}' \
+        | HOME="$tmpdir" bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$out")
+    [[ "$plain" == *"5h[33%]"* ]]
+    rm -rf "$tmpdir"
 }

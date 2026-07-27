@@ -103,6 +103,34 @@ else
     CLAUDE_ACCOUNT_DIR="$CLAUDE_DATA_DIR"
 fi
 
+# Account scoping. One ~/.claude used to imply one account; credential
+# overlays broke that — deva-style runners bind-mount a different
+# .credentials.json per container over the SAME shared ~/.claude, so the
+# "account-scoped" caches above would bleed across accounts (B renders A's
+# quota whenever A fetched last; profile.cache sticks to the first account
+# for 24h). The credentials file itself has no stable identity (tokens
+# rotate), so the runner must say which account this session is:
+#   STATUSLINE_ACCOUNT  explicit label, wins always
+#   DEVA_AUTH_TAG       from deva >= 0.18 (auth-file-<stem>, api-key-<n>, env);
+#                       auth-default means single-account -> no scoping
+# When set, account state moves to accounts/<tag>/ under the shared dir:
+# same-account sessions still share one fetch, different accounts stop
+# clobbering each other. An explicit CLAUDE_DATA_DIR/CLAUDE_CACHE_DIR
+# override is the caller's layout — respected verbatim, no rescoping.
+ACCOUNT_TAG=""
+if [ -n "${STATUSLINE_ACCOUNT:-}" ]; then
+    ACCOUNT_TAG="$STATUSLINE_ACCOUNT"
+elif [ -n "${DEVA_AUTH_TAG:-}" ] && [ "$DEVA_AUTH_TAG" != "auth-default" ]; then
+    ACCOUNT_TAG="${DEVA_AUTH_TAG#auth-file-}"
+fi
+# Env-derived path component: filesystem-safe charset, bounded length, no
+# dot-leading names (blocks "..", hidden dirs).
+ACCOUNT_TAG=$(printf '%s' "$ACCOUNT_TAG" | tr -cd 'A-Za-z0-9._-' | cut -c1-24)
+case "$ACCOUNT_TAG" in .*) ACCOUNT_TAG="" ;; esac
+if [ -n "$ACCOUNT_TAG" ] && [ -z "$CLAUDE_DATA_DIR_OVERRIDDEN" ]; then
+    CLAUDE_ACCOUNT_DIR="$CLAUDE_ACCOUNT_DIR/accounts/$ACCOUNT_TAG"
+fi
+
 # One-time graceful migration: older versions wrote account-scoped caches
 # and the usage log under $SCRIPT_DIR (and per-session data under
 # $SCRIPT_DIR/sessions). If that legacy layout exists and the new shared
@@ -115,6 +143,9 @@ migrate_legacy_state() {
     # Skip when caller pinned custom dirs or legacy == new (no-op).
     [ -n "${CLAUDE_DATA_DIR_OVERRIDDEN:-}" ] && return 0
     [ "$legacy_data" = "$CLAUDE_ACCOUNT_DIR" ] && return 0
+    # Legacy state predates account scoping and belongs to the default
+    # account — never migrate it into whichever tagged account runs first.
+    [ -n "$ACCOUNT_TAG" ] && return 0
 
     local moved=false
     if [ ! -d "$CLAUDE_ACCOUNT_DIR" ]; then
@@ -2269,13 +2300,22 @@ build_user_info() {
     local tier="$1"
     local name=""
 
-    local profile_cache="${CLAUDE_ACCOUNT_DIR:-$CLAUDE_CACHE_DIR}/profile.cache"
-    if [ -f "$profile_cache" ]; then
-        name=$(jq -r '.account.display_name // empty' "$profile_cache" 2>/dev/null)
-    fi
-
-    if [ "${#name}" -gt 8 ]; then
-        name="${name:0:7}."
+    # Runner-provided account tag beats the profile display name: two
+    # accounts can carry the same human name, the tag (@work / @self)
+    # is what tells concurrent sessions apart. Slightly wider truncation
+    # than names — tags like api-key-1a2b are identity, not prose.
+    if [ -n "${ACCOUNT_TAG:-}" ]; then
+        name="$ACCOUNT_TAG"
+        [ "${#name}" -gt 12 ] && name="${name:0:11}."
+        name="@$name"
+    else
+        local profile_cache="${CLAUDE_ACCOUNT_DIR:-$CLAUDE_CACHE_DIR}/profile.cache"
+        if [ -f "$profile_cache" ]; then
+            name=$(jq -r '.account.display_name // empty' "$profile_cache" 2>/dev/null)
+        fi
+        if [ "${#name}" -gt 8 ]; then
+            name="${name:0:7}."
+        fi
     fi
 
     # Tier is identity, not status — neutral white-weight so it never reads as
@@ -2887,6 +2927,13 @@ if [ -n "$session_id" ] && [ "$_may_have_oauth" = true ]; then
     fi
 
     user_component=$(build_user_info "$user_tier")
+fi
+
+# API-key / custom-endpoint sessions skip the OAuth block above, but an
+# account tag is exactly what tells such sessions apart — chip from the
+# tag alone, no tier.
+if [ -z "$user_component" ] && [ -n "$ACCOUNT_TAG" ]; then
+    user_component=$(build_user_info "")
 fi
 
 right_parts=""

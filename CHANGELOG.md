@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+**New: account identity for multi-account credential overlays.** One
+`~/.claude` used to imply one account; deva-style runners broke that by
+bind-mounting a different `.credentials.json` per container over the same
+shared config home. The "account-scoped" caches (`usage.cache`,
+`profile.cache`, `usage.jsonl`) then bled across accounts: B rendered A's
+5h/7d bars whenever A fetched last, and the profile stuck to whichever
+account fetched first for 24h. The credentials file itself carries no
+stable identity (tokens rotate), so the runner must say who the session
+is: `STATUSLINE_ACCOUNT` (explicit) or `DEVA_AUTH_TAG` (set by deva from
+`--auth-with`). When present, the user segment shows an `@tag` chip
+(`[MAX|@work]`, tag beats the profile display name — two accounts can
+carry the same human name) and account state moves to
+`accounts/<tag>/` under the shared statusline dir: same-account sessions
+still share one fetch, different accounts stop clobbering each other.
+`auth-default` (single-account) changes nothing; an explicit
+`CLAUDE_DATA_DIR`/`CLAUDE_CACHE_DIR` override is respected verbatim; tags
+are sanitized to a filesystem-safe charset before touching a path. The
+chip also renders for API-key/custom-endpoint sessions, which skip the
+OAuth quota block — exactly the sessions only a tag can tell apart.
+
 ## v0.18.0 — 2026-07-15 — freeze-safe cache expiry deadline, 7d hybrid reset
 
 **Fix: the 7d pressure suffix no longer decays in a frozen frame.** The

@@ -13,6 +13,11 @@ export STATUSLINE_TESTING
 STATUSLINE_NO_FETCH=1
 export STATUSLINE_NO_FETCH
 
+# Account identity must come from each test, not the host: deva exports
+# DEVA_AUTH_TAG inside its containers, which would otherwise add an account
+# chip (and rescope cache dirs) in every integration run.
+unset DEVA_AUTH_TAG STATUSLINE_ACCOUNT ACCOUNT_TAG
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Color constants (needed by functions)
