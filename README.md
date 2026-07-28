@@ -17,6 +17,9 @@
 One Bash file that plugs into the official `statusLine` command hook. Shows
 what matters: active model, context window, session cost, 5h / 7d quota with
 reset times, prompt-cache health, extra-usage spend, git activity, and subscription tier.
+When the numbers stop meaning what they appear to mean, an [advisor second
+row](#advisor-line) interprets them — cap projections, expiring-surplus and
+underuse advice, per-model weekly limits, sibling-account relief.
 No daemon, no telemetry, no npm.
 
 ## Install
@@ -131,6 +134,7 @@ Flags go in the command string in `~/.claude/settings.json`:
 | `--alignment` | `left-right`, `right-left`, `center` | `left-right` |
 | `--extra` | `auto`, `always`, `on-limit`, `off` | `auto` |
 | `--cache` | `auto`, `always`, `off` | `auto` |
+| `--advisor` | `auto`, `always`, `off` — second-row projection line, see [Advisor line](#advisor-line) | `auto` |
 | `--debug` | Write logs to `~/.claude/statusline/logs/statusline.log` | off |
 | `--test [json]` | Render with mock data | off |
 
@@ -225,42 +229,61 @@ echo '{"model":{"id":"claude-opus-4-8[1m]","display_name":"Opus"},"cwd":"/tmp/pr
   | bash statusline.sh --test
 ```
 
-## claude-watch
+## Advisor line
 
-`claude-watch.sh` is a standalone companion that watches one session's usage in
-real time -- a "top"-style full-screen view, where the statusline is a single
-prompt line.
+The statusline can render a second row — Claude Code displays each stdout
+line as its own row ([docs](https://code.claude.com/docs/en/statusline)).
+The advisor uses it to *interpret* the badges: it speaks only when the
+numbers on line 1 don't mean what they appear to mean, and every clause
+derives from a badge already shown — no third alarm channel. It cuts both
+ways, with a voice per direction:
+
+- **pressure** — `! ...` in yellow/red: you'll hit a wall before a reset.
+- **opportunity** — `+ ...` in cyan: paid capacity is about to expire
+  unused, or a sibling account is free while you're pinned. Cyan can
+  never mean pressure, so the color alone carries the stance.
+
+Quiet means no row at all: a healthy session stays one line. The row is
+right-aligned to the same anchor the stats cluster ends at, so the advice
+sits directly beneath the badges it interprets.
 
 ```text
-━━ claude-watch ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-model  opus4.8  turns 412  2026-06-09T11:42:08Z
-
-last turn  $0.67  in 319  out 21,274  c-read 132,952  c-make 10,960
-session   $4.91  in 9,044  out 72,837  c-read 6,062,353  c-make 1,879,467
-
-quota  5h 36%  7d 44%  extra $16.29/$200 8%  (12s ago)
-forecast dry ~Mo (2.4d before reset)  profile/d Mo12 Tu16 We15 Th15 Fr9 Sa6 Su10 (ewma %)
+proj (main*)   fabl5[1m][██░░42%] fb[86%] [MAX|@work] 5h[95%@06:00] 7d[44%@07:00]
+                          ! 5h caps ~05:18, 42m before reset; 7d resets @07:00, 56% unused
 ```
 
-It reads four things, all read-only: the session transcript (per-turn token
-usage), the shared account usage cache (5h / 7d / extra quota), `usage.jsonl`,
-and `forecast.cache` (the learned per-weekday burn profile statusline.sh
-maintains — the forecast line projects when your quota runs dry at your own
-pace and stays quiet when it outlasts the window). By default it picks the most recently modified transcript for the
-current directory's project.
+What it says, in value order (max two clauses):
+
+| Clause | When |
+|--------|------|
+| `! fb capped — back ~Thu 07:00` | The weekly limit scoped to *this session's model* (`limits[]` `weekly_scoped`) hit 100% — the model just became unavailable, and the one number that matters is when it returns. |
+| `! 5h caps ~14:20, 52m before reset` | The 5h badge is already yellow/red and the linear projection lands before the reset. Suppressed when relief is <= 30min out, same as the badge's recovery color. |
+| `+ 7d resets @07:00, 56% unused — spend it` (or `— ~40% expires even at full burn`) | Expiring surplus: inside the last day of the 7d window with >= 30% unused, a green badge means forfeiture, not headroom — at reset the remainder vanishes whether spent or not. The tail is feasibility-checked against the learned `pct_per_window` ratio (how many 7d points a fully burned 5h window costs *you*, mined from your own usage log): "spend it" appears only when full-tilt burning can actually consume the surplus; past that point the honest tail is how much expires no matter what. While the ratio is unlearned the clause states the bare fact and advises nothing. |
+| `+ alt 5h[8%] free` | Fleet relief for shared-home multi-account setups: once this account's 5h hits 90%, the idlest *fresh* sibling under `accounts/*/` is the actionable way out. Read-only, no credentials. |
+| `! fb caps ~Wed 18:00, 1d before reset` | The running model's scoped weekly quota caps before its reset — same linear math, gates, and recovery suppression as the 7d aggregate. |
+| `! 7d dry ~Thu 09:00, 2d before reset — then extra billing` (or `then hard stop`) | The learned weekday forecast projects the quota drying up early; cold start falls back to linear pace, but only once `seven_day_pace` already warns. The tail states what actually happens at 100%. |
+| `+ 7d on pace to leave ~62% unused — go heavier` | Underuse: on pace to strand a large chunk of the subscription. The learned weekday profile speaks first — it knows *your* remaining days, so it can warn from day two; cold start falls back to linear pace past half the window. Speaks only in an engaged, unsqueezed session (5h between 25% and 80%, no pressure clause) — it reaches exactly the person who can act on it and never nags an idle one. |
+| `- ~19x5h left, even pace 1.1%/win, heading ~52%` | `--advisor always` only, when calm: the weekly budget in one breath. "heading" is the learned end-of-week projection when trained, linear once the window is a day old. |
+
+The 7d window gets one voice per render — surplus, dry, or underuse,
+never two that could disagree.
 
 ```bash
-bash claude-watch.sh                 # auto-pick newest session in this project
-bash claude-watch.sh --session ID    # watch a specific session
-bash claude-watch.sh --once          # one snapshot, no watch loop
-bash claude-watch.sh --interval 5    # refresh every 5s (default 3s)
-bash claude-watch.sh --help
+--advisor auto      # default: speak under pressure or expiring surplus
+--advisor always    # add the weekly budget line when calm
+--advisor off       # single row, never
 ```
 
-Cost is an **estimate** from public per-million list pricing; fast-mode
-surcharges are not modeled. Quota requires `statusline.sh` to have populated
-the shared usage cache. `claude-fable-5` is priced in the Opus 4.5+ capability
-tier.
+All times are wall-clock (`~14:20`) or future-to-future gaps (`52m before
+reset` = reset minus cap, both in the future) — freeze-safe in an idle
+frame, same idiom as the badges. Add `"refreshInterval": 60` to your
+`statusLine` settings if you want the row re-evaluated on a timer while
+idle.
+
+For a standalone full-screen watcher (multi-account polling,
+notifications), see `claude.py --watch-usage` in
+[claudex](https://github.com/thevibeworks/claudex) — it consumes the same
+state dir this script maintains (see `docs/api/state-dir.md`).
 
 <details><summary>OAuth and API behavior</summary>
 
@@ -295,7 +318,7 @@ run. Setting only `CLAUDE_CACHE_DIR` keeps the legacy single-dir behavior.
 | `CLAUDE_DATA_DIR` | `~/.claude/statusline` | Account-scoped cache + usage log location |
 | `CLAUDE_CACHE_DIR` | `$CLAUDE_DATA_DIR/sessions` | Per-session cache-health state |
 | `STATUSLINE_ACCOUNT` | unset | Account label for multi-account setups: renders an `@label` chip and moves account caches to `accounts/<label>/` so concurrent accounts stop sharing one quota cache |
-| `DEVA_AUTH_TAG` | unset | Same as above, set automatically by [deva](https://github.com/thevibeworks/deva) from `--auth-with` (`auth-file-<stem>` -> `@<stem>`); `auth-default` means single-account and is ignored |
+| `DEVA_AUTH_TAG` | unset | Same as above, set automatically by [deva](https://github.com/thevibeworks/deva) from `--auth-with` (`auth-file-<stem>` -> `@<stem>`); `auth-default` means single-account and is ignored. Containers from pre-v0.18 deva without the tag are resolved from `DEVA_AUTH_METHOD`/`DEVA_AUTH_DETAILS` instead |
 | `DEBUG_LOG` | `~/.claude/statusline/logs/statusline.log` | Debug log path |
 | `DEBUG_LOG_MAX_BYTES` | `1048576` | Debug log size cap before rotation |
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | `32000` | Output token reserve |
@@ -309,14 +332,13 @@ run. Setting only `CLAUDE_CACHE_DIR` keeps the legacy single-dir behavior.
 npm exec --yes bats -- t/
 ```
 
-265 tests across `t/statusline.bats` (253 statusline + integration) and
+321 tests across `t/statusline.bats` (309 statusline + integration) and
 `t/install.bats` (12 installer). CI runs on push and PR to `main`.
 
 ## Project Structure
 
 ```text
-statusline.sh                Main script (one file, ~2500 lines)
-claude-watch.sh              Live usage/cost watcher (standalone companion)
+statusline.sh                Main script (one file, ~3400 lines)
 install.sh                   One-line installer
 t/statusline.bats            Unit and integration tests
 t/install.bats               Installer tests (mock curl, isolated $HOME)

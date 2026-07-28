@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Claude Code Statusline — quota, context, cost. Live, in one bash file.</title>
-<meta name="description" content="Live 5h/7d quota with reset times, per-model weekly limits, context pressure, session cost, prompt-cache expiry detection, and git activity in your Claude Code prompt. One bash file, 266 tests, no daemon, no telemetry.">
+<meta name="description" content="Live 5h/7d quota with reset times, per-model weekly limits, context pressure, session cost, prompt-cache expiry detection, git activity, and a usage-advisor second row in your Claude Code prompt. One bash file, 321 tests, no daemon, no telemetry.">
 <style>
   :root {
     --bg: #0b0c0e;
@@ -130,7 +130,7 @@
     <h1>Claude Code Statusline</h1>
     <p class="sub">Quota, context, cost, model, and git — live in your Claude Code prompt.
     Know when the 5h window resets, how deep the weekly limit runs, and what this session costs, without leaving the terminal.</p>
-    <p class="facts">one bash file &middot; 266 tests &middot; deps: jq + curl &middot; no daemon &middot; no telemetry</p>
+    <p class="facts">one bash file &middot; 321 tests &middot; deps: jq + curl &middot; no daemon &middot; no telemetry</p>
 
     <div class="term">
       <div class="bar"><i></i><i></i><i></i><span>claude</span></div>
@@ -171,6 +171,8 @@
 <section>
   <h2>Built like it matters</h2>
   <div class="vals">
+    <div class="val"><h3>An advisor, not a dashboard</h3>
+      <p>A second row that interprets the badges: <code>! 5h caps ~05:18, 42m before reset</code> when you'll hit a wall, <code>+ 7d resets @07:00, 56% unused &mdash; spend it</code> when paid capacity is about to expire unused. Quiet means no row at all.</p></div>
     <div class="val"><h3>Numbers that don't lie</h3>
       <p>Wall-clock resets instead of decaying countdowns. A visible <code>[░░░░░░0%]</code> instead of a hidden bar. Stale data is always badged, never passed off as fresh.</p></div>
     <div class="val"><h3>Cache break detection</h3>
@@ -181,7 +183,7 @@
       <p>Corporate mitm proxy or a local tracer: it builds a combined CA bundle from <code>NODE_EXTRA_CA_CERTS</code> automatically, so fetches survive where plain curl dies.</p></div>
     <div class="val"><h3>Documented wire contract</h3>
       <p>The <a href="https://github.com/thevibeworks/claude-code-statusline/blob/main/docs/api/oauth-usage.md">observed <code>/api/oauth/usage</code> schema</a> is versioned in-repo and re-synced against CLI captures, so parser changes check against ground truth.</p></div>
-    <div class="val"><h3>266 tests on one bash file</h3>
+    <div class="val"><h3>321 tests on one bash file</h3>
       <p>bats suite covering quota math, lock contention (20-contender single-winner), forecast pacing, ANSI rendering, and the installer. CI on every push.</p></div>
     <div class="val"><h3>Nothing running in the background</h3>
       <p>No daemon, no telemetry, no npm. It runs when Claude Code renders the prompt, reads stdin + one cached API call, prints a line, exits.</p></div>
@@ -191,7 +193,7 @@
 <section>
   <h2>What it is not</h2>
   <ul class="not">
-    <li>Not a general-purpose prompt framework — it renders one line for Claude Code's <code>statusLine</code> hook, nothing else.</li>
+    <li>Not a general-purpose prompt framework — it renders one status line (plus an optional advisor row) for Claude Code's <code>statusLine</code> hook, nothing else.</li>
     <li>Quota badges need an OAuth (subscription) login; API-key accounts get everything except the quota cluster.</li>
     <li>Bash + jq + curl on Linux/macOS. No Windows-native support (WSL works).</li>
   </ul>

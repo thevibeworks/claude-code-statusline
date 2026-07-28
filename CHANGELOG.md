@@ -1,5 +1,95 @@
 # Changelog
 
+## v0.19.0 — 2026-07-28 — smart advisor line, claude-watch retired
+
+**New: the advisor — a second statusline row that interprets the badges.**
+Claude Code renders each stdout line as its own row, so the statusline
+gains an optional advice line under the badges. Design rule: line 2
+speaks only when the numbers on line 1 don't mean what they appear to
+mean, and every clause derives from a badge already shown — no third
+alarm channel. It cuts both ways: pressure (`! ...`, yellow/red — you'll
+hit a wall) and opportunity (`+ ...`, cyan — paid capacity is about to
+expire unused; cyan can never mean pressure, so the color alone carries
+the stance). Quiet means no row at all (zero height cost when healthy),
+and the row right-aligns to the stats anchor so the advice sits directly
+beneath the badges it interprets.
+
+- `! fb capped — back ~Thu 07:00` — the weekly limit scoped to this
+  session's model (`limits[]` `weekly_scoped`) hit 100%: the model just
+  went away; the useful fact is when it returns.
+- `! 5h caps ~14:20, 52m before reset` — linear cap projection, only
+  while the 5h badge is already yellow/red and relief isn't imminent. At
+  100% it stays silent: line 1 already says capped.
+- `+ 7d resets @07:00, 56% unused — spend it` (or `— ~40% expires even
+  at full burn`) — expiring surplus: inside the last day of the 7d window
+  with >= 30% unused, a green badge means forfeiture, not headroom. This
+  is exactly the zone where pressure logic goes quiet (recovery) and
+  where waste peaks; the old watcher said nothing while half a week's
+  subscription evaporated. The tail is feasibility-checked against the
+  learned pct_per_window ratio: "spend it" only when full-tilt burn can
+  actually consume the surplus, the honest expiry number once it can't,
+  and no tail at all while the ratio is unlearned — never advice the
+  data can't back.
+- `+ alt 5h[8%] free` — fleet relief for shared-home multi-account
+  setups (deva): at 5h >= 90%, the idlest fresh sibling under
+  `accounts/*/` is named. Pure cache read, no credentials. Now voiced as
+  opportunity (cyan), not alarm — line 1 already screams about the cap.
+- `! fb caps ~Wed 18:00, 1d before reset` — the running model's scoped
+  weekly quota caps before its reset; same math and gates as the 7d
+  aggregate.
+- `! 7d dry ~Thu 09:00, 2d before reset — then extra billing` (or
+  `then hard stop`) — the learned weekday forecast's dry point, falling
+  back to linear pace on cold start once `seven_day_pace` warns. The tail
+  states what actually happens at the cap.
+- `+ 7d on pace to leave ~62% unused — go heavier` — underuse: on pace
+  to strand a large chunk of the subscription. The learned weekday
+  profile speaks first — it knows YOUR remaining days, so it can warn
+  from day two; cold start falls back to linear pace past half the
+  window. Speaks only in an engaged, unsqueezed session (5h in
+  [25%, 80%), no pressure clause), so it reaches exactly the person who
+  can act on it and never nags an idle one.
+- `- ~19x5h left, even pace 1.1%/win, heading ~52%` — `--advisor always`
+  adds the weekly budget when calm; "heading" is the learned end-of-week
+  projection when trained, linear once the window is a day old.
+
+Max two clauses per row, in value order; the 7d window gets one voice per
+render (surplus, dry, or underuse — never two that could disagree).
+Modes: `--advisor auto` (default) | `always` | `off`. Themes `minimal`
+and `manager` set `off`. All times wall-clock or future-to-future gaps —
+freeze-safe in an idle frame. Pair with `"refreshInterval": 60` in the
+`statusLine` settings to re-evaluate on a timer while idle.
+
+**New: the forecaster learns the 5h↔7d exchange rate.**
+`build_seven_day_profile` now also mines `usage.jsonl` for
+`pct_per_window` — how many 7d percentage points a fully burned 5h
+window costs this account — from paired samples inside the same 5h
+window (`resets_at` identity guards against pairing across a reset).
+That single learned ratio is the physics that converts "windows left"
+into "weekly % actually spendable", and it is what lets the advisor
+refuse to say "spend it" when only one window remains against half a
+week of surplus. The weekday walk itself is now a shared
+`_seven_day_walk` that reports both the dry gap and the projected
+end-of-week utilization; the dry forecast, the underuse clause, and the
+always-mode "heading" all read the same simulation, so no two surfaces
+can disagree about the same future.
+
+**Fix: account resolution no longer misses pre-v0.18-deva containers.**
+Containers created before deva exported `DEVA_AUTH_TAG` carry only
+`DEVA_AUTH_DETAILS` (`credentials-file (/path/<stem>.credentials.json)`);
+those sessions silently fell back to the DEFAULT account's caches —
+rendering another account's label and quota, the exact bug scoping exists
+to kill. The tag now derives from the details string's file stem, so
+long-running containers get correct identity without recreation. Also
+hardened the fleet hint against a corrupt sibling cache leaking the
+previous sibling's numbers onto the wrong tag.
+
+**Retired: `claude-watch.sh`.** Its transcript cost view belongs to ccx;
+its quota footer is superseded by the advisor row. Standalone watching
+(multi-account polling, notifications) lives in claudex's
+`claude.py --watch-usage`, which consumes this repo's state dir — now
+documented as a contract in `docs/api/state-dir.md`. `install.sh` removes
+a previously installed copy.
+
 ## v0.18.0 — 2026-07-27 — freeze-safe cache expiry, account identity, 7d hybrid reset
 
 **New: account identity for multi-account credential overlays.** One
