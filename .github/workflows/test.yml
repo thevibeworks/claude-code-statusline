@@ -15,4 +15,4 @@ jobs:
       - name: Run tests
         run: npm exec --yes bats -- t/
       - name: Shellcheck (error severity; warnings are tracked, not gated)
-        run: shellcheck -S error statusline.sh install.sh claude-watch.sh
+        run: shellcheck -S error statusline.sh install.sh

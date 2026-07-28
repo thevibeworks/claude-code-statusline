@@ -5,7 +5,6 @@ REPO="thevibeworks/claude-code-statusline"
 BRANCH="main"
 RAW="https://raw.githubusercontent.com/${REPO}/${BRANCH}"
 DEST="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/statusline.sh"
-WATCH_DEST="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/claude-watch.sh"
 SETTINGS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
 
 RED='\033[31m'; GREEN='\033[32m'; DIM='\033[2m'; RESET='\033[0m'
@@ -21,12 +20,12 @@ curl -fsSL "${RAW}/statusline.sh" -o "$DEST"
 chmod +x "$DEST"
 info "Installed to $DEST"
 
-info "Downloading claude-watch.sh (live usage watcher)"
-if curl -fsSL "${RAW}/claude-watch.sh" -o "$WATCH_DEST"; then
-    chmod +x "$WATCH_DEST"
-    info "Installed to $WATCH_DEST (run: bash $WATCH_DEST)"
-else
-    warn "claude-watch.sh download failed (optional) — skipping"
+# claude-watch.sh retired in v0.19.0 (superseded by the advisor line and
+# claudex's claude.py --watch-usage). Clean up a copy left by old installs.
+OLD_WATCH="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/claude-watch.sh"
+if [ -f "$OLD_WATCH" ]; then
+    rm -f "$OLD_WATCH"
+    info "Removed retired $OLD_WATCH"
 fi
 
 _tilde='~'
