@@ -570,11 +570,14 @@ _write_forecast_fixture() {
     echo '{"account":{"uuid":"acct-A"}}' > "$dir/profile.cache"
     : > "$dir/usage.jsonl"
     local d ts
+    # acct-A also carries five_hour samples inside one shared window per day
+    # (same resets_at) so the ratio learner sees 60 five-points buying 20
+    # seven-points daily: pct_per_window = 20/60*100 = 33.33.
     for (( d = days; d >= 1; d-- )); do
         ts=$(( now - d * 86400 ))
-        printf '{"timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":10}}\n' "$ts"
-        printf '{"timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":22}}\n' "$(( ts + 14400 ))"
-        printf '{"timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":30}}\n' "$(( ts + 28800 ))"
+        printf '{"timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":10},"five_hour":{"utilization":10,"resets_at":"R%s"}}\n' "$ts" "$d"
+        printf '{"timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":22},"five_hour":{"utilization":40,"resets_at":"R%s"}}\n' "$(( ts + 14400 ))" "$d"
+        printf '{"timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":30},"five_hour":{"utilization":70,"resets_at":"R%s"}}\n' "$(( ts + 28800 ))" "$d"
         printf '{"timestamp":%s,"user":{"uuid":"acct-B"},"seven_day":{"utilization":20}}\n' "$(( ts + 1000 ))"
         printf '{"timestamp":%s,"user":{"uuid":"acct-B"},"seven_day":{"utilization":80}}\n' "$(( ts + 30000 ))"
     done >> "$dir/usage.jsonl"
@@ -591,6 +594,47 @@ _write_forecast_fixture() {
     # Account A burns 20/day; B's 60/day must not leak in. Allow EWMA rounding.
     mon=$(jq -r '.weekday_profile["1"]' "$tmpdir/forecast.cache")
     awk -v p="$mon" 'BEGIN{exit !(p >= 19 && p <= 21)}'
+    # Ratio learner: 60 five-points buy 20 seven-points => ppw ~33.3
+    ppw=$(jq -r '.pct_per_window' "$tmpdir/forecast.cache")
+    awk -v p="$ppw" 'BEGIN{exit !(p >= 32 && p <= 35)}'
+    rm -rf "$tmpdir"
+}
+
+@test "build_seven_day_profile: no paired 5h samples leaves the ratio unlearned" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    echo '{"account":{"uuid":"acct-A"}}' > "$tmpdir/profile.cache"
+    now=$(date +%s)
+    : > "$tmpdir/usage.jsonl"
+    for (( d = 16; d >= 1; d-- )); do
+        printf '{"timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":10}}\n' "$(( now - d * 86400 ))"
+        printf '{"timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":25}}\n' "$(( now - d * 86400 + 14400 ))"
+    done >> "$tmpdir/usage.jsonl"
+    build_seven_day_profile
+    [ "$(jq -r '.pct_per_window' "$tmpdir/forecast.cache")" = "-1.00" ]
+    [ -z "$(CLAUDE_ACCOUNT_DIR="$tmpdir" forecast_pct_per_window)" ]
+    rm -rf "$tmpdir"
+}
+
+@test "forecast_pct_per_window: echoes the learned ratio" {
+    tmpdir=$(mktemp -d)
+    printf '{"pct_per_window":11.83}' > "$tmpdir/forecast.cache"
+    [ "$(CLAUDE_ACCOUNT_DIR="$tmpdir" forecast_pct_per_window)" = "11.83" ]
+    rm -rf "$tmpdir"
+}
+
+@test "_seven_day_walk: projects the end-of-week and the dry gap" {
+    tmpdir=$(mktemp -d)
+    # Flat 10%/day profile, 43% used, 4 days left: no dry, ends at 83.
+    printf '{"computed_at":0,"days_history":20,"recent_24h":0,"recent_48h":0,"weekday_profile":{"0":10,"1":10,"2":10,"3":10,"4":10,"5":10,"6":10}}' > "$tmpdir/forecast.cache"
+    read -r gap end <<<"$(CLAUDE_ACCOUNT_DIR="$tmpdir" _seven_day_walk 43 345600)"
+    [ "$gap" = "-1" ]
+    [ "$end" = "83" ]
+    # Flat 20%/day, 50% used, 5 days left: dries mid-window, ~60h margin.
+    printf '{"computed_at":0,"days_history":20,"recent_24h":0,"recent_48h":0,"weekday_profile":{"0":20,"1":20,"2":20,"3":20,"4":20,"5":20,"6":20}}' > "$tmpdir/forecast.cache"
+    read -r gap end <<<"$(CLAUDE_ACCOUNT_DIR="$tmpdir" _seven_day_walk 50 432000)"
+    [ "$gap" -ge 59 ] && [ "$gap" -le 60 ]
+    [ "$end" = "100" ]
     rm -rf "$tmpdir"
 }
 
@@ -2362,5 +2406,316 @@ JSON
         | HOME="$tmpdir" bash "$SCRIPT_DIR/statusline.sh" --test)
     plain=$(strip_ansi "$out")
     [[ "$plain" == *"5h[33%]"* ]]
+    rm -rf "$tmpdir"
+}
+
+# --- advisor line (second row) ---
+
+@test "build_advisor_line: calm windows stay silent in auto" {
+    reset_5h=$(date -u -d '+45 minutes' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":20,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":20,\"resets_at\":\"$reset_7d\"}}"
+    [ -z "$(build_advisor_line "$usage" auto)" ]
+}
+
+@test "build_advisor_line: calm windows show weekly budget in always" {
+    reset_5h=$(date -u -d '+45 minutes' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":20,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":20,\"resets_at\":\"$reset_7d\"}}"
+    plain=$(strip_ansi "$(build_advisor_line "$usage" always)")
+    [[ "$plain" =~ ^-\ ~24x5h\ left,\ even\ pace\ 3\.3%/win,\ heading\ ~70%$ ]]
+}
+
+@test "build_advisor_line: hot 5h pace projects the cap wall-clock" {
+    # 85% only 2h into the window (3h left): pace ~2.1x, caps well before reset
+    reset_5h=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":85,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":10}}"
+    result=$(build_advisor_line "$usage" auto)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" =~ ^!\ 5h\ caps\ ~[0-9]{2}:[0-9]{2},\ .*\ before\ reset$ ]]
+    [[ "$result" == *'\033[0;33m'* ]]
+}
+
+@test "build_advisor_line: 5h at 92% escalates the row to red" {
+    reset_5h=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":92,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":10}}"
+    result=$(build_advisor_line "$usage" auto)
+    [[ "$result" == *'\033[0;31m'* ]]
+}
+
+@test "build_advisor_line: on-pace 5h stays silent even at 85%" {
+    # 85% with 45m left = 85% elapsed: pace ~1.0, window outlasts the burn
+    reset_5h=$(date -u -d '+45 minutes' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":85,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":10}}"
+    [ -z "$(build_advisor_line "$usage" auto)" ]
+}
+
+@test "build_advisor_line: imminent 5h reset suppresses the projection (recovery)" {
+    reset_5h=$(date -u -d '+20 minutes' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":95,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":10}}"
+    [ -z "$(build_advisor_line "$usage" auto)" ]
+}
+
+@test "build_advisor_line: capped 5h adds no clause (line 1 already says it)" {
+    reset_5h=$(date -u -d '+2 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":100,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":10}}"
+    [ -z "$(build_advisor_line "$usage" auto)" ]
+}
+
+@test "build_advisor_line: pace-hot 7d projects dry point with hard-stop tail" {
+    # 75% burned with 2.2d left (~4.8d elapsed): seven_day_pace warns
+    reset_7d=$(date -u -d '+2 days 5 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":10},\"seven_day\":{\"utilization\":75,\"resets_at\":\"$reset_7d\"}}"
+    plain=$(strip_ansi "$(build_advisor_line "$usage" auto)")
+    [[ "$plain" =~ ^!\ 7d\ caps\ ~[A-Z][a-z]{2}\ [0-9]{2}:[0-9]{2},\ .*\ before\ reset ]]
+    [[ "$plain" == *"then hard stop"* ]]
+}
+
+@test "build_advisor_line: extra-usage billing changes the 7d tail" {
+    reset_7d=$(date -u -d '+2 days 5 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":10},\"seven_day\":{\"utilization\":75,\"resets_at\":\"$reset_7d\"},\"extra_usage\":{\"is_enabled\":true}}"
+    plain=$(strip_ansi "$(build_advisor_line "$usage" auto)")
+    [[ "$plain" == *"then extra billing"* ]]
+}
+
+@test "build_advisor_line: off mode is silent under any pressure" {
+    reset_5h=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":95,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":95}}"
+    [ -z "$(build_advisor_line "$usage" off)" ]
+}
+
+@test "build_advisor_fleet_hint: picks idlest fresh sibling, skips self and stale" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/accounts/work" "$tmpdir/accounts/alt" "$tmpdir/accounts/idle-but-stale"
+    now=$(date +%s)
+    printf '{"fetched_at":%s,"five_hour":{"utilization":95}}' "$now" > "$tmpdir/accounts/work/usage.cache"
+    printf '{"fetched_at":%s,"five_hour":{"utilization":8}}' "$now" > "$tmpdir/accounts/alt/usage.cache"
+    printf '{"fetched_at":%s,"five_hour":{"utilization":2}}' "$((now - 7200))" > "$tmpdir/accounts/idle-but-stale/usage.cache"
+    result=$(build_advisor_fleet_hint "$tmpdir/accounts" "work")
+    [ "$result" = "alt 5h[8%] free" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_advisor_fleet_hint: no free sibling means no hint" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/accounts/alt"
+    printf '{"fetched_at":%s,"five_hour":{"utilization":88}}' "$(date +%s)" > "$tmpdir/accounts/alt/usage.cache"
+    [ -z "$(build_advisor_fleet_hint "$tmpdir/accounts" "work")" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_advisor_line: capped account with tagged fleet points at the free sibling (cyan)" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/accounts/alt"
+    printf '{"fetched_at":%s,"five_hour":{"utilization":8}}' "$(date +%s)" > "$tmpdir/accounts/alt/usage.cache"
+    reset_5h=$(date -u -d '+2 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":100,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":10}}"
+    result=$(STATUSLINE_HOME="$tmpdir" ACCOUNT_TAG="work" build_advisor_line "$usage" auto)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == "+ alt 5h[8%] free" ]]
+    [[ "$result" == *'\033[0;36m'* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "build_advisor_line: expiring surplus states the bare fact while the ratio is unlearned" {
+    # No forecast.cache => no pct_per_window => no advice tail. "spend it"
+    # without a feasibility model would be a guess, not advice.
+    reset_5h=$(date -u -d '+4 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_7d=$(date -u -d '+2 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":20,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":44,\"resets_at\":\"$reset_7d\"}}"
+    result=$(build_advisor_line "$usage" auto)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" =~ ^\+\ 7d\ resets\ @[0-9]{2}:[0-9]{2},\ 56%\ unused$ ]]
+    [[ "$result" == *'\033[0;36m'* ]]
+}
+
+_write_ppw_fixture() { # dir ppw
+    printf '{"computed_at":0,"days_history":20,"recent_24h":0,"recent_48h":0,"pct_per_window":%s,"weekday_profile":{"0":-1,"1":-1,"2":-1,"3":-1,"4":-1,"5":-1,"6":-1}}' "$2" > "$1/forecast.cache"
+}
+
+@test "build_advisor_line: reachable surplus advises spend-it once the ratio is learned" {
+    tmpdir=$(mktemp -d)
+    _write_ppw_fixture "$tmpdir" 30
+    reset_5h=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_7d=$(date -u -d '+20 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":10,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":65,\"resets_at\":\"$reset_7d\"}}"
+    plain=$(CLAUDE_ACCOUNT_DIR="$tmpdir" strip_ansi "$(CLAUDE_ACCOUNT_DIR="$tmpdir" build_advisor_line "$usage" auto)")
+    [[ "$plain" =~ ^\+\ 7d\ resets\ @[0-9]{2}:[0-9]{2},\ 35%\ unused\ —\ spend\ it$ ]]
+    rm -rf "$tmpdir"
+}
+
+@test "build_advisor_line: unreachable surplus states what expires even at full burn" {
+    # The impossible-advice failure: ~1 window left cannot spend half a
+    # week. ppw=12, 5h at 95% with 55m left, 7d resets in 2h: reachable
+    # ~= min(2.2, 0.6) + 2.6 ~= 3 points, so ~53 of the 56 are already gone.
+    tmpdir=$(mktemp -d)
+    _write_ppw_fixture "$tmpdir" 12
+    reset_5h=$(date -u -d '+55 minutes' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_7d=$(date -u -d '+2 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":95,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":44,\"resets_at\":\"$reset_7d\"}}"
+    result=$(CLAUDE_ACCOUNT_DIR="$tmpdir" build_advisor_line "$usage" auto)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" =~ 7d\ resets\ @[0-9]{2}:[0-9]{2},\ 56%\ unused\ —\ ~53%\ expires\ even\ at\ full\ burn ]]
+    [[ "$plain" != *"spend it"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "build_advisor_line: hot 5h + expiring surplus pair into one coherent story" {
+    # The utilization-gap failure: 5h nearly spent, 7d resets an hour later
+    # with half the week unused. Both facts, one row, pressure color.
+    reset_5h=$(date -u -d '+55 minutes' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_7d=$(date -u -d '+2 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":95,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":44,\"resets_at\":\"$reset_7d\"}}"
+    result=$(build_advisor_line "$usage" auto)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" =~ ^!\ 5h\ caps\ ~[0-9]{2}:[0-9]{2},\ .*\ before\ reset\;\ 7d\ resets\ @[0-9]{2}:[0-9]{2},\ 56%\ unused$ ]]
+    [[ "$plain" != *"spend it"* ]]
+    [[ "$result" == *'\033[0;31m'* ]]
+}
+
+@test "build_advisor_line: small surplus near reset stays quiet" {
+    reset_7d=$(date -u -d '+2 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":20},\"seven_day\":{\"utilization\":80,\"resets_at\":\"$reset_7d\"}}"
+    [ -z "$(build_advisor_line "$usage" auto)" ]
+}
+
+@test "build_advisor_line: mid-week underuse advises going heavier in an engaged session" {
+    reset_7d=$(date -u -d '+2 days 12 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":40},\"seven_day\":{\"utilization\":25,\"resets_at\":\"$reset_7d\"}}"
+    result=$(build_advisor_line "$usage" auto)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" =~ ^\+\ 7d\ on\ pace\ to\ leave\ ~62%\ unused\ —\ go\ heavier$ ]]
+    [[ "$result" == *'\033[0;36m'* ]]
+}
+
+@test "build_advisor_line: underuse stays quiet in an idle session" {
+    reset_7d=$(date -u -d '+2 days 12 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":10},\"seven_day\":{\"utilization\":25,\"resets_at\":\"$reset_7d\"}}"
+    [ -z "$(build_advisor_line "$usage" auto)" ]
+}
+
+@test "build_advisor_line: underuse stays quiet in the first half of the week (cold)" {
+    reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":40},\"seven_day\":{\"utilization\":10,\"resets_at\":\"$reset_7d\"}}"
+    [ -z "$(build_advisor_line "$usage" auto)" ]
+}
+
+@test "build_advisor_line: learned profile warns of underuse before linear pace can" {
+    # Day 2.5 of the week — linear pace needs half the window, but a trained
+    # profile (2%/day) already knows the remaining 4.5 days only burn ~9
+    # more points: heading ~29%, so ~71% would be stranded.
+    tmpdir=$(mktemp -d)
+    printf '{"computed_at":0,"days_history":20,"recent_24h":0,"recent_48h":0,"pct_per_window":-1,"weekday_profile":{"0":2,"1":2,"2":2,"3":2,"4":2,"5":2,"6":2}}' > "$tmpdir/forecast.cache"
+    reset_7d=$(date -u -d '+4 days 12 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":40},\"seven_day\":{\"utilization\":20,\"resets_at\":\"$reset_7d\"}}"
+    plain=$(CLAUDE_ACCOUNT_DIR="$tmpdir" strip_ansi "$(CLAUDE_ACCOUNT_DIR="$tmpdir" build_advisor_line "$usage" auto)")
+    [[ "$plain" =~ ^\+\ 7d\ on\ pace\ to\ leave\ ~7[01]%\ unused\ —\ go\ heavier$ ]]
+    rm -rf "$tmpdir"
+}
+
+@test "build_advisor_line: capped scoped limit names the model and its return time" {
+    reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_sc=$(date -u -d '+3 days' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":20},\"seven_day\":{\"utilization\":20,\"resets_at\":\"$reset_7d\"},\"limits\":[{\"kind\":\"weekly_scoped\",\"percent\":100,\"resets_at\":\"$reset_sc\",\"scope\":{\"model\":{\"display_name\":\"Fable\"}}}]}"
+    result=$(build_advisor_line "$usage" auto "claude-fable-5")
+    plain=$(strip_ansi "$result")
+    [[ "$plain" =~ ^!\ fb\ capped\ —\ back\ ~[A-Z][a-z]{2}\ [0-9]{2}:[0-9]{2}$ ]]
+    [[ "$result" == *'\033[0;31m'* ]]
+}
+
+@test "build_advisor_line: scoped-limit pace projects the model cap before its reset" {
+    reset_sc=$(date -u -d '+2 days' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":20},\"seven_day\":{\"utilization\":20},\"limits\":[{\"kind\":\"weekly_scoped\",\"percent\":92,\"resets_at\":\"$reset_sc\",\"scope\":{\"model\":{\"display_name\":\"Fable\"}}}]}"
+    result=$(build_advisor_line "$usage" auto "claude-fable-5")
+    plain=$(strip_ansi "$result")
+    [[ "$plain" =~ ^!\ fb\ caps\ ~[A-Z][a-z]{2}\ [0-9]{2}:[0-9]{2},\ .*\ before\ reset$ ]]
+    [[ "$result" == *'\033[0;31m'* ]]
+}
+
+@test "build_advisor_line: scoped limit for another model stays out of this session" {
+    reset_sc=$(date -u -d '+3 days' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":20},\"seven_day\":{\"utilization\":20},\"limits\":[{\"kind\":\"weekly_scoped\",\"percent\":100,\"resets_at\":\"$reset_sc\",\"scope\":{\"model\":{\"display_name\":\"Fable\"}}}]}"
+    [ -z "$(build_advisor_line "$usage" auto "claude-opus-4-8")" ]
+}
+
+@test "integration: advisor row appears under hot 5h pace and collapses when calm" {
+    tmpdir=$(mktemp -d)
+    # Anchor CLAUDE_HOME inside the sandbox: without $tmpdir/.claude the
+    # script's getent fallback resolves to the REAL home and the advisor
+    # reads live account data.
+    mkdir -p "$tmpdir/.claude"
+    printf '{"claudeAiOauth":{"accessToken":"tok"}}' > "$tmpdir/.claude/.credentials.json"
+    reset_5h=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
+    _mk_input() {
+        printf '{"session_id":"adv","model":{"id":"claude-opus-4-8","display_name":"Opus"},"cwd":"/t","workspace":{"current_dir":"/t"},"cost":{"total_cost_usd":0},"context_window":{"used_percentage":10,"context_window_size":200000},"rate_limits":{"five_hour":{"used_percentage":%s,"resets_at":"%s"},"seven_day":{"used_percentage":10,"resets_at":"%s"}}}' "$1" "$reset_5h" "$reset_7d"
+    }
+    hot=$(_mk_input 85 | HOME="$tmpdir" bash "$SCRIPT_DIR/statusline.sh")
+    [ "$(printf '%s\n' "$hot" | wc -l)" -eq 2 ]
+    [[ "$(strip_ansi "$hot")" == *"5h caps ~"* ]]
+    calm=$(_mk_input 20 | HOME="$tmpdir" bash "$SCRIPT_DIR/statusline.sh")
+    [ "$(printf '%s\n' "$calm" | wc -l)" -eq 1 ]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: --advisor off keeps a single row under pressure" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    printf '{"claudeAiOauth":{"accessToken":"tok"}}' > "$tmpdir/.claude/.credentials.json"
+    reset_5h=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    out=$(printf '{"session_id":"adv2","model":{"id":"claude-opus-4-8","display_name":"Opus"},"cwd":"/t","workspace":{"current_dir":"/t"},"cost":{"total_cost_usd":0},"rate_limits":{"five_hour":{"used_percentage":85,"resets_at":"%s"}}}' "$reset_5h" \
+        | HOME="$tmpdir" bash "$SCRIPT_DIR/statusline.sh" --advisor off)
+    [ "$(printf '%s\n' "$out" | wc -l)" -eq 1 ]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: advisor row right-aligns to the stats anchor" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    printf '{"claudeAiOauth":{"accessToken":"tok"}}' > "$tmpdir/.claude/.credentials.json"
+    reset_5h=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    # TERM=dumb forces the tput fallback (term_width=80): line 2 must end at
+    # the stats anchor, column 75 (term_width - 5), padded from the left.
+    out=$(printf '{"session_id":"adv3","model":{"id":"claude-opus-4-8","display_name":"Opus"},"cwd":"/t","workspace":{"current_dir":"/t"},"cost":{"total_cost_usd":0},"rate_limits":{"five_hour":{"used_percentage":85,"resets_at":"%s"}}}' "$reset_5h" \
+        | HOME="$tmpdir" TERM=dumb bash "$SCRIPT_DIR/statusline.sh")
+    line2=$(printf '%s\n' "$out" | sed -n '2p')
+    plain=$(strip_ansi "$line2")
+    [ "${#plain}" -eq 75 ]
+    [[ "$plain" =~ ^\ +!\ 5h\ caps\ ~ ]]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: pre-v0.18-deva env (DETAILS, no TAG) still resolves the account" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    out=$(echo '{"model":{"id":"claude-opus-4-6","display_name":"Opus"},"cwd":"/t","workspace":{"current_dir":"/t"},"version":"2.1.174","cost":{"total_cost_usd":0}}' \
+        | HOME="$tmpdir" DEVA_AUTH_METHOD="credentials-file" \
+          DEVA_AUTH_DETAILS="credentials-file (/cfg/work.credentials.json)" \
+          bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$out")
+    [[ "$plain" == *"[@work]"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: provisioning-variant DEVA_AUTH_DETAILS resolves the stem" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    out=$(echo '{"model":{"id":"claude-opus-4-6","display_name":"Opus"},"cwd":"/t","workspace":{"current_dir":"/t"},"version":"2.1.174","cost":{"total_cost_usd":0}}' \
+        | HOME="$tmpdir" DEVA_AUTH_METHOD="credentials-file" \
+          DEVA_AUTH_DETAILS="credentials-file (provisioning: /cfg/work.credentials.json)" \
+          bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$out")
+    [[ "$plain" == *"[@work]"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "build_advisor_fleet_hint: corrupt sibling cache does not inherit the previous sibling's numbers" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/a" "$tmpdir/b"
+    now=$(date +%s)
+    printf '{"five_hour":{"utilization":8},"fetched_at":%s}' "$now" > "$tmpdir/a/usage.cache"
+    printf 'not json' > "$tmpdir/b/usage.cache"
+    result=$(build_advisor_fleet_hint "$tmpdir" "self")
+    [ "$result" = "a 5h[8%] free" ]
     rm -rf "$tmpdir"
 }

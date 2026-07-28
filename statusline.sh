@@ -1,15 +1,17 @@
 #!/bin/bash
 # Claude Code statusline
-# Usage: statusline.sh [--style STYLE] [--order ORDER] [--theme THEME] [--path-display TYPE] [--alignment TYPE] [--extra MODE] [--cache MODE] [--test JSON] [--debug]
+# Usage: statusline.sh [--style STYLE] [--order ORDER] [--theme THEME] [--path-display TYPE] [--alignment TYPE] [--extra MODE] [--cache MODE] [--advisor MODE] [--test JSON] [--debug]
 # Themes: minimal, compact, detailed, developer, manager
 # Styles: single-block, unicode-blocks, bracketed-bars, filled-dots, square-blocks, line-segments, ascii-bars, percent-only, fraction-display
 # Extra modes: auto (default, shows when quota runs out or extra >= 50%), always, on-limit, off
+# Advisor modes: auto (default, second line under quota pressure or expiring surplus), always (adds weekly budget when calm), off
 
 progress_bar_style="unicode-blocks"
 stat_order="activity,time,cost,model,user,quota,extra"
 path_display="project" # project, cwd, full, relative
 alignment="left-right" # left-right, right-left, center
 theme=""
+advisor_display_mode="auto" # auto, always, off
 # Context limit: auto-detected from model.id. 1M when the family ships 1M by
 # default (e.g. fable — CLI strips its [1m] suffix since 2.1.173) OR when the id
 # carries an explicit [1m] opt-in suffix (e.g. opus/sonnet); otherwise 200k.
@@ -32,6 +34,13 @@ CACHE_BREAK_MIN_TOKENS=2000      # ignore cache drops below this (noise)
 CACHE_BREAK_DROP_PCT=5           # cache read must drop >5% to count as break
 CACHE_HEAVY_TOKENS=200000        # break badge turns bold-red past this: the
                                  # >200k premium-band prefix, an expensive rewrite
+ADVISOR_PACE_MIN_ELAPSED=900     # 5h cap projection needs >=15m of window aged
+ADVISOR_FLEET_FRESH_SECS=3600    # sibling account cache older than this is unknown
+ADVISOR_FLEET_FREE_PCT=40        # sibling counts as "free" at or under this 5h%
+ADVISOR_EXPIRY_HORIZON_SECS=86400 # 7d surplus clause: inside the last day of the week
+ADVISOR_SURPLUS_MIN_PCT=30       # unused weekly % that counts as expiring waste
+ADVISOR_UNDERUSE_END_PCT=60      # projected end-of-week <= this => underuse advice
+ADVISOR_UNDERUSE_MIN_5H=25       # underuse advice only in an engaged session (5h >= this)
 # Cache-badge marker. Triple bar (U+2261 IDENTICAL TO): three stacked
 # horizontal lines read as layered cache tiers. Single-column text glyph, so
 # the padding math is unaffected. Swap for ☰ (U+2630) or Ξ (U+039E) if a
@@ -122,6 +131,22 @@ if [ -n "${STATUSLINE_ACCOUNT:-}" ]; then
     ACCOUNT_TAG="$STATUSLINE_ACCOUNT"
 elif [ -n "${DEVA_AUTH_TAG:-}" ] && [ "$DEVA_AUTH_TAG" != "auth-default" ]; then
     ACCOUNT_TAG="${DEVA_AUTH_TAG#auth-file-}"
+elif [ "${DEVA_AUTH_METHOD:-}" = "credentials-file" ] && [ -n "${DEVA_AUTH_DETAILS:-}" ]; then
+    # Containers created by pre-v0.18 deva overlay a credentials file but
+    # export no DEVA_AUTH_TAG — only the details string:
+    #   "credentials-file (/path/<stem>.credentials.json)"
+    #   "credentials-file (provisioning: /path/<stem>.credentials.json)"
+    # Without this fallback such sessions silently read the DEFAULT
+    # account's caches — the wrong-label/wrong-quota bug this scoping
+    # exists to kill. Derive the tag from the file stem, same rule deva
+    # itself uses.
+    _auth_path="${DEVA_AUTH_DETAILS#*(}"
+    _auth_path="${_auth_path%)}"
+    _auth_path="${_auth_path##* }"
+    _auth_path="${_auth_path##*/}"
+    _auth_path="${_auth_path%.credentials.json}"
+    ACCOUNT_TAG="${_auth_path%.json}"
+    unset _auth_path
 fi
 # Env-derived path component: filesystem-safe charset, bounded length, no
 # dot-leading names (blocks "..", hidden dirs).
@@ -238,6 +263,10 @@ while [[ $# -gt 0 ]]; do
         cache_display_mode="$2"
         shift 2
         ;;
+    --advisor)
+        advisor_display_mode="$2"
+        shift 2
+        ;;
     --test)
         test_mode=true
         if [ -n "$2" ] && [[ "$2" != --* ]]; then
@@ -272,6 +301,7 @@ apply_theme() {
         path_display="project"
         alignment="left-right"
         extra_display_mode="off"
+        advisor_display_mode="off"
         ;;
     "compact")
         progress_bar_style="unicode-blocks"
@@ -297,6 +327,7 @@ apply_theme() {
         stat_order="cost,time,activity,model,user"
         path_display="project"
         alignment="center"
+        advisor_display_mode="off"
         ;;
     esac
 }
@@ -1774,7 +1805,15 @@ build_seven_day_profile() {
     local data
     data=$( { cat "${jsonl}.1" 2>/dev/null; cat "$jsonl"; } | jq -r --arg a "$acct" '
             select((.user.uuid // "") == $a)
-            | [.timestamp, (.seven_day.utilization // empty)] | @tsv' 2>/dev/null \
+            # Window identity for the ratio pairs: resets_at wobbles per
+            # fetch (microseconds, and 06:59:59 vs 07:00:00 across the
+            # boundary), so normalize to the nearest minute; non-ISO values
+            # fall back to the raw string.
+            | [.timestamp, (.seven_day.utilization // ""),
+               (.five_hour.utilization // ""),
+               ((.five_hour.resets_at // "") | tostring
+                | (try (sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z")
+                        | fromdateiso8601 | (. + 30) / 60 | floor) catch .))] | @tsv' 2>/dev/null \
         | sort -n | awk -F'\t' -v now="$now" -v tz="$tzoff_s" '
         $2 != "" {
             if (prev_set && $2 > prev) {
@@ -1786,6 +1825,16 @@ build_seven_day_profile() {
             }
             prev = $2; prev_set = 1
         }
+        # Cross-window ratio: pair consecutive samples inside the SAME 5h
+        # window (resets_at identity guards against pairing across a reset)
+        # and accumulate how many 7d points each 5h point costs. This is the
+        # physics that converts "windows left" into "weekly % spendable".
+        $2 != "" && $3 != "" && $4 != "" {
+            if (pr_set && $4 == pr_reset && $3 > pr_five && $2 >= pr_seven) {
+                rf += $3 - pr_five; rs += $2 - pr_seven
+            }
+            pr_five = $3; pr_seven = $2; pr_reset = $4; pr_set = 1
+        }
         END {
             today = int((now + tz) / 86400)
             for (day in burn) {
@@ -1795,8 +1844,19 @@ build_seven_day_profile() {
                 num[dw] += burn[day] * w; den[dw] += w
                 ndays++
             }
+            # pct_per_window: 7d % consumed by a fully burned 5h window.
+            # Trust it only after half a window of observed paired burn
+            # (rf >= 50) with visible 7d movement (rs >= 3, guards integer
+            # rounding); clamp to a sane band.
+            ppw = -1
+            if (rf >= 50 && rs >= 3) {
+                ppw = rs / rf * 100
+                if (ppw < 1)  ppw = 1
+                if (ppw > 50) ppw = 50
+            }
             printf "{\"computed_at\":%d,\"days_history\":%d,", now, ndays
             printf "\"recent_24h\":%.2f,\"recent_48h\":%.2f,", r24, r48
+            printf "\"pct_per_window\":%.2f,", ppw
             printf "\"weekday_profile\":{"
             sep = ""
             for (i = 0; i <= 6; i++) {
@@ -1817,7 +1877,14 @@ build_seven_day_profile() {
 # verdict (no cache, cold start < 14 days of history, or quota outlasts the
 # window). The first 24h of the walk burns at max(profile, recent_24h) so a
 # hot streak escalates before the weekday average catches up (L1 blend).
-seven_day_forecast() {
+# Shared learned-profile walker: simulate burn from now to the reset using
+# the weekday profile (recent-24h blended over the first day, exactly the
+# seven_day_forecast behavior). Echoes "gap_h projected_end":
+#   gap_h          hours between drying up and the reset, -1 if the quota
+#                  outlasts the window
+#   projected_end  final utilization at the reset, capped at 100
+# Silent on cold start (<14 days history) or missing/empty inputs.
+_seven_day_walk() {
     local used="$1" secs_left="$2"
     local fc="$CLAUDE_ACCOUNT_DIR/forecast.cache"
     [ -f "$fc" ] || return 0
@@ -1843,7 +1910,7 @@ seven_day_forecast() {
         if (known == 0) exit
         fb = sum / known
         remaining = 100 - used
-        t = now; end = now + left; burned = 0
+        t = now; end = now + left; burned = 0; gap_h = -1
         while (t < end) {
             day = int((t + tz) / 86400)
             day_end = (day + 1) * 86400 - tz
@@ -1851,16 +1918,39 @@ seven_day_forecast() {
             rate = prof[(day + 4) % 7]; if (rate < 0) rate = fb
             if (t - now < 86400 && r24 > rate) rate = r24   # L1 blend
             add = rate * step / 86400.0
-            if (burned + add >= remaining && rate > 0) {
+            if (gap_h < 0 && burned + add >= remaining && rate > 0) {
                 dry = t + (remaining - burned) / rate * 86400.0
-                gap_h = (end - dry) / 3600.0
-                level = (gap_h >= 48 || used >= 90) ? "red" : "yellow"
-                printf "%s %d\n", level, int(gap_h)
-                exit
+                gap_h = int((end - dry) / 3600.0)
             }
             burned += add; t = day_end
         }
+        total = used + burned
+        if (total > 100) total = 100
+        printf "%d %d\n", gap_h, int(total + 0.5)
     }'
+}
+
+seven_day_forecast() {
+    local used="$1" secs_left="$2"
+    local used_int
+    used_int=$(printf '%.0f' "$used" 2>/dev/null || echo 0)
+    local gap_h proj_end
+    read -r gap_h proj_end <<<"$(_seven_day_walk "$used_int" "$secs_left")"
+    [ -n "$gap_h" ] && [ "$gap_h" != "-1" ] || return 0
+    local level="yellow"
+    { [ "$gap_h" -ge 48 ] || [ "$used_int" -ge 90 ]; } 2>/dev/null && level="red"
+    echo "$level $gap_h"
+}
+
+# Learned cross-window ratio from forecast.cache: 7d percentage points a
+# fully burned 5h window costs THIS account. Echoes a positive decimal, or
+# nothing while unlearned — callers must not advise without it.
+forecast_pct_per_window() {
+    local fc="$CLAUDE_ACCOUNT_DIR/forecast.cache"
+    [ -f "$fc" ] || return 0
+    local ppw
+    ppw=$(jq -r '.pct_per_window // -1' "$fc" 2>/dev/null)
+    awk -v p="${ppw:--1}" 'BEGIN{ if (p > 0) printf "%.2f", p }'
 }
 
 # Generalized change flash: signed delta between the current value and the
@@ -2270,6 +2360,362 @@ build_extra_usage_display() {
     fi
 
     echo "${DIM}ex${color}[${used_display}/${limit_display} ${util_int}%${balance_part}${auto_reload_part}]${RESET}"
+}
+
+# ---------------------------------------------------------------------------
+# Advisor line (second statusline row). Design rule: line 2 speaks only when
+# the numbers on line 1 don't mean what they appear to mean, and every clause
+# derives from a badge line 1 already shows — no third alarm channel. It cuts
+# both ways, with a voice per direction:
+#   pressure     "! ..." yellow/red  you'll hit a wall before a reset
+#   opportunity  "+ ..." cyan        paid capacity is about to expire unused,
+#                                    or a sibling account is free while you're
+#                                    pinned — spend, don't conserve
+# Cyan is reserved for opportunity: it can never mean pressure, so the color
+# alone carries the stance. Quiet = no row at all (Claude Code renders each
+# stdout line as its own row; printing nothing costs nothing). All times are
+# wall-clock or future-to-future gaps — both freeze-safe in an idle frame,
+# same idiom as the badges above.
+# ---------------------------------------------------------------------------
+
+# Sibling-account relief hint for shared-home fleets (deva): when THIS
+# account's 5h is pinned, a fresh sibling cache with a mostly-idle 5h window
+# is the actionable way out. Reads accounts/*/usage.cache — no credentials,
+# no fetches. Echoes "tag 5h[N%] free" for the idlest fresh sibling, or "".
+build_advisor_fleet_hint() {
+    local accounts_dir="$1" self_tag="$2"
+    [ -n "$accounts_dir" ] && [ -d "$accounts_dir" ] || return 0
+    local now best_tag="" best_util=101 dir tag fetched util age
+    now=$(date +%s)
+    for dir in "$accounts_dir"/*/; do
+        [ -f "$dir/usage.cache" ] || continue
+        tag=$(basename "$dir")
+        [ "$tag" = "$self_tag" ] && continue
+        # Reset before eval: a corrupt cache makes jq emit nothing, and the
+        # previous sibling's numbers must not leak onto this tag.
+        fetched=0 util=""
+        eval "$(jq -r '
+            @sh "fetched=\(.fetched_at // 0)",
+            @sh "util=\(.five_hour.utilization // "")"
+        ' "$dir/usage.cache" 2>/dev/null)"
+        [ -n "$util" ] || continue
+        age=$((now - ${fetched:-0}))
+        [ "$age" -le "$ADVISOR_FLEET_FRESH_SECS" ] 2>/dev/null || continue
+        util=$(printf '%.0f' "$util" 2>/dev/null) || continue
+        if [ "$util" -le "$ADVISOR_FLEET_FREE_PCT" ] && [ "$util" -lt "$best_util" ]; then
+            best_util="$util"
+            best_tag="$tag"
+        fi
+    done
+    [ -n "$best_tag" ] && echo "${best_tag} 5h[${best_util}%] free"
+    return 0
+}
+
+# Build the advisor row. Echoes a colored line or nothing.
+#   auto:   speak under pressure OR when paid capacity is going to waste
+#   always: additionally show the weekly budget when calm
+#   off:    nothing
+# Clauses in value order (max two survive, joined "; "):
+#   fb capped — back ~Thu 07:00           running model's weekly_scoped limit
+#                                         hit 100: the model just went away,
+#                                         the useful fact is when it returns
+#   5h caps ~14:20, 52m before reset      linear projection, only while the
+#                                         5h badge is already yellow/red and
+#                                         relief is not imminent
+#   7d resets @07:00, 56% unused — spend it | — ~40% expires even at full burn
+#                                         expiring surplus: inside the last
+#                                         day of the week, green on line 1
+#                                         means forfeiting, not fine — the
+#                                         exact zone pressure logic mutes.
+#                                         Tail is feasibility-checked against
+#                                         the learned pct_per_window ratio;
+#                                         no ratio yet, no tail
+#   alt 5h[8%] free                     fleet relief once 5h >= 90
+#   fb caps ~Wed 18:00, 1d before reset   scoped-limit pace, same math and
+#                                         gates as the 7d aggregate
+#   7d dry ~Thu 09:00, 2d before reset — then extra billing|hard stop
+#                                         learned forecast when trained, else
+#                                         linear pace when seven_day_pace
+#                                         already warns
+#   7d on pace to leave ~62% unused — go heavier
+#                                         mid-week underuse, engaged sessions
+#                                         only — reaches exactly the users
+#                                         who can act on it
+#   ~19x5h left, even pace 1.1%/win, heading ~52%
+#                                         always-mode calm line
+build_advisor_line() {
+    local usage_data="$1" mode="${2:-auto}" current_model="${3:-}"
+    [ "$mode" = "off" ] && return 0
+    [ -n "$usage_data" ] || return 0
+
+    local five_util five_reset seven_util seven_reset extra_enabled
+    eval "$(echo "$usage_data" | jq -r '
+        @sh "five_util=\(.five_hour.utilization // 0)",
+        @sh "five_reset=\(.five_hour.resets_at // "")",
+        @sh "seven_util=\(.seven_day.utilization // 0)",
+        @sh "seven_reset=\(.seven_day.resets_at // "")",
+        @sh "extra_enabled=\(.extra_usage.is_enabled // false)"
+    ' 2>/dev/null)"
+
+    local five_int seven_int
+    five_int=$(printf '%.0f' "$five_util" 2>/dev/null || echo 0)
+    seven_int=$(printf '%.0f' "$seven_util" 2>/dev/null || echo 0)
+    local five_secs seven_secs
+    five_secs=$(get_reset_seconds "$five_reset")
+    seven_secs=$(get_reset_seconds "$seven_reset")
+    local now
+    now=$(date +%s)
+
+    # pressure: any wall-ahead clause fired (drives ! + yellow/red).
+    # seven_spoken: some clause already told the 7d story — the window gets
+    # one voice per render, never two that could disagree.
+    local clauses=() level="yellow" pressure=0 seven_spoken=0
+
+    # Weekly limit scoped to the model THIS session runs (limits[]
+    # kind=weekly_scoped, same substring match as the fb[N%] badge). Other
+    # models' quotas stay out — noise here, and invisible on line 1.
+    local scope_name="" scope_int="" scope_secs=""
+    if [ -n "$current_model" ]; then
+        local model_lc scoped_tsv
+        model_lc=$(printf '%s' "$current_model" | tr '[:upper:]' '[:lower:]')
+        scoped_tsv=$(echo "$usage_data" | jq -r --arg m "$model_lc" '
+            [.limits[]? | select(.kind == "weekly_scoped" and (.scope.model.display_name // "") != "")
+             | (.scope.model.display_name | ascii_downcase) as $s
+             | select($m | contains($s))]
+            | first // empty
+            | [(.scope.model.display_name | ascii_downcase), (.percent // 0), (.resets_at // "")] | @tsv' 2>/dev/null)
+        if [ -n "$scoped_tsv" ]; then
+            local scope_pct scope_reset
+            IFS=$'\t' read -r scope_name scope_pct scope_reset <<<"$scoped_tsv"
+            scope_int=$(printf '%.0f' "$scope_pct" 2>/dev/null || echo 0)
+            scope_secs=$(get_reset_seconds "$scope_reset")
+        fi
+    fi
+
+    # Scoped limit capped: the model this session runs just became
+    # unavailable — the top story, and the one number that matters is when
+    # it comes back. No recovery suppression: "back ~Thu 07:00" is exactly
+    # what an imminent reset makes MORE useful.
+    if [ -n "$scope_int" ] && [ "$scope_int" -ge 100 ] 2>/dev/null \
+       && [ -n "$scope_secs" ] && [ "$scope_secs" -gt 0 ] 2>/dev/null; then
+        local back_str
+        back_str=$(_fmt_epoch $((now + scope_secs)) '%a %H:%M')
+        if [ -n "$back_str" ]; then
+            clauses+=("$(model_scope_abbrev "$scope_name") capped — back ~${back_str}")
+            pressure=1 level="red"
+        fi
+    fi
+
+    # 5h cap projection. Gate = the 5h badge's own pressure gate (>= 80),
+    # recovery-suppressed exactly like its color. At 100% line 1 already
+    # says capped + reset time; projecting is pointless — only the fleet
+    # hint below still helps there.
+    if [ "$five_int" -ge 80 ] && [ "$five_int" -lt 100 ] \
+       && [ -n "$five_secs" ] && [ "$five_secs" -gt "$FIVE_HOUR_RECOVERY_SECS" ] 2>/dev/null; then
+        local elapsed=$((18000 - five_secs))
+        if [ "$elapsed" -ge "$ADVISOR_PACE_MIN_ELAPSED" ]; then
+            local cap_secs=$(( (100 - five_int) * elapsed / five_int ))
+            if [ "$cap_secs" -lt "$five_secs" ]; then
+                local cap_hhmm gap
+                cap_hhmm=$(_fmt_epoch $((now + cap_secs)) '%H:%M')
+                gap=$(format_duration $(( (five_secs - cap_secs) * 1000 )))
+                if [ -n "$cap_hhmm" ]; then
+                    clauses+=("5h caps ~${cap_hhmm}, ${gap} before reset")
+                    pressure=1
+                    [ "$five_int" -ge 90 ] && level="red"
+                fi
+            fi
+        fi
+    fi
+
+    # Expiring surplus — use it or lose it. Inside the last day of the 7d
+    # window a big green remainder is not headroom, it's forfeiture: at
+    # reset it vanishes whether spent or not. This is the zone where the
+    # pressure clauses go quiet (recovery), and precisely where waste peaks.
+    # The tail is feasibility-checked against the learned pct_per_window
+    # ratio: burning is rate-capped by the 5h mechanism (current headroom
+    # until its reset, full windows after), so "spend it" only appears when
+    # full-tilt burn can actually consume the surplus; past that point the
+    # honest tail is how much expires no matter what. Unlearned ratio = no
+    # tail: never advise what we can't back.
+    if [ "$seven_int" -gt 0 ] && [ -n "$seven_secs" ] && [ "$seven_secs" -gt 0 ] 2>/dev/null \
+       && [ "$seven_secs" -le "$ADVISOR_EXPIRY_HORIZON_SECS" ] 2>/dev/null \
+       && [ $((100 - seven_int)) -ge "$ADVISOR_SURPLUS_MIN_PCT" ]; then
+        local when surplus tail="" ppw reachable=""
+        when=$(format_reset_absolute "$seven_reset")
+        surplus=$((100 - seven_int))
+        ppw=$(forecast_pct_per_window)
+        if [ -n "$ppw" ]; then
+            reachable=$(awk -v ppw="$ppw" -v ss="$seven_secs" -v fs="${five_secs:-0}" -v fu="$five_int" 'BEGIN{
+                cap = ppw * (100 - fu) / 100          # current window headroom
+                if (fs > 0 && fs < ss) {
+                    leg = ppw * fs / 18000            # time-limited until 5h reset
+                    r = (leg < cap ? leg : cap) + ppw * (ss - fs) / 18000
+                } else {
+                    leg = ppw * ss / 18000            # 5h window outlasts 7d reset
+                    r = (leg < cap ? leg : cap)
+                }
+                printf "%d", int(r + 0.5)
+            }')
+        fi
+        if [ -n "$reachable" ]; then
+            if [ "$reachable" -ge "$surplus" ] 2>/dev/null; then
+                tail=" — spend it"
+            else
+                tail=" — ~$((surplus - reachable))% expires even at full burn"
+            fi
+        fi
+        if [ -n "$when" ]; then
+            clauses+=("7d resets @${when}, ${surplus}% unused${tail}")
+            seven_spoken=1
+        fi
+    fi
+
+    # Fleet relief: once this account's 5h is effectively spent, the useful
+    # fact is which sibling isn't. Opportunity, not alarm — line 1 already
+    # screams about the cap.
+    if [ "$five_int" -ge 90 ] && [ -n "${ACCOUNT_TAG:-}" ]; then
+        local hint
+        hint=$(build_advisor_fleet_hint "${STATUSLINE_HOME}/accounts" "$ACCOUNT_TAG")
+        [ -n "$hint" ] && clauses+=("$hint")
+    fi
+
+    # Scoped-limit pace: the running model's weekly quota caps before its
+    # reset. Same linear math and recovery suppression as the 7d aggregate,
+    # same >= 80 gate as its badge color.
+    if [ -n "$scope_int" ] && [ "$scope_int" -ge 80 ] && [ "$scope_int" -lt 100 ] 2>/dev/null \
+       && [ -n "$scope_secs" ] && [ "$scope_secs" -gt "$SEVEN_DAY_RECOVERY_SECS" ] 2>/dev/null; then
+        local sc_elapsed=$((SEVEN_DAY_WINDOW_SECS - scope_secs))
+        if [ "$sc_elapsed" -ge "$ADVISOR_PACE_MIN_ELAPSED" ]; then
+            local sc_cap=$(( (100 - scope_int) * sc_elapsed / scope_int ))
+            if [ "$sc_cap" -lt "$scope_secs" ]; then
+                local sc_str sc_gap_secs sc_gap
+                sc_str=$(_fmt_epoch $((now + sc_cap)) '%a %H:%M')
+                sc_gap_secs=$((scope_secs - sc_cap))
+                if [ "$sc_gap_secs" -ge 172800 ]; then
+                    sc_gap="$((sc_gap_secs / 86400))d"
+                else
+                    sc_gap=$(format_duration $((sc_gap_secs * 1000)))
+                fi
+                if [ -n "$sc_str" ]; then
+                    clauses+=("$(model_scope_abbrev "$scope_name") caps ~${sc_str}, ${sc_gap} before reset")
+                    pressure=1
+                    [ "$scope_int" -ge 90 ] && level="red"
+                fi
+            fi
+        fi
+    fi
+
+    # 7d dry projection. The learned forecast speaks first (it can warn on a
+    # calm Friday about your heavy Tuesday — and it already escalates line
+    # 1's color, so the gate stays shared). Cold start falls back to linear
+    # pace, but only when seven_day_pace already warns. Recovery (<= 12h to
+    # reset) stays quiet, mirroring the badge — the surplus clause owns that
+    # zone.
+    if [ "$seven_spoken" = 0 ] && [ "$seven_int" -gt 0 ] && [ "$seven_int" -lt 100 ] \
+       && [ -n "$seven_secs" ] && [ "$seven_secs" -gt "$SEVEN_DAY_RECOVERY_SECS" ] 2>/dev/null; then
+        local dry_epoch="" gap_secs="" sev_verb="dry" sev_level=""
+        local fc_level fc_gap
+        read -r fc_level fc_gap <<<"$(seven_day_forecast "$seven_int" "$seven_secs")"
+        if [ -n "$fc_level" ]; then
+            gap_secs=$((fc_gap * 3600))
+            dry_epoch=$((now + seven_secs - gap_secs))
+            sev_level="$fc_level"
+        else
+            local p_level p_runway p_hint
+            read -r p_level p_runway p_hint <<<"$(seven_day_pace "$seven_int" "$seven_secs")"
+            if [ "${p_hint:-0}" = "1" ]; then
+                local elapsed7=$((SEVEN_DAY_WINDOW_SECS - seven_secs))
+                local cap7=$(( (100 - seven_int) * elapsed7 / seven_int ))
+                if [ "$cap7" -lt "$seven_secs" ]; then
+                    dry_epoch=$((now + cap7))
+                    gap_secs=$((seven_secs - cap7))
+                    sev_verb="caps"
+                    sev_level="$p_level"
+                fi
+            fi
+        fi
+        if [ -n "$dry_epoch" ]; then
+            local dry_str gap_str tail
+            dry_str=$(_fmt_epoch "$dry_epoch" '%a %H:%M')
+            if [ "$gap_secs" -ge 172800 ]; then
+                gap_str="$((gap_secs / 86400))d"
+            else
+                gap_str=$(format_duration $((gap_secs * 1000)))
+            fi
+            if [ "$extra_enabled" = "true" ]; then
+                tail="then extra billing"
+            else
+                tail="then hard stop"
+            fi
+            if [ -n "$dry_str" ]; then
+                clauses+=("7d ${sev_verb} ~${dry_str}, ${gap_str} before reset — ${tail}")
+                pressure=1 seven_spoken=1
+                [ "$sev_level" = "red" ] && level="red"
+            fi
+        fi
+    fi
+
+    # Underuse: on pace to strand a large chunk of the week. The learned
+    # walk speaks first — it knows YOUR remaining weekdays, so it can warn
+    # from day two without waiting for linear pace to mean anything; cold
+    # start falls back to linear past half the window. Speaks only in an
+    # engaged, unsqueezed session (5h in [25,80), no pressure clause) — the
+    # statusline renders while you work, so this reaches exactly the person
+    # who can act on it, and never nags an idle or already-constrained one.
+    if [ "$seven_spoken" = 0 ] && [ "$pressure" = 0 ] && [ "$seven_int" -gt 0 ] \
+       && [ "$five_int" -ge "$ADVISOR_UNDERUSE_MIN_5H" ] && [ "$five_int" -lt 80 ] 2>/dev/null \
+       && [ -n "$seven_secs" ] && [ "$seven_secs" -gt "$ADVISOR_EXPIRY_HORIZON_SECS" ] 2>/dev/null; then
+        local elapsed7=$((SEVEN_DAY_WINDOW_SECS - seven_secs))
+        local heading="" walk_gap walk_end
+        read -r walk_gap walk_end <<<"$(_seven_day_walk "$seven_int" "$seven_secs")"
+        if [ -n "$walk_end" ] && [ "$elapsed7" -ge 172800 ]; then
+            heading="$walk_end"
+        elif [ $((elapsed7 * 2)) -ge "$SEVEN_DAY_WINDOW_SECS" ]; then
+            heading=$((seven_int * SEVEN_DAY_WINDOW_SECS / elapsed7))
+        fi
+        if [ -n "$heading" ] && [ "$heading" -le "$ADVISOR_UNDERUSE_END_PCT" ] 2>/dev/null; then
+            clauses+=("7d on pace to leave ~$((100 - heading))% unused — go heavier")
+        fi
+    fi
+
+    if [ "${#clauses[@]}" -gt 0 ]; then
+        local text="${clauses[0]}"
+        [ "${#clauses[@]}" -ge 2 ] && text="${text}; ${clauses[1]}"
+        if [ "$pressure" = 1 ]; then
+            local color="$YELLOW"
+            [ "$level" = "red" ] && color="$RED"
+            echo "${color}! ${text}${RESET}"
+        else
+            echo "${CYAN}+ ${text}${RESET}"
+        fi
+        return 0
+    fi
+
+    # Calm + always: the weekly budget in one breath. ceil'd window count so
+    # a partial window still counts as spendable; "heading ~N%" is the
+    # learned end-of-week projection when trained, linear once the window is
+    # at least a day old.
+    if [ "$mode" = "always" ] && [ "$seven_int" -gt 0 ] && [ "$seven_int" -lt 100 ] \
+       && [ -n "$seven_secs" ] && [ "$seven_secs" -gt 0 ] 2>/dev/null; then
+        local windows=$(( (seven_secs + 17999) / 18000 ))
+        if [ "$windows" -gt 0 ]; then
+            local even heading_part=""
+            even=$(awk -v h=$((100 - seven_int)) -v w="$windows" 'BEGIN{printf "%.1f", h/w}')
+            local elapsed7=$((SEVEN_DAY_WINDOW_SECS - seven_secs))
+            local heading="" walk_gap walk_end
+            read -r walk_gap walk_end <<<"$(_seven_day_walk "$seven_int" "$seven_secs")"
+            if [ -n "$walk_end" ]; then
+                heading="$walk_end"
+            elif [ "$elapsed7" -ge 86400 ]; then
+                heading=$((seven_int * SEVEN_DAY_WINDOW_SECS / elapsed7))
+                [ "$heading" -gt 100 ] && heading=100
+            fi
+            [ -n "$heading" ] && heading_part=", heading ~${heading}%"
+            echo "${DIM}- ~${windows}x5h left, even pace ${even}%/win${heading_part}${RESET}"
+        fi
+    fi
+    return 0
 }
 
 get_user_tier() {
@@ -2912,6 +3358,9 @@ if [ -n "$session_id" ] && [ "$_may_have_oauth" = true ]; then
         [ -n "$quota_display" ] && quota_component="$quota_display"
         five_int=$(printf '%.0f' "${rl_five_pct:-0}" 2>/dev/null || echo 0)
         seven_int_cache=$(printf '%.0f' "${rl_seven_pct:-0}" 2>/dev/null || echo 0)
+        # No cache yet, but stdin still carries the windows — enough for the
+        # advisor's projections.
+        usage_data="$stdin_usage"
     fi
 
     extra_util_pct=0
@@ -2995,6 +3444,33 @@ format_output() {
 }
 
 format_output
+
+# Advisor row: a second stdout line renders as its own row in Claude Code's
+# status area, and printing nothing produces no row — so a quiet advisor
+# costs zero height. Single-hue by design, which keeps truncation honest.
+# Right-aligned to the same anchor the stats cluster ends at in format_output
+# (term_width - 5), so the advice sits directly beneath the usage badges it
+# interprets, stable across widths and message lengths; when the stats sit
+# left (right-left alignment) the advisor stays left with them.
+if [ "$advisor_display_mode" != "off" ] && [ -n "${usage_data:-}" ]; then
+    advisor_line=$(build_advisor_line "$usage_data" "$advisor_display_mode" "${model_id:-$model_display}")
+    if [ -n "$advisor_line" ]; then
+        advisor_plain=$(printf '%b' "$advisor_line" | sed 's/\x1b\[[0-9;]*m//g')
+        advisor_max=$((term_width - 1))
+        if [ "${#advisor_plain}" -gt "$advisor_max" ] 2>/dev/null && [ "$advisor_max" -gt 1 ]; then
+            advisor_color=$(printf '%s' "$advisor_line" | grep -o '^\\033\[[0-9;]*m' | head -1)
+            advisor_plain="${advisor_plain:0:$((advisor_max - 1))}…"
+            advisor_line="${advisor_color}${advisor_plain}${RESET}"
+        fi
+        advisor_pad=0
+        if [ "$alignment" != "right-left" ]; then
+            advisor_pad=$((term_width - 5 - ${#advisor_plain}))
+            [ "$advisor_pad" -gt 0 ] 2>/dev/null || advisor_pad=0
+        fi
+        debug_log "ADVISOR: $advisor_plain"
+        printf '%*s%b\n' "$advisor_pad" "" "$advisor_line"
+    fi
+fi
 
 if [ "$test_mode" = true ] && [ -n "$temp_transcript" ] && [ -f "$temp_transcript" ]; then
     rm -f "$temp_transcript"
