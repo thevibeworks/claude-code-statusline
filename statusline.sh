@@ -1804,16 +1804,21 @@ build_seven_day_profile() {
     tzoff_s=$(date +%z | awk '{ s=substr($0,1,1)=="-"?-1:1; h=substr($0,2,2)+0; m=substr($0,4,2)+0; print s*(h*3600+m*60) }')
     local data
     data=$( { cat "${jsonl}.1" 2>/dev/null; cat "$jsonl"; } | jq -r --arg a "$acct" '
-            select((.user.uuid // "") == $a)
             # Window identity for the ratio pairs: resets_at wobbles per
             # fetch (microseconds, and 06:59:59 vs 07:00:00 across the
-            # boundary), so normalize to the nearest minute; non-ISO values
-            # fall back to the raw string.
+            # boundary), so normalize to the nearest minute. Non-ISO values
+            # fall back to the raw string ($raw — NOT `catch .`, which would
+            # yield the error MESSAGE and give every empty/broken value one
+            # shared fake identity, silently pairing across real windows).
+            def norm: tostring | . as $raw
+                | if $raw == "" then "" else
+                    (try (sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z")
+                          | fromdateiso8601 | (. + 30) / 60 | floor) catch $raw)
+                  end;
+            select((.user.uuid // "") == $a)
             | [.timestamp, (.seven_day.utilization // ""),
                (.five_hour.utilization // ""),
-               ((.five_hour.resets_at // "") | tostring
-                | (try (sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z")
-                        | fromdateiso8601 | (. + 30) / 60 | floor) catch .))] | @tsv' 2>/dev/null \
+               ((.five_hour.resets_at // "") | norm)] | @tsv' 2>/dev/null \
         | sort -n | awk -F'\t' -v now="$now" -v tz="$tzoff_s" '
         $2 != "" {
             if (prev_set && $2 > prev) {
