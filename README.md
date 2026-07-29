@@ -315,6 +315,47 @@ its reset, so usage from other devices after your last local render is
 invisible, and a week you never opened a session in never appears at
 all. The ledger reports what the log observed, nothing more.
 
+## Scripting: `check` and `session-summary`
+
+The statusline never runs when you're away — exactly when expiring
+capacity needs a voice. Instead of shipping a daemon, `check` exposes
+the advisor's judgment as an exit code; you provide the plumbing (tmux
+segment, cron, CI):
+
+```bash
+~/.claude/statusline.sh check
+# stdout: the plain advisor text, or "calm" / "unknown: ..."
+# exit 0 calm | 1 opportunity (+) | 2 pressure (!) | 3 unknown/stale
+```
+
+```bash
+# cron: nudge yourself when paid capacity is about to expire unused
+*/30 * * * * ~/.claude/statusline.sh check; [ $? -eq 1 ] && notify-send "$(~/.claude/statusline.sh check)"
+
+# tmux: advisor verdict in the status bar
+set -g status-right '#(~/.claude/statusline.sh check)'
+```
+
+`session-summary` is the same idea for session retrospectives — one
+line per session, built from the usage log, designed as a `SessionEnd`
+hook (it reads the hook JSON on stdin):
+
+```jsonc
+// settings.json
+"hooks": {
+  "SessionEnd": [{"hooks": [{"type": "command",
+    "command": "~/.claude/statusline.sh session-summary >> ~/.claude/statusline/session-summaries.log"}]}]
+}
+```
+
+```text
+session 8f3c02aa: 3h12m, 5h +34pts, 7d +4pts, claude-fable-5
+```
+
+Run it bare and it summarizes the last session in the log. Window
+deltas are positive-delta sums, so a session that straddles a 5h reset
+still reports what it actually consumed.
+
 <details><summary>OAuth and API behavior</summary>
 
 Quota, profile, and extra-usage requests use Claude Code's OAuth credentials
@@ -362,7 +403,7 @@ run. Setting only `CLAUDE_CACHE_DIR` keeps the legacy single-dir behavior.
 npm exec --yes bats -- t/
 ```
 
-327 tests across `t/statusline.bats` (315 statusline + integration) and
+334 tests across `t/statusline.bats` (322 statusline + integration) and
 `t/install.bats` (12 installer). CI runs on push and PR to `main`.
 
 ## Project Structure

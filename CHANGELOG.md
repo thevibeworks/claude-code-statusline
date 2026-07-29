@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.21.0 — 2026-07-28 — the advisor, wired into your world
+
+**New: `statusline.sh check` — the advisor as an exit code.** The
+statusline never runs when you're away, which is exactly when expiring
+capacity needs a voice. Instead of a daemon (still no daemon, ever),
+`check` prints the plain-text advisor verdict and exits 0 calm / 1
+opportunity / 2 pressure / 3 unknown-or-stale — you wire it into tmux,
+cron, or CI. We provide the judgment; the host provides the plumbing.
+Model context for the scoped clauses comes from the last logged
+snapshot — the first consumer of v0.20's widened `model` field.
+
+**New: `statusline.sh session-summary` — one-line session
+retrospectives.** Designed as a `SessionEnd` hook (reads the hook JSON
+on stdin; falls back to the last logged session for manual runs):
+
+```
+session 8f3c02aa: 3h12m, 5h +34pts, 7d +4pts, claude-fable-5
+```
+
+Window deltas are positive-delta sums (the profile builder's rule), so
+a session that straddles a 5h reset still reports what it actually
+consumed. 334 tests (322 statusline + 12 installer).
+
 ## v0.20.0 — 2026-07-28 — the waste ledger: see what you paid for and didn't use
 
 **New: `statusline.sh report [--days N]` — the waste ledger.** The
