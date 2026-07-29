@@ -762,6 +762,109 @@ _write_ledger_fixture() { # dir
     rm -rf "$tmpdir"
 }
 
+# --- check + session-summary subcommands -----------------------------------
+
+@test "run_check: calm cache prints calm and exits 0" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    reset_5h=$(date -u -d '+45 minutes' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"fetched_at":%s,"five_hour":{"utilization":20,"resets_at":"%s"},"seven_day":{"utilization":20,"resets_at":"%s"}}' \
+        "$(date +%s)" "$reset_5h" "$reset_7d" > "$tmpdir/usage.cache"
+    run run_check
+    [ "$status" -eq 0 ]
+    [ "$output" = "calm" ]
+    rm -rf "$tmpdir"
+}
+
+@test "run_check: pressure exits 2 with the plain advisor text" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    # 85% only 2h into the window: hot pace, caps before reset (pressure)
+    reset_5h=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"fetched_at":%s,"five_hour":{"utilization":85,"resets_at":"%s"},"seven_day":{"utilization":10}}' \
+        "$(date +%s)" "$reset_5h" > "$tmpdir/usage.cache"
+    run run_check
+    [ "$status" -eq 2 ]
+    [[ "$output" == "! 5h caps"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "run_check: expiring surplus exits 1 (opportunity)" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    # 5h on pace (40% at 60% elapsed), 7d resets in 10h with 56% unused
+    reset_5h=$(date -u -d '+2 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_7d=$(date -u -d '+10 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"fetched_at":%s,"five_hour":{"utilization":40,"resets_at":"%s"},"seven_day":{"utilization":44,"resets_at":"%s"}}' \
+        "$(date +%s)" "$reset_5h" "$reset_7d" > "$tmpdir/usage.cache"
+    run run_check
+    [ "$status" -eq 1 ]
+    [[ "$output" == "+ 7d resets"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "run_check: missing or stale cache exits 3" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    run run_check
+    [ "$status" -eq 3 ]
+    [[ "$output" == "unknown: no usage.cache"* ]]
+    printf '{"fetched_at":%s,"five_hour":{"utilization":85}}' "$(( $(date +%s) - 7200 ))" > "$tmpdir/usage.cache"
+    run run_check
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"stale"* ]]
+    rm -rf "$tmpdir"
+}
+
+_write_session_fixture() { # dir
+    local dir="$1" now
+    now=$(date +%s)
+    : > "$dir/usage.jsonl"
+    printf '{"type":"usage","session_id":"S1","timestamp":%s,"five_hour":{"utilization":10},"seven_day":{"utilization":5}}\n' "$(( now - 4000 ))" >> "$dir/usage.jsonl"
+    printf '{"type":"usage","session_id":"S1","timestamp":%s,"five_hour":{"utilization":40},"seven_day":{"utilization":7}}\n' "$(( now - 2000 ))" >> "$dir/usage.jsonl"
+    printf '{"type":"usage","session_id":"S1","timestamp":%s,"five_hour":{"utilization":70},"seven_day":{"utilization":9},"model":"claude-fable-5"}\n' "$(( now - 300 ))" >> "$dir/usage.jsonl"
+}
+
+@test "run_session_summary: summarizes the piped hook session" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    _write_session_fixture "$tmpdir"
+    out=$(printf '{"session_id":"S1"}' | run_session_summary)
+    # 3700s span, +60 five-points, +4 seven-points, model from the last sample
+    [ "$out" = "session S1: 1h1m, 5h +60pts, 7d +4pts, claude-fable-5" ]
+    rm -rf "$tmpdir"
+}
+
+@test "run_session_summary: falls back to the last logged session; unknown exits 1" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    _write_session_fixture "$tmpdir"
+    out=$(run_session_summary < /dev/null)
+    [[ "$out" == "session S1:"* ]]
+    if printf '{"session_id":"nope"}' | run_session_summary > /dev/null; then
+        false
+    fi
+    rm -rf "$tmpdir"
+}
+
+@test "integration: check and session-summary run end-to-end" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/data"
+    reset_5h=$(date -u -d '+45 minutes' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"fetched_at":%s,"five_hour":{"utilization":20,"resets_at":"%s"},"seven_day":{"utilization":20,"resets_at":"%s"}}' \
+        "$(date +%s)" "$reset_5h" "$reset_7d" > "$tmpdir/data/usage.cache"
+    _write_session_fixture "$tmpdir/data"
+    run env HOME="$tmpdir" CLAUDE_DATA_DIR="$tmpdir/data" bash "$SCRIPT_DIR/statusline.sh" check
+    [ "$status" -eq 0 ]
+    [ "$output" = "calm" ]
+    run bash -c "printf '{\"session_id\":\"S1\"}' | env HOME='$tmpdir' CLAUDE_DATA_DIR='$tmpdir/data' bash '$SCRIPT_DIR/statusline.sh' session-summary"
+    [ "$status" -eq 0 ]
+    [[ "$output" == "session S1:"* ]]
+    rm -rf "$tmpdir"
+}
+
 _write_profile_cache() { # $1=dir $2=days_history $3=rate_all_days $4=recent24
     cat > "$1/forecast.cache" <<EOF
 {"computed_at":$(date +%s),"days_history":$2,"recent_24h":$4,"recent_48h":0,
