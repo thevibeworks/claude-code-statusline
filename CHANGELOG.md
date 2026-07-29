@@ -1,5 +1,51 @@
 # Changelog
 
+## v0.20.0 — 2026-07-28 — the waste ledger: see what you paid for and didn't use
+
+**New: `statusline.sh report [--days N]` — the waste ledger.** The
+advisor (v0.19) prevents waste prospectively; this proves it
+retroactively. It replays the usage log the statusline has been writing
+all along, detects every window close (consecutive samples disagreeing
+on `resets_at`, normalized to the minute — the ratio learner's identity
+rule), and ledgers each closed 7d window as used% / expired%, converted
+into 5h-windows-worth via the learned `pct_per_window` exchange rate:
+
+```
+7d windows closed: 1
+  Tue 07-28 00:00  used 51%  expired 49% (~4.7 x 5h windows unused)
+5h windows closed: 3   avg 95% at close   2 hit the cap
+exchange rate: one full 5h window = ~10.46% of the week (~9.6 windows/week, learned)
+week in progress: 5% used, resets Mon 08-03 23:59
+```
+
+"week in progress" runs the same learned walk the advisor's heading
+uses — the surfaces cannot disagree. Honest limits are documented: the
+final utilization is the last sample before a reset, so usage from other
+clients after your last local render is invisible, and never-sampled
+windows don't appear.
+
+**Widened snapshots: log today what the learner needs next month.**
+Every `usage` line in usage.jsonl now also records `limits[]` (scoped
+per-model weekly caps, verbatim), `model` (the id active in the logging
+session), and `predicted_end` — the learned walk's end-of-week
+projection *at sample time*. That last one is the calibration seed: once
+windows close, predictions can be scored against observed finals, and
+the forecast's accuracy becomes measurable instead of assumed. Learning
+lags logging by weeks; fields absent today are patterns that can't be
+learned next month.
+
+**Fixed: `catch .` gave every empty `resets_at` one shared fake window
+identity.** jq's `catch .` yields the error *message*, not the original
+input — so snapshots with an empty/unparseable `resets_at` all
+normalized to the same error string and could pair across real windows
+in the ratio learner, quietly skewing `pct_per_window` (observed on real
+data: phantom window closes and a drifted ratio). Both norm sites now
+fall back to the raw input string and treat empty as empty.
+
+Mechanics: subcommands dispatch after all function definitions, take no
+stdin, and are read-only against the state dir. 327 tests (315
+statusline + 12 installer).
+
 ## v0.19.0 — 2026-07-28 — smart advisor line, claude-watch retired
 
 **New: the advisor — a second statusline row that interprets the badges.**
