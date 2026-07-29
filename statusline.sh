@@ -3127,7 +3127,15 @@ fi
 # Without the port env (old cctrace), the live-instance registry
 # (<data-dir>/instances/*.json, a documented contract) is matched by this
 # session's id, then by project path, then by being the only live capture.
-# No match still shows the bare chip: "recorded" matters even portless.
+# The registry stores session ids REDACTED past the first 8 hex
+# ("c3a6e0f3-****-…" — capture-time redaction, ids never land on disk in
+# full), so the sid8 prefix is the join key — the same convention cctrace's
+# own UI uses. The id match trusts any non-tombstone entry (if OUR capture
+# died, this session's proxy died with it); the path/only-live fallbacks
+# trust only heartbeat-fresh files (<2min, heartbeat is 30s) — crashed runs
+# leave "live" entries behind for up to a day, and a stale port is worse
+# than no port. No match still shows the bare chip: "recorded" matters
+# even portless.
 build_trace_component() {
     local port="${CCTRACE_SERVER_PORT:-}"
     local traced=""
@@ -3149,12 +3157,19 @@ build_trace_component() {
         fi
         reg="$reg/instances"
         if [ -d "$reg" ]; then
-            port=$(cat "$reg"/*.json 2>/dev/null | jq -rs --arg sid "${stdin_session_id:-}" --arg cwd "${current_dir:-}" '
-                [ .[] | select(type == "object" and .endedAt == null) ] as $live |
-                (($live | map(select(.sessionId == $sid and $sid != ""))) +
-                 ($live | map(select(.projectPath == $cwd and $cwd != ""))) +
-                 (if ($live | length) == 1 then $live else [] end))
+            port=$(cat "$reg"/*.json 2>/dev/null | jq -rs --arg sid "${stdin_session_id:-}" '
+                [ .[] | select(type == "object" and .endedAt == null) ]
+                | map(select(($sid | length) >= 8 and
+                             ((.sessionId // "")[0:8] == $sid[0:8])))
                 | first.port // empty' 2>/dev/null)
+            if [ -z "$port" ]; then
+                port=$(find "$reg" -name '*.json' -newermt '-120 seconds' 2>/dev/null \
+                    | xargs cat 2>/dev/null | jq -rs --arg cwd "${current_dir:-}" '
+                    [ .[] | select(type == "object" and .endedAt == null) ] as $fresh |
+                    (($fresh | map(select(.projectPath == $cwd and $cwd != ""))) +
+                     (if ($fresh | length) == 1 then $fresh else [] end))
+                    | first.port // empty' 2>/dev/null)
+            fi
         fi
     fi
 

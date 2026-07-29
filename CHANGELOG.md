@@ -11,9 +11,11 @@ the strongest signal available: the trace env cctrace exports into the
 traced process (`CCTRACE_SERVER_PORT`), the capture's CA plumbing
 (`NODE_EXTRA_CA_CERTS` under a cctrace dir), or deva's `DEVA_TRACE=1`;
 plumbing-only captures resolve the port through cctrace's live-instance
-registry — by session id, then project path, then by being the only live
-capture. No resolvable port still shows a bare `[cctrace]`: "recorded"
-matters even portless.
+registry — by session id (sid8 prefix: the registry stores ids redacted
+past the first 8 hex), then project path, then by being the only live
+capture; the fallbacks trust heartbeat-fresh entries only, since crashed
+runs leave "live" files behind. No resolvable port still shows a bare
+`[cctrace]`: "recorded" matters even portless.
 
 **Fixed: the advisor row right-aligns to line 1's actual edge.** The
 statusline runs with stdout on a pipe, where `tput cols` answers a flat
@@ -23,7 +25,7 @@ mid-line under a much longer badge cluster. The advisor now anchors on
 line 1's actual rendered width, so the second line's right edge meets
 the first's whatever the width guess was. Width detection itself also
 got honest: the controlling tty (`stty size </dev/tty`) and an inherited
-`COLUMNS` both beat `tput`'s default. 346 tests (334 statusline + 12 installer).
+`COLUMNS` both beat `tput`'s default. 348 tests (336 statusline + 12 installer).
 
 ## v0.22.0 — 2026-07-28 — the agent surface
 

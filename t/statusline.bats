@@ -2948,14 +2948,44 @@ _write_ppw_fixture() { # dir ppw
     [ "$plain" = " [cctrace:9317]" ]
 }
 
-@test "build_trace_component: registry match by session id resolves the port" {
+@test "build_trace_component: registry stores the sid REDACTED — sid8 prefix still matches" {
+    # cctrace's capture-time redaction masks session ids past the first 8 hex
+    # before anything lands on disk; the sid8 prefix is the join key.
     tmpdir=$(mktemp -d)
     mkdir -p "$tmpdir/instances"
-    printf '{"id":"r1","pid":1,"port":9319,"project":"p","projectPath":"/elsewhere","logFile":"","mode":"mitm","startedAt":"2026-01-01T00:00:00Z","sessionId":"sid-match"}' \
+    printf '{"id":"r1","pid":1,"port":9319,"project":"p","projectPath":"/elsewhere","logFile":"","mode":"mitm","startedAt":"2026-01-01T00:00:00Z","sessionId":"c3a6e0f3-****-****-****-************"}' \
         > "$tmpdir/instances/r1.json"
-    result=$( (DEVA_TRACE=1 CCTRACE_DATA_DIR="$tmpdir" stdin_session_id="sid-match" current_dir="/t"; build_trace_component) )
+    result=$( (DEVA_TRACE=1 CCTRACE_DATA_DIR="$tmpdir" stdin_session_id="c3a6e0f3-871b-4047-a282-60ca3d2244e6" current_dir="/t"; build_trace_component) )
     plain=$(strip_ansi "$result")
     [ "$plain" = " [cctrace:9319]" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_trace_component: sid8 claims its own entry even when the heartbeat looks stale" {
+    # If OUR capture died the session's proxy died with it — an identity
+    # match never needs freshness.
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/instances"
+    printf '{"id":"r1","pid":1,"port":9319,"project":"p","projectPath":"/elsewhere","logFile":"","mode":"mitm","startedAt":"2026-01-01T00:00:00Z","sessionId":"c3a6e0f3-****-****-****-************"}' \
+        > "$tmpdir/instances/r1.json"
+    touch -d '10 minutes ago' "$tmpdir/instances/r1.json"
+    result=$( (DEVA_TRACE=1 CCTRACE_DATA_DIR="$tmpdir" stdin_session_id="c3a6e0f3-871b-4047-a282-60ca3d2244e6" current_dir="/t"; build_trace_component) )
+    plain=$(strip_ansi "$result")
+    [ "$plain" = " [cctrace:9319]" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_trace_component: a stale live entry never lends its port via fallback" {
+    # Crashed captures leave non-tombstoned entries behind for up to a day;
+    # the path/only-live fallbacks trust heartbeat-fresh files only.
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/instances"
+    printf '{"id":"r1","pid":1,"port":9319,"project":"p","projectPath":"/my/proj","logFile":"","mode":"mitm","startedAt":"2026-01-01T00:00:00Z"}' \
+        > "$tmpdir/instances/r1.json"
+    touch -d '10 minutes ago' "$tmpdir/instances/r1.json"
+    result=$( (DEVA_TRACE=1 CCTRACE_DATA_DIR="$tmpdir" stdin_session_id="unseen-sid-123" current_dir="/my/proj"; build_trace_component) )
+    plain=$(strip_ansi "$result")
+    [ "$plain" = " [cctrace]" ]
     rm -rf "$tmpdir"
 }
 
