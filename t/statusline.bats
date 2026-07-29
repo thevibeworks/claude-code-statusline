@@ -2934,3 +2934,145 @@ _write_ppw_fixture() { # dir ppw
     [ "$result" = "a 5h[8%] free" ]
     rm -rf "$tmpdir"
 }
+
+# --- cctrace trace chip (left cluster) ---
+
+@test "build_trace_component: silent without any trace signal" {
+    result=$(stdin_session_id="s1" current_dir="/t"; build_trace_component)
+    [ -z "$result" ]
+}
+
+@test "build_trace_component: CCTRACE_SERVER_PORT renders the chip directly" {
+    result=$( (CCTRACE_SERVER_PORT=9317; build_trace_component) )
+    plain=$(strip_ansi "$result")
+    [ "$plain" = " [cctrace:9317]" ]
+}
+
+@test "build_trace_component: registry match by session id resolves the port" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/instances"
+    printf '{"id":"r1","pid":1,"port":9319,"project":"p","projectPath":"/elsewhere","logFile":"","mode":"mitm","startedAt":"2026-01-01T00:00:00Z","sessionId":"sid-match"}' \
+        > "$tmpdir/instances/r1.json"
+    result=$( (DEVA_TRACE=1 CCTRACE_DATA_DIR="$tmpdir" stdin_session_id="sid-match" current_dir="/t"; build_trace_component) )
+    plain=$(strip_ansi "$result")
+    [ "$plain" = " [cctrace:9319]" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_trace_component: tombstoned runs never lend their port (bare chip)" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/instances"
+    printf '{"id":"r1","pid":1,"port":9319,"project":"p","projectPath":"/t","logFile":"","mode":"mitm","startedAt":"2026-01-01T00:00:00Z","sessionId":"sid-1","endedAt":"2026-01-01T01:00:00Z"}' \
+        > "$tmpdir/instances/r1.json"
+    result=$( (DEVA_TRACE=1 CCTRACE_DATA_DIR="$tmpdir" stdin_session_id="sid-1" current_dir="/t"; build_trace_component) )
+    plain=$(strip_ansi "$result")
+    [ "$plain" = " [cctrace]" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_trace_component: NODE_EXTRA_CA_CERTS marker derives the registry dir" {
+    base=$(mktemp -d)
+    tmpdir="$base/cctrace"
+    mkdir -p "$tmpdir/mitm" "$tmpdir/instances"
+    touch "$tmpdir/mitm/ca-cert.pem"
+    printf '{"id":"r1","pid":1,"port":9321,"project":"p","projectPath":"/proj","logFile":"","mode":"mitm","startedAt":"2026-01-01T00:00:00Z","sessionId":"sid-x"}' \
+        > "$tmpdir/instances/r1.json"
+    result=$( (NODE_EXTRA_CA_CERTS="$tmpdir/mitm/ca-cert.pem" stdin_session_id="sid-x" current_dir="/t"; build_trace_component) )
+    plain=$(strip_ansi "$result")
+    [ "$plain" = " [cctrace:9321]" ]
+    rm -rf "$base"
+}
+
+@test "build_trace_component: project-path fallback when the session id is not registered yet" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/instances"
+    printf '{"id":"r1","pid":1,"port":9320,"project":"p","projectPath":"/my/proj","logFile":"","mode":"mitm","startedAt":"2026-01-01T00:00:00Z"}' \
+        > "$tmpdir/instances/r1.json"
+    printf '{"id":"r2","pid":2,"port":9325,"project":"q","projectPath":"/other","logFile":"","mode":"mitm","startedAt":"2026-01-01T00:00:00Z"}' \
+        > "$tmpdir/instances/r2.json"
+    result=$( (DEVA_TRACE=1 CCTRACE_DATA_DIR="$tmpdir" stdin_session_id="unseen" current_dir="/my/proj"; build_trace_component) )
+    plain=$(strip_ansi "$result")
+    [ "$plain" = " [cctrace:9320]" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_trace_component: two live captures with no match stay honest (bare chip)" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/instances"
+    printf '{"id":"r1","pid":1,"port":9320,"project":"p","projectPath":"/a","logFile":"","mode":"mitm","startedAt":"2026-01-01T00:00:00Z"}' \
+        > "$tmpdir/instances/r1.json"
+    printf '{"id":"r2","pid":2,"port":9325,"project":"q","projectPath":"/b","logFile":"","mode":"mitm","startedAt":"2026-01-01T00:00:00Z"}' \
+        > "$tmpdir/instances/r2.json"
+    result=$( (DEVA_TRACE=1 CCTRACE_DATA_DIR="$tmpdir" stdin_session_id="unseen" current_dir="/c"; build_trace_component) )
+    plain=$(strip_ansi "$result")
+    [ "$plain" = " [cctrace]" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_trace_component: a lone live capture is claimed without a match" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/instances"
+    printf '{"id":"r1","pid":1,"port":9322,"project":"p","projectPath":"/a","logFile":"","mode":"mitm","startedAt":"2026-01-01T00:00:00Z"}' \
+        > "$tmpdir/instances/r1.json"
+    result=$( (DEVA_TRACE=1 CCTRACE_DATA_DIR="$tmpdir" stdin_session_id="unseen" current_dir="/c"; build_trace_component) )
+    plain=$(strip_ansi "$result")
+    [ "$plain" = " [cctrace:9322]" ]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: traced session wears the chip on the left, next to path" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    out=$(echo '{"session_id":"trace-int","model":{"id":"claude-opus-4-6","display_name":"Opus"},"cwd":"/t/proj","workspace":{"current_dir":"/t/proj"},"version":"2.1.174","cost":{"total_cost_usd":0}}' \
+        | HOME="$tmpdir" CCTRACE_SERVER_PORT=9317 bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$out")
+    [[ "$plain" == "proj [cctrace:9317]"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: untraced session has no chip" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    out=$(echo '{"session_id":"trace-int2","model":{"id":"claude-opus-4-6","display_name":"Opus"},"cwd":"/t/proj","workspace":{"current_dir":"/t/proj"},"version":"2.1.174","cost":{"total_cost_usd":0}}' \
+        | HOME="$tmpdir" bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$out")
+    [[ "$plain" != *"cctrace"* ]]
+    rm -rf "$tmpdir"
+}
+
+# --- advisor row alignment (second line meets line 1's right edge) ---
+
+@test "integration: advisor row right-aligns to line 1's actual edge" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude/statusline"
+    printf '{"claudeAiOauth":{"accessToken":"tok"}}' > "$tmpdir/.claude/.credentials.json"
+    # 85% only 2h into the 5h window: pace-hot, the advisor projects the cap.
+    reset_5h=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"five_hour":{"utilization":85,"resets_at":"%s"},"seven_day":{"utilization":10},"fetched_at":%s}' \
+        "$reset_5h" "$(date +%s)" > "$tmpdir/.claude/statusline/usage.cache"
+    out=$(echo '{"session_id":"align-test","model":{"id":"claude-opus-4-6","display_name":"Opus"},"cwd":"/t/proj","workspace":{"current_dir":"/t/proj"},"version":"2.1.174","cost":{"total_cost_usd":0}}' \
+        | HOME="$tmpdir" COLUMNS=110 bash "$SCRIPT_DIR/statusline.sh" --test)
+    line1=$(strip_ansi "$(printf '%s\n' "$out" | sed -n 1p)")
+    line2=$(strip_ansi "$(printf '%s\n' "$out" | sed -n 2p)")
+    [ -n "$line2" ]
+    [ "${#line1}" -eq "${#line2}" ]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: advisor row still meets the edge when the width guess is low" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude/statusline"
+    printf '{"claudeAiOauth":{"accessToken":"tok"}}' > "$tmpdir/.claude/.credentials.json"
+    reset_5h=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"five_hour":{"utilization":85,"resets_at":"%s"},"seven_day":{"utilization":10},"fetched_at":%s}' \
+        "$reset_5h" "$(date +%s)" > "$tmpdir/.claude/statusline/usage.cache"
+    # A phantom 40-col terminal: line 1 overflows it (padding clamps to 6);
+    # the advisor must anchor on line 1's real edge, not the phantom one.
+    out=$(echo '{"session_id":"align-low","model":{"id":"claude-opus-4-6","display_name":"Opus"},"cwd":"/t/proj","workspace":{"current_dir":"/t/proj"},"version":"2.1.174","cost":{"total_cost_usd":0}}' \
+        | HOME="$tmpdir" COLUMNS=40 bash "$SCRIPT_DIR/statusline.sh" --test)
+    line1=$(strip_ansi "$(printf '%s\n' "$out" | sed -n 1p)")
+    line2=$(strip_ansi "$(printf '%s\n' "$out" | sed -n 2p)")
+    [ -n "$line2" ]
+    [ "${#line1}" -eq "${#line2}" ]
+    rm -rf "$tmpdir"
+}

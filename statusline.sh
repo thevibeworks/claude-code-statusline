@@ -451,7 +451,23 @@ get_context_limit() {
 
 debug_log "PARSED INPUT: model=$model_display (id=$model_id) cwd=$current_dir cost=$cost_usd ctx_pct=$ctx_pct exceeds_200k=$exceeds_200k api_duration_ms=$api_duration_ms"
 
-term_width=$(tput cols 2>/dev/null || echo 80)
+# Terminal width, best signal first. The statusline runs with stdout on a
+# pipe, where bare `tput cols` answers a flat 80 no matter how wide the real
+# terminal is — the controlling tty (when we still have one) and an inherited
+# COLUMNS both beat it. The advisor row additionally anchors on line 1's
+# actual rendered width (see format_output), so a wrong width degrades the
+# gap, never the alignment between the two rows.
+term_width=""
+if [ -e /dev/tty ]; then
+    term_width=$({ stty size </dev/tty; } 2>/dev/null | awk '{print $2}')
+fi
+if ! [ "$term_width" -gt 0 ] 2>/dev/null; then
+    term_width="${COLUMNS:-}"
+fi
+if ! [ "$term_width" -gt 0 ] 2>/dev/null; then
+    term_width=$(tput cols 2>/dev/null || echo 80)
+fi
+debug_log "TERM WIDTH: $term_width"
 
 # Palette is organized in three lanes so a glance is unambiguous:
 #   STATUS  (green/yellow/red) — pressure ONLY: quota, context, cache, premium
@@ -3099,6 +3115,58 @@ if [ -d "$current_dir/.git" ] || git -C "$current_dir" rev-parse --git-dir >/dev
     fi
 fi
 
+# cctrace trace chip: is this session's wire being captured, and where does
+# the live UI serve? Session identity, so it lives on the LEFT with path and
+# branch (structure lane, dim — red stays reserved for pressure). Detection,
+# strongest signal first:
+#   CCTRACE_SERVER_PORT / CCTRACE_TRACE_FILE   cctrace >= 0.29 exports trace
+#                                              identity into the child env
+#   NODE_EXTRA_CA_CERTS under a cctrace dir    older mitm captures leave only
+#                                              proxy plumbing behind
+#   DEVA_TRACE=1                               deva --trace says so outright
+# Without the port env (old cctrace), the live-instance registry
+# (<data-dir>/instances/*.json, a documented contract) is matched by this
+# session's id, then by project path, then by being the only live capture.
+# No match still shows the bare chip: "recorded" matters even portless.
+build_trace_component() {
+    local port="${CCTRACE_SERVER_PORT:-}"
+    local traced=""
+    [ -n "$port" ] && traced=1
+    [ -n "${CCTRACE_TRACE_FILE:-}" ] && traced=1
+    case "${NODE_EXTRA_CA_CERTS:-}" in
+    */cctrace/*) traced=1 ;;
+    esac
+    [ "${DEVA_TRACE:-}" = "1" ] && traced=1
+    [ -n "$traced" ] || return 0
+
+    if [ -z "$port" ]; then
+        local reg="${CCTRACE_DATA_DIR:-}"
+        if [ -z "$reg" ]; then
+            case "${NODE_EXTRA_CA_CERTS:-}" in
+            */cctrace/*) reg=$(dirname "$(dirname "$NODE_EXTRA_CA_CERTS")") ;;
+            *) reg="$CLAUDE_HOME/.local/share/cctrace" ;;
+            esac
+        fi
+        reg="$reg/instances"
+        if [ -d "$reg" ]; then
+            port=$(cat "$reg"/*.json 2>/dev/null | jq -rs --arg sid "${stdin_session_id:-}" --arg cwd "${current_dir:-}" '
+                [ .[] | select(type == "object" and .endedAt == null) ] as $live |
+                (($live | map(select(.sessionId == $sid and $sid != ""))) +
+                 ($live | map(select(.projectPath == $cwd and $cwd != ""))) +
+                 (if ($live | length) == 1 then $live else [] end))
+                | first.port // empty' 2>/dev/null)
+        fi
+    fi
+
+    if [ -n "$port" ]; then
+        echo " ${DIM}[cctrace:${port}]${RESET}"
+    else
+        echo " ${DIM}[cctrace]${RESET}"
+    fi
+}
+
+trace_info=$(build_trace_component)
+
 # settings.json .model is only a fallback for the rare case stdin carries no
 # model id — it's a static default a session can override, so it must not be
 # read (let alone preferred) when stdin already tells us the running model.
@@ -3678,8 +3746,14 @@ for item in "${order_array[@]}"; do
     esac
 done
 
+# Renders line 1 and records its actual width in line1_cols: the advisor row
+# right-aligns to THAT edge, not to term_width — when the width guess is
+# wrong (tput's flat 80 under a pipe) line 1 overflows its phantom edge, and
+# anchoring line 2 on the same phantom left it dangling mid-line.
+line1_cols=0
+
 format_output() {
-    local path_part="${DIM}${display_path}${RESET}${git_info}"
+    local path_part="${DIM}${display_path}${RESET}${git_info}${trace_info}"
     local stats_part="${right_parts}"
 
     # Strip ANSI escapes for length calculation (portable: printf %b instead of echo -e)
@@ -3690,11 +3764,13 @@ format_output() {
     "left-right")
         local padding=$((term_width - ${#path_plain} - ${#stats_plain} - 5))
         [ $padding -lt 6 ] && padding=6
+        line1_cols=$((${#path_plain} + padding + ${#stats_plain}))
         printf "%b%*s%b\n" "$path_part" $padding "" "$stats_part"
         ;;
     "right-left")
         local padding=$((term_width - ${#path_plain} - ${#stats_plain} - 5))
         [ $padding -lt 6 ] && padding=6
+        line1_cols=$((${#stats_plain} + padding + ${#path_plain}))
         printf "%b%*s%b\n" "$stats_part" $padding "" "$path_part"
         ;;
     "center")
@@ -3703,16 +3779,19 @@ format_output() {
             local left_padding=$(((term_width - ${#path_plain}) / 2))
             local right_padding=$((term_width - left_padding - ${#path_plain} - ${#stats_plain}))
             [ $right_padding -lt 2 ] && right_padding=2
+            line1_cols=$((left_padding + ${#path_plain} + right_padding + ${#stats_plain}))
             printf "%*s%b%*s%b\n" $left_padding "" "$path_part" $right_padding "" "$stats_part"
         else
             local padding=$((term_width - ${#path_plain} - ${#stats_plain} - 5))
             [ $padding -lt 6 ] && padding=6
+            line1_cols=$((${#path_plain} + padding + ${#stats_plain}))
             printf "%b%*s%b\n" "$path_part" $padding "" "$stats_part"
         fi
         ;;
     *)
         local padding=$((term_width - ${#path_plain} - ${#stats_plain} - 5))
         [ $padding -lt 6 ] && padding=6
+        line1_cols=$((${#path_plain} + padding + ${#stats_plain}))
         printf "%b%*s%b\n" "$path_part" $padding "" "$stats_part"
         ;;
     esac
@@ -3723,15 +3802,18 @@ format_output
 # Advisor row: a second stdout line renders as its own row in Claude Code's
 # status area, and printing nothing produces no row — so a quiet advisor
 # costs zero height. Single-hue by design, which keeps truncation honest.
-# Right-aligned to the same anchor the stats cluster ends at in format_output
-# (term_width - 5), so the advice sits directly beneath the usage badges it
-# interprets, stable across widths and message lengths; when the stats sit
-# left (right-left alignment) the advisor stays left with them.
+# Right-aligned to line 1's ACTUAL rendered edge (line1_cols, recorded by
+# format_output) — not to term_width, which lies under a pipe (tput says 80,
+# line 1 overflows it, and a term_width anchor left the advice dangling
+# mid-line). Anchoring on the row above keeps the advice directly beneath
+# the usage badges it interprets, whatever the width guess was; when the
+# stats sit left (right-left alignment) the advisor stays left with them.
 if [ "$advisor_display_mode" != "off" ] && [ -n "${usage_data:-}" ]; then
     advisor_line=$(build_advisor_line "$usage_data" "$advisor_display_mode" "${model_id:-$model_display}")
     if [ -n "$advisor_line" ]; then
         advisor_plain=$(printf '%b' "$advisor_line" | sed 's/\x1b\[[0-9;]*m//g')
-        advisor_max=$((term_width - 1))
+        advisor_anchor=$((line1_cols > 0 ? line1_cols : term_width - 5))
+        advisor_max=$((advisor_anchor > term_width - 1 ? advisor_anchor : term_width - 1))
         if [ "${#advisor_plain}" -gt "$advisor_max" ] 2>/dev/null && [ "$advisor_max" -gt 1 ]; then
             advisor_color=$(printf '%s' "$advisor_line" | grep -o '^\\033\[[0-9;]*m' | head -1)
             advisor_plain="${advisor_plain:0:$((advisor_max - 1))}…"
@@ -3739,7 +3821,7 @@ if [ "$advisor_display_mode" != "off" ] && [ -n "${usage_data:-}" ]; then
         fi
         advisor_pad=0
         if [ "$alignment" != "right-left" ]; then
-            advisor_pad=$((term_width - 5 - ${#advisor_plain}))
+            advisor_pad=$((advisor_anchor - ${#advisor_plain}))
             [ "$advisor_pad" -gt 0 ] 2>/dev/null || advisor_pad=0
         fi
         debug_log "ADVISOR: $advisor_plain"

@@ -19,6 +19,12 @@ export STATUSLINE_NO_FETCH
 # would add an account chip and rescope cache dirs in every integration run.
 unset DEVA_AUTH_TAG DEVA_AUTH_METHOD DEVA_AUTH_DETAILS STATUSLINE_ACCOUNT ACCOUNT_TAG
 
+# Trace identity must come from each test too: a test host running under
+# `deva --trace` / cctrace (this repo's own dev loop, literally) carries the
+# capture env and a live instance registry — leaking either in would put a
+# [cctrace:PORT] chip into every integration render.
+unset CCTRACE_SERVER_PORT CCTRACE_TRACE_FILE CCTRACE_INSTANCE_ID CCTRACE_DATA_DIR DEVA_TRACE NODE_EXTRA_CA_CERTS
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Color constants (needed by functions)
@@ -64,7 +70,7 @@ debug_log() {
 # Source individual functions by extracting them from statusline.sh.
 # This is deliberate: we test the actual production code, not copies.
 eval "$(awk '
-    /^(abbreviate_model_id|get_runtime_model|format_reset_relative|format_reset_absolute|get_reset_seconds|format_duration|should_show_extra|get_cache_health|infer_cache_ttl_class|build_cache_indicator|get_usage_color|get_seven_day_color|seven_day_elapsed|seven_day_pace|weekend_secs_ahead|get_adaptive_ttl|curl_ca_bundle|acquire_lock|reap_stale_lock|fetch_usage_for_session|merge_stdin_rate_limits|rotate_usage_log|build_seven_day_profile|seven_day_forecast|premium_band_level|abbrev_effort|effort_color|_epoch_from_ts|_fmt_epoch|render_bar|format_money_minor|oauth_token_expired|refresh_oauth_credentials_file|is_default_1m_family|get_context_limit|is_1m_model|rotate_debug_log|build_display_path|delta_flash|delta_flash_part|quota_bump_notice|record_fetch_error|fetch_error_remaining|fetch_error_badge|model_scope_abbrev|build_scoped_quota_display|build_usage_display|build_extra_usage_display|build_user_info|get_user_tier|build_advisor_line|build_advisor_fleet_hint|_seven_day_walk|forecast_pct_per_window|log_usage_snapshot|detect_session_boundary|run_usage_report|run_check|run_session_summary)\(\)/ { capture=1 }
+    /^(abbreviate_model_id|get_runtime_model|format_reset_relative|format_reset_absolute|get_reset_seconds|format_duration|should_show_extra|get_cache_health|infer_cache_ttl_class|build_cache_indicator|get_usage_color|get_seven_day_color|seven_day_elapsed|seven_day_pace|weekend_secs_ahead|get_adaptive_ttl|curl_ca_bundle|acquire_lock|reap_stale_lock|fetch_usage_for_session|merge_stdin_rate_limits|rotate_usage_log|build_seven_day_profile|seven_day_forecast|premium_band_level|abbrev_effort|effort_color|_epoch_from_ts|_fmt_epoch|render_bar|format_money_minor|oauth_token_expired|refresh_oauth_credentials_file|is_default_1m_family|get_context_limit|is_1m_model|rotate_debug_log|build_display_path|build_trace_component|delta_flash|delta_flash_part|quota_bump_notice|record_fetch_error|fetch_error_remaining|fetch_error_badge|model_scope_abbrev|build_scoped_quota_display|build_usage_display|build_extra_usage_display|build_user_info|get_user_tier|build_advisor_line|build_advisor_fleet_hint|_seven_day_walk|forecast_pct_per_window|log_usage_snapshot|detect_session_boundary|run_usage_report|run_check|run_session_summary)\(\)/ { capture=1 }
     capture { print }
     capture && /^}$/ { capture=0 }
 ' "$SCRIPT_DIR/statusline.sh")"
