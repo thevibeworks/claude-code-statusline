@@ -39,3 +39,4 @@ Key facts for agents:
 ## Optional
 
 - [Site](https://thevibeworks.github.io/claude-code-statusline/): animated demo of the line
+- [usage-insight skill](https://github.com/thevibeworks/claude-code-statusline/blob/main/skills/usage-insight/SKILL.md): teaches an agent to read the state dir and answer usage questions (install: `cp -r skills/usage-insight ~/.claude/skills/`)

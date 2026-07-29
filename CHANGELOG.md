@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.22.0 — 2026-07-28 — the agent surface
+
+**New: `skills/usage-insight` — teach Claude Code to read its own
+usage.** Three layers, one source of truth: line 1 shows the numbers,
+the advisor row says the one sentence that matters, and the skill
+carries the full conversation — "should I start a heavy task now?",
+"which account has headroom?", "what did I waste this week?". Install
+with `cp -r skills/usage-insight ~/.claude/skills/` and ask.
+
+The skill encodes the state-dir contract, the learned-forecast
+semantics, and the advisor's judgment rules — feasibility before
+advice, facts only while the ratio is unlearned, staleness said out
+loud, fresh siblings only. It runs the same `report`/`check`
+subcommands instead of re-mining, so all three layers always agree.
+Docs-only release: no script changes, test count unchanged.
+
 ## v0.21.0 — 2026-07-28 — the advisor, wired into your world
 
 **New: `statusline.sh check` — the advisor as an exit code.** The
