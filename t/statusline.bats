@@ -650,6 +650,118 @@ _write_forecast_fixture() {
     rm -rf "$tmpdir"
 }
 
+# --- widened snapshots + the waste ledger ----------------------------------
+
+@test "log_usage_snapshot: records limits, model, null prediction while unlearned" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    model_id="claude-fable-5"
+    usage='{"five_hour":{"utilization":50},"seven_day":{"utilization":40},"limits":[{"kind":"weekly_scoped","percent":97,"scope":{"model":{"display_name":"Fable"}}}]}'
+    log_usage_snapshot "sess-1" "$usage" ""
+    line=$(grep '"type":"usage"' "$tmpdir/usage.jsonl" | tail -1)
+    [ "$(echo "$line" | jq -r '.model')" = "claude-fable-5" ]
+    [ "$(echo "$line" | jq -r '.limits[0].kind')" = "weekly_scoped" ]
+    [ "$(echo "$line" | jq -r '.predicted_end')" = "null" ]
+    rm -rf "$tmpdir"
+}
+
+@test "log_usage_snapshot: stamps the learned end-of-week projection" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    model_id=""
+    printf '{"computed_at":0,"days_history":20,"recent_24h":0,"recent_48h":0,"weekday_profile":{"0":10,"1":10,"2":10,"3":10,"4":10,"5":10,"6":10}}' > "$tmpdir/forecast.cache"
+    reset=$(date -u -d '+4 days' '+%Y-%m-%dT%H:%M:%SZ')
+    usage=$(printf '{"five_hour":{"utilization":50},"seven_day":{"utilization":43,"resets_at":"%s"}}' "$reset")
+    log_usage_snapshot "sess-1" "$usage" ""
+    line=$(grep '"type":"usage"' "$tmpdir/usage.jsonl" | tail -1)
+    pe=$(echo "$line" | jq -r '.predicted_end')
+    # 43% used + 4 days x 10%/day = ~83 (walk rounding may land 82)
+    [ "$pe" -ge 82 ] && [ "$pe" -le 83 ]
+    [ "$(echo "$line" | jq -r '.model')" = "null" ]
+    rm -rf "$tmpdir"
+}
+
+# Two 7d windows (W1 closes at 62%), three 5h windows (F1 closes at 80,
+# F2 at 99.5 = capped; F3 still open). Timestamps relative to now so the
+# default cutoff keeps everything.
+_write_ledger_fixture() { # dir
+    local dir="$1" now w1 w2 f1 f2 f3
+    now=$(date +%s)
+    echo '{"account":{"uuid":"acct-A"}}' > "$dir/profile.cache"
+    w1=$(date -u -d "@$(( now - 3 * 86400 ))" '+%Y-%m-%dT%H:%M:%SZ')
+    w2=$(date -u -d "@$(( now + 4 * 86400 ))" '+%Y-%m-%dT%H:%M:%SZ')
+    f1=$(date -u -d "@$(( now - 4 * 86400 + 10800 ))" '+%Y-%m-%dT%H:%M:%SZ')
+    f2=$(date -u -d "@$(( now - 2 * 86400 + 10800 ))" '+%Y-%m-%dT%H:%M:%SZ')
+    f3=$(date -u -d "@$(( now - 86400 + 10800 ))" '+%Y-%m-%dT%H:%M:%SZ')
+    : > "$dir/usage.jsonl"
+    _lg() { # ts five five_reset seven seven_reset
+        printf '{"type":"usage","timestamp":%s,"user":{"uuid":"acct-A"},"five_hour":{"utilization":%s,"resets_at":"%s"},"seven_day":{"utilization":%s,"resets_at":"%s"}}\n' \
+            "$1" "$2" "$3" "$4" "$5" >> "$dir/usage.jsonl"
+    }
+    _lg "$(( now - 4 * 86400 ))"        30   "$f1" 55 "$w1"
+    _lg "$(( now - 4 * 86400 + 3600 ))" 80   "$f1" 62 "$w1"
+    _lg "$(( now - 2 * 86400 ))"        20   "$f2" 5  "$w2"
+    _lg "$(( now - 2 * 86400 + 3600 ))" 99.5 "$f2" 12 "$w2"
+    _lg "$(( now - 86400 ))"            10   "$f3" 20 "$w2"
+}
+
+@test "run_usage_report: ledgers closed windows and expired capacity" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    _write_ledger_fixture "$tmpdir"
+    run run_usage_report 28
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"7d windows closed: 1"* ]]
+    [[ "$output" == *"used 62%  expired 38%"* ]]
+    [[ "$output" == *"5h windows closed: 2   avg 90% at close   1 hit the cap"* ]]
+    [[ "$output" == *"still learning"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "run_usage_report: converts waste to windows once the ratio is learned" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    _write_ledger_fixture "$tmpdir"
+    printf '{"computed_at":0,"days_history":20,"recent_24h":0,"recent_48h":0,"pct_per_window":10,"weekday_profile":{"0":10,"1":10,"2":10,"3":10,"4":10,"5":10,"6":10}}' > "$tmpdir/forecast.cache"
+    reset=$(date -u -d '+4 days' '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"seven_day":{"utilization":44,"resets_at":"%s"}}' "$reset" > "$tmpdir/usage.cache"
+    run run_usage_report 28
+    [ "$status" -eq 0 ]
+    # 38% expired / 10 ppw = 3.8 windows' worth
+    [[ "$output" == *"(~3.8 x 5h windows unused)"* ]]
+    [[ "$output" == *"one full 5h window = ~10.00% of the week"* ]]
+    [[ "$output" == *"week in progress: 44% used"* ]]
+    # 44% + 4d x 10%/day: heading ~83-84%
+    [[ "$output" == *"heading ~8"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "run_usage_report: --days cutoff hides older closes; no history exits 1" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    _write_ledger_fixture "$tmpdir"
+    run run_usage_report 2
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"7d windows closed: 0"* ]]
+    empty=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$empty"
+    run run_usage_report 28
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"no usage history yet"* ]]
+    rm -rf "$tmpdir" "$empty"
+}
+
+@test "integration: statusline.sh report renders the ledger end-to-end" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/data"
+    _write_ledger_fixture "$tmpdir/data"
+    run env HOME="$tmpdir" CLAUDE_DATA_DIR="$tmpdir/data" bash "$SCRIPT_DIR/statusline.sh" report --days 14
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"usage report - default"* ]]
+    [[ "$output" == *"7d windows closed: 1"* ]]
+    rm -rf "$tmpdir"
+}
+
 _write_profile_cache() { # $1=dir $2=days_history $3=rate_all_days $4=recent24
     cat > "$1/forecast.cache" <<EOF
 {"computed_at":$(date +%s),"days_history":$2,"recent_24h":$4,"recent_48h":0,
