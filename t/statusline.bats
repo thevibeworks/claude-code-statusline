@@ -817,6 +817,62 @@ _write_ledger_fixture() { # dir
     rm -rf "$tmpdir"
 }
 
+@test "run_week: renders the 56-cell strip, day ruler, and budget line" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    reset_5h=$(date -u -d '+45 minutes' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"fetched_at":%s,"five_hour":{"utilization":20,"resets_at":"%s"},"seven_day":{"utilization":20,"resets_at":"%s"}}' \
+        "$(date +%s)" "$reset_5h" "$reset_7d" > "$tmpdir/usage.cache"
+    run run_week
+    [ "$status" -eq 0 ]
+    plain=$(strip_ansi "$output")
+    [[ "$plain" == "7d  20% "* ]]
+    # 20% used, ~28% elapsed: fill, headroom, marker, untouched — 56 cells
+    [[ "$plain" =~ █+▒+│░+ ]]
+    bar=$(echo "$plain" | head -1 | sed 's/^7d  20% //; s/ .*$//')
+    [ "$(echo "$bar" | grep -o . | wc -l)" -eq 56 ]
+    [[ "$plain" == *"'-------'-------'-------'-------'-------'-------'-------'"* ]]
+    # ruler labels: 7 weekdays and the reset target with remaining time
+    [[ "$plain" =~ -\>\ [A-Z][a-z][a-z]\ [0-9]{2}:[0-9]{2}\ \( ]]
+    [[ "$plain" == *"budget ~24x5h left"* ]]
+    [[ "$plain" != *"stale"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "run_week: usage ahead of the clock renders the hot gap after the marker" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    # 80% used, 6d left: ~14% elapsed — usage far ahead
+    reset_7d=$(date -u -d '+6 days' '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"fetched_at":%s,"five_hour":{"utilization":10},"seven_day":{"utilization":80,"resets_at":"%s"}}' \
+        "$(date +%s)" "$reset_7d" > "$tmpdir/usage.cache"
+    run run_week
+    [ "$status" -eq 0 ]
+    plain=$(strip_ansi "$output")
+    [[ "$plain" =~ █+│▓+░+ ]]
+    rm -rf "$tmpdir"
+}
+
+@test "run_week: missing cache or no active window exits 3; stale is tagged" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    run run_week
+    [ "$status" -eq 3 ]
+    [[ "$output" == "week: no usage.cache"* ]]
+    printf '{"fetched_at":%s,"five_hour":{"utilization":10}}' "$(date +%s)" > "$tmpdir/usage.cache"
+    run run_week
+    [ "$status" -eq 3 ]
+    [[ "$output" == "week: no active 7d window"* ]]
+    reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"fetched_at":%s,"seven_day":{"utilization":49,"resets_at":"%s"}}' \
+        "$(( $(date +%s) - 7200 ))" "$reset_7d" > "$tmpdir/usage.cache"
+    run run_week
+    [ "$status" -eq 0 ]
+    [[ "$(strip_ansi "$output")" == *"(stale "* ]]
+    rm -rf "$tmpdir"
+}
+
 _write_session_fixture() { # dir
     local dir="$1" now
     now=$(date +%s)
@@ -2638,7 +2694,20 @@ JSON
     reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":20,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":20,\"resets_at\":\"$reset_7d\"}}"
     plain=$(strip_ansi "$(build_advisor_line "$usage" always)")
-    [[ "$plain" =~ ^-\ ~24x5h\ left,\ even\ pace\ 3\.3%/win,\ heading\ ~70%$ ]]
+    [[ "$plain" =~ ^-\ budget\ ~24x5h\ left\ ·\ even\ 3\.3%/win\ ·\ heading\ ~70%$ ]]
+}
+
+@test "build_advisor_line: budget degrades to plain headroom in the last window" {
+    # 3h to reset = 1 ceil'd window: per-window math would just restate the
+    # headroom, so the line says it straight. Surplus kept under
+    # ADVISOR_SURPLUS_MIN_PCT — a bigger remainder belongs to the expiring
+    # surplus clause, which owns the last-day zone.
+    reset_5h=$(date -u -d '+45 minutes' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_7d=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":20,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":75,\"resets_at\":\"$reset_7d\"}}"
+    plain=$(strip_ansi "$(build_advisor_line "$usage" always)")
+    [[ "$plain" =~ ^-\ budget\ last\ window\ ·\ 25%\ left\ ·\ heading\ ~[0-9]+%$ ]]
+    [[ "$plain" != *"/win"* ]]
 }
 
 @test "build_advisor_line: hot 5h pace projects the cap wall-clock" {
