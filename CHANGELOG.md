@@ -2,15 +2,28 @@
 
 ## Unreleased
 
-**New: `week` subcommand.** The 7d window as a 56-cell timeline (8
-cells/day): fill is budget consumed on a time axis, `│` marks now, `▒`
-is headroom to the clock, `▓` is usage running ahead of it, and the day
-ruler is anchored to the account's own reset weekday — no pretending
-every week is Mon–Sun. The advisor renders underneath in always-mode.
+**New: `week` subcommand.** The 7d period drawn as its own 5h windows,
+one cell each (34 per period): `▁▂▃▄▅▆▇█` a window that ran, height =
+the 7d points it burned; `·` ran but burned under 1%; `░` unknown, no
+samples on record; `▮` the window you're in now; `▫` a window still
+ahead; `×` a window the pool won't cover at the current pace. Count
+`▮` and what follows for the budget line's own `~Nx5h left`, so the
+picture and the sentence under it are the same number.
+
+Past cells are reconstructed from `usage.jsonl` — a window keyed by
+its 5h reset (rounded: the API jitters it by microseconds, and
+`05:59:59`/`06:00:00` are one window), costed by the 7d movement
+observed inside it. `░` and `·` are deliberately different glyphs: a
+gap in the record is not an idle session, and drawing it as one is the
+lie this row must not tell. A fresh install shows an honestly unknown
+past that resolves as the store fills.
+
 The prospective glance beside `report`'s retrospective ledger, and the
-same strip claudex's `claude.py` watch mode draws, so both surfaces
-tell one story. Reads the state dir only; stale data renders but says
-so; no cache or no active window exits 3 like `check`.
+same strip claudex's `claude.py` draws — including the same wall,
+which uses the learned forecast when trained and the linear projection
+otherwise, so a wall visible on one surface is visible on the other.
+Reads the state dir only; stale data renders but says so; no cache or
+no active window exits 3 like `check`.
 
 **Changed: the calm budget line speaks the shared budget frame.**
 `- budget ~19x5h left · even 1.1%/win · heading ~52%` (was `- ~19x5h

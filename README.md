@@ -354,18 +354,32 @@ session 8f3c02aa: 3h12m, 5h +34pts, 7d +4pts, claude-fable-5
 ```
 
 `week` is the prospective glance beside `report`'s retrospective
-ledger: the 7d window as a 56-cell timeline (8 cells/day) on a day
-ruler anchored to *your* reset weekday — fill is budget consumed, `│`
-is now, `▒` headroom to the clock, `▓` usage running ahead of it. The
-advisor line renders underneath (always-mode, so calm weeks still show
-the budget). Reads the state dir only; stale data renders but says so.
+ledger: the 7d period drawn as its own 5h windows, one cell each (34
+per period, the last a 3h stub), left to right in time.
+
+| Cell | Meaning |
+|---|---|
+| `▁▂▃▄▅▆▇█` | A window that ran — height is the 7d points it burned |
+| `·` | Ran, burned under 1% |
+| `░` | Unknown: no samples on record for that window |
+| `▮` | The window you're in now |
+| `▫` | A window still ahead of you |
+| `×` | A window the pool won't cover at the current pace |
+
+**Count `▮` and what follows it and you get the budget line's own
+`~Nx5h left`.** Past cells are reconstructed from `usage.jsonl`: a
+window is keyed by its 5h reset (rounded, since the API jitters it),
+and its cost is the 7d movement observed inside it. `░` and `·` stay
+different glyphs on purpose — drawing a gap in the record as an idle
+session is the one lie this row must not tell, so a fresh install
+shows an honestly unknown past that fills in as the store grows. The
+advisor renders underneath (always-mode, so calm weeks still show the
+budget). Reads the state dir only; stale data renders but says so.
 
 ```text
 $ ~/.claude/statusline.sh week
-7d  44% ████████████████████████▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒│░
-        '-------'-------'-------'-------'-------'-------'-------'
-        Mon     Tue     Wed     Thu     Fri     Sat     Sun     -> Mon 23:59 (3h25m)
-        ! 5h caps ~20:58, 1h41m before reset; 7d resets @23:59, 56% unused — ~52% expires even at full burn
+7d  56% ▁▁▂▃▁·▂▄▁··▁▁·····▁···▂▂▄▃▂▮▫▫▫▫▫▫  30h25m   @Wed 09:00
+        - budget ~7x5h left · even 6.3%/win · heading ~68%
 ```
 
 Run it bare and it summarizes the last session in the log. Window
