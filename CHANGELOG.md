@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+**New: deadman chip — the dead man's switch becomes visible.**
+When [deadman](https://github.com/thevibeworks/deadman) has a switch armed
+for the current session, a chip joins the left lane next to the path:
+`[☠ armed 42m]` (dim) counting down to the auto-handoff, `[☠ warned 3m]`
+(yellow) once the phone warning is out, `[☠ due]` when the fire is
+imminent. The chip is a lifecycle fact about *this session*, so it lives
+with path and branch, not in the quota cluster. Absence costs nothing:
+one builtin `command -v` when the tool isn't installed, one fast file
+read (`deadman chip <session_id>`) when it is, and an unarmed session
+renders nothing at all. `--deadman off` (or `STATUSLINE_DEADMAN=off`)
+disables it. The ☠ glyph (U+2620) stays in single-column text
+presentation — no U+FE0F — so alignment math is unaffected.
+
+- Tests: 321 -> 331 (chip states, color escalation, zero-cost absence,
+  off mode, end-to-end render).
+
 ## v0.19.0 — 2026-07-28 — smart advisor line, claude-watch retired
 
 **New: the advisor — a second statusline row that interprets the badges.**

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Claude Code statusline
-# Usage: statusline.sh [--style STYLE] [--order ORDER] [--theme THEME] [--path-display TYPE] [--alignment TYPE] [--extra MODE] [--cache MODE] [--advisor MODE] [--test JSON] [--debug]
+# Usage: statusline.sh [--style STYLE] [--order ORDER] [--theme THEME] [--path-display TYPE] [--alignment TYPE] [--extra MODE] [--cache MODE] [--advisor MODE] [--deadman MODE] [--test JSON] [--debug]
 # Themes: minimal, compact, detailed, developer, manager
 # Styles: single-block, unicode-blocks, bracketed-bars, filled-dots, square-blocks, line-segments, ascii-bars, percent-only, fraction-display
 # Extra modes: auto (default, shows when quota runs out or extra >= 50%), always, on-limit, off
@@ -19,6 +19,7 @@ advisor_display_mode="auto" # auto, always, off
 context_limit_override="${CLAUDE_CONTEXT_LIMIT:-}"
 extra_display_mode="auto" # auto, always, on-limit, off
 cache_display_mode="auto" # auto, always, off
+deadman_display_mode="${STATUSLINE_DEADMAN:-auto}" # auto, off — dead man's switch chip
 test_mode=false
 test_data=""
 debug_mode=false
@@ -265,6 +266,10 @@ while [[ $# -gt 0 ]]; do
         ;;
     --advisor)
         advisor_display_mode="$2"
+        shift 2
+        ;;
+    --deadman)
+        deadman_display_mode="$2"
         shift 2
         ;;
     --test)
@@ -2837,6 +2842,34 @@ if [ -d "$current_dir/.git" ] || git -C "$current_dir" rev-parse --git-dir >/dev
     fi
 fi
 
+# Deadman chip: surfaces thevibeworks/deadman — a dead man's switch that
+# hands the session off when you stop responding. `deadman chip <sid>` is a
+# single fast file read printing `armed 42m` (counting down to the handoff),
+# `warned 3m` (phone warning sent), `due` (fire imminent/overdue), or nothing
+# when no switch is armed. The tool may not be installed at all, and absence
+# must cost nothing: the builtin `command -v` gate is the only spend before
+# bailing — no subshell, no render. Keyed on stdin_session_id (the session the
+# CLI reports for THIS render), never a cached/derived id. Armed is calm
+# bookkeeping (DIM, neutral); warned/due mean the handoff is close — STATUS-
+# lane yellow. The ☠ glyph (U+2620) is a single-column text-presentation
+# character — same rationale as CACHE_GLYPH — so the padding math holds; do
+# not add U+FE0F, which would flip it to a double-width emoji.
+build_deadman_component() {
+    if [ "$deadman_display_mode" = "off" ] || [ -z "$stdin_session_id" ]; then
+        return 0
+    fi
+    command -v deadman >/dev/null 2>&1 || return 0
+    local chip
+    chip=$(deadman chip "$stdin_session_id" 2>/dev/null) || return 0
+    [ -n "$chip" ] || return 0
+    case "$chip" in
+    armed*) echo " ${DIM}[☠ ${chip}]${RESET}" ;;
+    *)      echo " ${YELLOW}[☠ ${chip}]${RESET}" ;;
+    esac
+}
+
+deadman_info=$(build_deadman_component)
+
 # settings.json .model is only a fallback for the rare case stdin carries no
 # model id — it's a static default a session can override, so it must not be
 # read (let alone preferred) when stdin already tells us the running model.
@@ -3404,7 +3437,7 @@ for item in "${order_array[@]}"; do
 done
 
 format_output() {
-    local path_part="${DIM}${display_path}${RESET}${git_info}"
+    local path_part="${DIM}${display_path}${RESET}${git_info}${deadman_info}"
     local stats_part="${right_parts}"
 
     # Strip ANSI escapes for length calculation (portable: printf %b instead of echo -e)
