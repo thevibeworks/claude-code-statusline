@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+**New: `week` subcommand.** The 7d window as a 56-cell timeline (8
+cells/day): fill is budget consumed on a time axis, `│` marks now, `▒`
+is headroom to the clock, `▓` is usage running ahead of it, and the day
+ruler is anchored to the account's own reset weekday — no pretending
+every week is Mon–Sun. The advisor renders underneath in always-mode.
+The prospective glance beside `report`'s retrospective ledger, and the
+same strip claudex's `claude.py` watch mode draws, so both surfaces
+tell one story. Reads the state dir only; stale data renders but says
+so; no cache or no active window exits 3 like `check`.
+
+**Changed: the calm budget line speaks the shared budget frame.**
+`- budget ~19x5h left · even 1.1%/win · heading ~52%` (was `- ~19x5h
+left, even pace 1.1%/win, heading ~52%`): "budget" names the frame,
+"pace" no longer does double duty (it means usage/elapsed everywhere
+else), and in the last window — where per-window math just restates the
+headroom — it degrades to `- budget last window · 61% left · heading
+~40%`. Same frame and the same "heading" verb as claude.py's watch
+advisor, so the two surfaces never phrase one state two ways.
+
 ## v0.23.0 — 2026-07-29 — the trace chip, and a second line that holds its edge
 
 **New: cctrace trace chip.** A session whose wire is being captured by

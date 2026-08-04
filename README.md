@@ -264,7 +264,7 @@ What it says, in value order (max two clauses):
 | `! fb caps ~Wed 18:00, 1d before reset` | The running model's scoped weekly quota caps before its reset — same linear math, gates, and recovery suppression as the 7d aggregate. |
 | `! 7d dry ~Thu 09:00, 2d before reset — then extra billing` (or `then hard stop`) | The learned weekday forecast projects the quota drying up early; cold start falls back to linear pace, but only once `seven_day_pace` already warns. The tail states what actually happens at 100%. |
 | `+ 7d on pace to leave ~62% unused — go heavier` | Underuse: on pace to strand a large chunk of the subscription. The learned weekday profile speaks first — it knows *your* remaining days, so it can warn from day two; cold start falls back to linear pace past half the window. Speaks only in an engaged, unsqueezed session (5h between 25% and 80%, no pressure clause) — it reaches exactly the person who can act on it and never nags an idle one. |
-| `- ~19x5h left, even pace 1.1%/win, heading ~52%` | `--advisor always` only, when calm: the weekly budget in one breath. "heading" is the learned end-of-week projection when trained, linear once the window is a day old. |
+| `- budget ~19x5h left · even 1.1%/win · heading ~52%` | `--advisor always` only, when calm: the weekly budget in one breath — runway, what even looks like, where you land. "heading" is the learned end-of-week projection when trained, linear once the window is a day old. In the last window per-window math would just restate the headroom, so it degrades to `- budget last window · 61% left · heading ~40%`. |
 
 The 7d window gets one voice per render — surplus, dry, or underuse,
 never two that could disagree.
@@ -316,7 +316,7 @@ its reset, so usage from other devices after your last local render is
 invisible, and a week you never opened a session in never appears at
 all. The ledger reports what the log observed, nothing more.
 
-## Scripting: `check` and `session-summary`
+## Scripting: `check`, `session-summary`, and `week`
 
 The statusline never runs when you're away — exactly when expiring
 capacity needs a voice. Instead of shipping a daemon, `check` exposes
@@ -351,6 +351,21 @@ hook (it reads the hook JSON on stdin):
 
 ```text
 session 8f3c02aa: 3h12m, 5h +34pts, 7d +4pts, claude-fable-5
+```
+
+`week` is the prospective glance beside `report`'s retrospective
+ledger: the 7d window as a 56-cell timeline (8 cells/day) on a day
+ruler anchored to *your* reset weekday — fill is budget consumed, `│`
+is now, `▒` headroom to the clock, `▓` usage running ahead of it. The
+advisor line renders underneath (always-mode, so calm weeks still show
+the budget). Reads the state dir only; stale data renders but says so.
+
+```text
+$ ~/.claude/statusline.sh week
+7d  44% ████████████████████████▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒│░
+        '-------'-------'-------'-------'-------'-------'-------'
+        Mon     Tue     Wed     Thu     Fri     Sat     Sun     -> Mon 23:59 (3h25m)
+        ! 5h caps ~20:58, 1h41m before reset; 7d resets @23:59, 56% unused — ~52% expires even at full burn
 ```
 
 Run it bare and it summarizes the last session in the log. Window
