@@ -817,7 +817,7 @@ _write_ledger_fixture() { # dir
     rm -rf "$tmpdir"
 }
 
-@test "run_week: renders the 56-cell strip, day ruler, and budget line" {
+@test "run_week: renders the 34-cell window ledger, remaining/reset, budget line" {
     tmpdir=$(mktemp -d)
     CLAUDE_ACCOUNT_DIR="$tmpdir"
     reset_5h=$(date -u -d '+45 minutes' '+%Y-%m-%dT%H:%M:%SZ')
@@ -828,29 +828,81 @@ _write_ledger_fixture() { # dir
     [ "$status" -eq 0 ]
     plain=$(strip_ansi "$output")
     [[ "$plain" == "7d  20% "* ]]
-    # 20% used, ~28% elapsed: fill, headroom, marker, untouched — 56 cells
-    [[ "$plain" =~ █+▒+│░+ ]]
     bar=$(echo "$plain" | head -1 | sed 's/^7d  20% //; s/ .*$//')
-    [ "$(echo "$bar" | grep -o . | wc -l)" -eq 56 ]
-    [[ "$plain" == *"'-------'-------'-------'-------'-------'-------'-------'"* ]]
-    # ruler labels: 7 weekdays and the reset target with remaining time
-    [[ "$plain" =~ -\>\ [A-Z][a-z][a-z]\ [0-9]{2}:[0-9]{2}\ \( ]]
+    [ "$(echo "$bar" | grep -o . | wc -l)" -eq 34 ]
+    # no store: the past is honestly unknown, never drawn as idle
+    [[ "$bar" =~ ^░+▮▫+$ ]]
+    # the row carries its own remaining/reset; no ruler, no day labels
+    [[ "$plain" =~ ▫+\ +[0-9]+[dhm].*@[A-Z][a-z][a-z]\ [0-9]{2}:[0-9]{2} ]]
+    [[ "$plain" != *"'-------'"* ]]
     [[ "$plain" == *"budget ~24x5h left"* ]]
     [[ "$plain" != *"stale"* ]]
     rm -rf "$tmpdir"
 }
 
-@test "run_week: usage ahead of the clock renders the hot gap after the marker" {
+@test "run_week: cells from the now cell count the budget line's windows" {
     tmpdir=$(mktemp -d)
     CLAUDE_ACCOUNT_DIR="$tmpdir"
-    # 80% used, 6d left: ~14% elapsed — usage far ahead
+    # 55% used, 31h left -> ceil(31/5) = 7 windows: 7 cells from ▮ rightward
+    reset_7d=$(date -u -d '+31 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"fetched_at":%s,"five_hour":{"utilization":9},"seven_day":{"utilization":55,"resets_at":"%s"}}' \
+        "$(date +%s)" "$reset_7d" > "$tmpdir/usage.cache"
+    run run_week
+    [ "$status" -eq 0 ]
+    plain=$(strip_ansi "$output")
+    bar=$(echo "$plain" | head -1 | sed 's/^7d  55% //; s/ .*$//')
+    stated=$(echo "$plain" | sed -n 's/.*budget ~\([0-9]*\)x5h left.*/\1/p')
+    counted=$(echo "$bar" | grep -o '▮.*' | grep -o . | wc -l)
+    [ "$counted" -eq "$stated" ]
+    rm -rf "$tmpdir"
+}
+
+@test "run_week: a sample store resolves past windows into burn heights" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    now=$(date +%s)
+    reset_7d_epoch=$((now + 31 * 3600))
+    reset_7d=$(date -u -d "@$reset_7d_epoch" '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"fetched_at":%s,"five_hour":{"utilization":9},"seven_day":{"utilization":55,"resets_at":"%s"}}' \
+        "$now" "$reset_7d" > "$tmpdir/usage.cache"
+    # period start + slots 3..5 sampled; slot 4 ran but burned nothing
+    ps=$((reset_7d_epoch - 604800))
+    : > "$tmpdir/usage.jsonl"
+    for spec in "3 10 18" "4 18 18" "5 18 25"; do
+        set -- $spec
+        w_end=$((ps + $1 * 18000 + 18000))
+        for u in "$2" "$3"; do
+            printf '{"timestamp":%s,"five_hour":{"resets_at":"%s"},"seven_day":{"utilization":%s}}\n' \
+                "$((w_end - 18000))" "$(date -u -d "@$w_end" '+%Y-%m-%dT%H:%M:%SZ')" "$u" \
+                >> "$tmpdir/usage.jsonl"
+        done
+    done
+    run run_week
+    [ "$status" -eq 0 ]
+    plain=$(strip_ansi "$output")
+    bar=$(echo "$plain" | head -1 | sed 's/^7d  55% //; s/ .*$//')
+    [ "$(echo "$bar" | grep -o . | wc -l)" -eq 34 ]
+    # burn heights appear, slots before coverage stay unknown
+    [[ "$bar" == ░* ]]
+    [[ "$bar" =~ [▁▂▃▄▅▆▇█] ]]
+    # the zero-burn sampled window reads idle, not unknown
+    [[ "$bar" =~ [▁▂▃▄▅▆▇█]·[▁▂▃▄▅▆▇█] ]]
+    rm -rf "$tmpdir"
+}
+
+@test "run_week: burning ahead of the clock walls off the windows the pool won't cover" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    # 80% used, 6d left: ~14% elapsed — the pool dries long before reset
     reset_7d=$(date -u -d '+6 days' '+%Y-%m-%dT%H:%M:%SZ')
     printf '{"fetched_at":%s,"five_hour":{"utilization":10},"seven_day":{"utilization":80,"resets_at":"%s"}}' \
         "$(date +%s)" "$reset_7d" > "$tmpdir/usage.cache"
     run run_week
     [ "$status" -eq 0 ]
     plain=$(strip_ansi "$output")
-    [[ "$plain" =~ █+│▓+░+ ]]
+    bar=$(echo "$plain" | head -1 | sed 's/^7d  80% //; s/ .*$//')
+    # affordable windows first, then the wall — never × before ▫
+    [[ "$bar" =~ ▮▫*×+$ ]]
     rm -rf "$tmpdir"
 }
 

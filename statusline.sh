@@ -2231,13 +2231,19 @@ run_session_summary() {
     return 0
 }
 
-# `statusline.sh week` — the 7d window as a 56-cell timeline (8 cells/day):
-# fill = budget consumed on a time axis, │ = now, ▒ = headroom to the clock,
-# ▓ = usage running ahead of it, day ruler labeled from this window's own
-# reset anchor (every account's week starts on its reset weekday, not
-# Monday). The prospective glance beside report's retrospective ledger; the
-# same strip claude.py's watch mode renders, so both surfaces tell one
-# story. Reads usage.cache; stale data renders but says so.
+# `statusline.sh week` — the 7d period as its 5h windows, one cell each:
+#   ▁▂▃▄▅▆▇█  a window that ran; height = 7d points it burned
+#   ·         ran, burned under 1%
+#   ░         unknown: no samples on record for that window
+#   ▮         the window you are in now
+#   ▫         a window still ahead of you
+#   ×         a window the pool will not cover at the current pace
+# Count ▮ and what follows for the budget line's own "~Nx5h left". Past
+# cells come from usage.jsonl; unknown and idle stay different glyphs
+# because drawing a gap in the record as an idle session is the one lie
+# this row must not tell. The prospective glance beside report's
+# retrospective ledger; the same strip claude.py renders, so both
+# surfaces tell one story. Reads usage.cache; stale data renders but says so.
 run_week() {
     local uc="$CLAUDE_ACCOUNT_DIR/usage.cache"
     if [ ! -f "$uc" ]; then
@@ -2263,48 +2269,100 @@ run_week() {
     age=$((now - ${fetched:-0}))
     [ "$age" -gt 3600 ] 2>/dev/null && stale=" (stale $(format_duration $((age * 1000))))"
 
-    local width=56 elapsed time_pct cu ct
-    elapsed=$((SEVEN_DAY_WINDOW_SECS - seven_secs))
-    time_pct=$((elapsed * 100 / SEVEN_DAY_WINDOW_SECS))
-    cu=0
-    if [ "$seven_int" -gt 0 ]; then
-        cu=$((seven_int * width / 100))
-        [ "$cu" -lt 1 ] && cu=1
-        [ "$cu" -gt "$width" ] && cu=$width
-    fi
-    ct=$((time_pct * width / 100))
-    [ "$ct" -gt $((width - 1)) ] && ct=$((width - 1))
-    [ "$ct" -lt 0 ] && ct=0
+    # one cell = one 5h slot of the period (34; the last a 3h stub) on a fixed
+    # grid from the period start. Past cells carry what that window actually
+    # burned, reconstructed from usage.jsonl: a window instance is keyed by its
+    # 5h resets_at rounded to 5min (the API jitters it, and 05:59:59/06:00:00
+    # are one window), and its cost is the 7d delta observed inside it.
+    local width=34 windows period_start
+    windows=$(( (seven_secs + 17999) / 18000 ))
+    period_start=$(( now + seven_secs - SEVEN_DAY_WINDOW_SECS ))
 
-    # strip regions (multibyte glyphs: repeat in awk, slice nothing)
-    local strip
-    strip=$(awk -v cu="$cu" -v ct="$ct" -v w="$width" '
-        function rep(c, n,   i, o) { o = ""; for (i = 0; i < n; i++) o = o c; return o }
+    # slot -> observed 7d cost, plus the store's own coverage span: a slot
+    # inside the span with no samples ran idle; outside it, we simply do not
+    # know, and drawing that as idle is the one lie this row must not tell
+    local hist="" ujl="$CLAUDE_ACCOUNT_DIR/usage.jsonl"
+    if [ -f "$ujl" ]; then
+        hist=$(jq -sr --argjson ps "$period_start" --argjson w "$width" '
+            [ .[] | select(.five_hour.resets_at and .seven_day.utilization != null
+                           and .timestamp >= $ps)
+                  | { k: ((.five_hour.resets_at | sub("\\.[0-9]+";"") | sub("\\+00:00";"Z")
+                           | fromdateiso8601 | . / 300 | round * 300) - 18000),
+                      t: .timestamp, s: .seven_day.utilization } ]
+            | if length == 0 then "" else
+                (map(.t) | min) as $lo | (map(.t) | max) as $hi
+              | (group_by(.k) | map({ slot: ((.[0].k - $ps) / 18000 | floor),
+                                      cost: ((map(.s) | max) - (map(.s) | min)) })
+                 | map(select(.slot >= 0 and .slot < $w))
+                 | map("\(.slot):\(.cost)") | join(","))
+                as $cells | "\($lo) \($hi) \($cells)"
+              end' "$ujl" 2>/dev/null)
+    fi
+    local span_lo="" span_hi="" cells=""
+    [ -n "$hist" ] && read -r span_lo span_hi cells <<<"$hist"
+
+    # dry slot: where burn exhausts the pool before reset. The learned walk
+    # speaks first (gap is in HOURS before reset); with no trained forecast
+    # fall back to the linear projection claude.py's cap_eta uses, so a wall
+    # visible on one surface is visible on the other.
+    local dry=-1 dry_epoch="" walk_gap walk_end elapsed7
+    read -r walk_gap walk_end <<<"$(_seven_day_walk "$seven_int" "$seven_secs")"
+    if [ -n "$walk_gap" ] && [ "$walk_gap" != "-1" ] && [ "$walk_gap" -gt 0 ] 2>/dev/null; then
+        dry_epoch=$(( now + seven_secs - walk_gap * 3600 ))
+    elif [ "$seven_int" -gt 0 ] 2>/dev/null; then
+        elapsed7=$(( SEVEN_DAY_WINDOW_SECS - seven_secs ))
+        [ "$elapsed7" -gt 0 ] && \
+            dry_epoch=$(( now + elapsed7 * (100 - seven_int) / seven_int ))
+    fi
+    if [ -n "$dry_epoch" ] && [ "$dry_epoch" -lt $(( now + seven_secs )) ] 2>/dev/null; then
+        dry=$(( (dry_epoch - period_start) / 18000 ))
+    fi
+
+    local strip fill_color
+    fill_color=$(get_usage_color "$seven_int")
+    strip=$(awk -v w="$width" -v ps="$period_start" -v now="$now" -v dry="$dry" \
+                -v lo="${span_lo:--1}" -v hi="${span_hi:--1}" -v cells="$cells" \
+                -v C_FILL="$fill_color" -v C_DIM="$DIM" -v C_NOW="$BOLD" \
+                -v C_DRY="$RED" -v C_OFF="$RESET" '
+        function glyph(c) {
+            if (c < 1)  return "·"
+            if (c <= 2) return "▁"; if (c <= 4)  return "▂"; if (c <= 6)  return "▃"
+            if (c <= 8) return "▄"; if (c <= 11) return "▅"; if (c <= 15) return "▆"
+            if (c <= 20) return "▇"; return "█"
+        }
         BEGIN {
-            if (cu > ct) {                      # usage leads: fill runs past now
-                mid = cu - ct - 1; if (mid < 0) mid = 0
-                s = rep("█", ct) "│" rep("▓", mid)
-                used = ct + 1 + mid
-            } else {                            # time leads: headroom, then now
-                s = rep("█", cu) rep("▒", ct - cu) "│"
-                used = ct + 1
+            n = split(cells, a, ",")
+            for (i = 1; i <= n; i++) { split(a[i], kv, ":"); cost[kv[1]] = kv[2] }
+            nowslot = int((now - ps) / 18000)
+            s = ""; prev = ""
+            for (i = 0; i < w; i++) {
+                start = ps + i * 18000
+                if (i < nowslot) {
+                    # a sampled sub-1% window and an idle one both mean "cost
+                    # nothing": one glyph, one tint, no colour-only meaning
+                    if (i in cost)                              { g = glyph(cost[i]); c = (g == "·" ? C_DIM : C_FILL) }
+                    else if (lo >= 0 && lo <= start + 18000 && start <= hi) { g = "·"; c = C_DIM }
+                    else                                        { g = "░"; c = C_DIM }
+                } else if (i == nowslot)                        { g = "▮"; c = C_NOW }
+                else if (dry >= 0 && i >= dry)                  { g = "×"; c = C_DRY }
+                else                                            { g = "▫"; c = "" }
+                if (c != prev) { s = s C_OFF c; prev = c }
+                s = s g
             }
-            print s rep("░", w - used)
+            print s C_OFF
         }')
 
-    local fill_color label
-    fill_color=$(get_usage_color "$seven_int")
+    # the row carries its own remaining/reset, like every other window row:
+    # a wider bar, not a separate surface (no ruler, no day labels)
+    local label tail
     label=$(printf '7d %3d%% ' "$seven_int")
-    printf '%s%b\n' "$label" "${fill_color}${strip}${RESET}${stale}"
+    tail=$(printf '  %-8s @%s' \
+        "$(format_duration $((seven_secs * 1000)))" \
+        "$(_fmt_epoch $((now + seven_secs)) '%a %H:%M')")
+    # the strip carries its own per-role colors (burn / idle / unknown / dry)
+    printf '%s%b\n' "$label" "${strip}${DIM}${tail}${RESET}${stale}"
 
     local indent="        " # 8 = width of the "7d NNN% " label column
-    printf '%s%b\n' "$indent" "${DIM}'-------'-------'-------'-------'-------'-------'-------'${RESET}"
-    local start=$((now + seven_secs - SEVEN_DAY_WINDOW_SECS)) labels="" i
-    for i in 0 1 2 3 4 5 6; do
-        labels+=$(printf '%-8s' "$(_fmt_epoch $((start + i * 86400)) '%a')")
-    done
-    labels+="-> $(_fmt_epoch $((now + seven_secs)) '%a %H:%M') ($(format_duration $((seven_secs * 1000))))"
-    printf '%s%b\n' "$indent" "${DIM}${labels}${RESET}"
 
     # the budget line under the strip: the advisor, always-mode, so calm
     # weeks still show runway/even/heading; pressure clauses show as-is
