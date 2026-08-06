@@ -2140,6 +2140,20 @@ run_usage_report() {
     return 0
 }
 
+# Model context from the log: the newest record that actually carries a
+# model. `tail -1` alone is wrong twice over — the newest line may be a
+# session_start/session_end marker (no .model), or a cooperating
+# writer's sample (ccpace logs model:null by contract). Bounded scan:
+# 200 records is hours of history, and the answer is almost always in
+# the last few.
+last_logged_model() {
+    local jsonl="$CLAUDE_ACCOUNT_DIR/usage.jsonl"
+    [ -f "$jsonl" ] || return 0
+    tail -n 200 "$jsonl" 2>/dev/null \
+        | jq -r '.model // empty' 2>/dev/null \
+        | awk 'NF { m = $0 } END { if (m != "") print m }'
+}
+
 # `statusline.sh check` — the advisor as an exit code, for tmux segments,
 # cron notifiers, and scripts (`check || notify`). Prints the plain-text
 # advisor verdict (or "calm"/"unknown: ...") and exits:
@@ -2162,9 +2176,8 @@ run_check() {
         echo "unknown: usage.cache ${age}s stale (no active session feeding this account)"
         return 3
     fi
-    local last_model=""
-    [ -f "$CLAUDE_ACCOUNT_DIR/usage.jsonl" ] && \
-        last_model=$(tail -1 "$CLAUDE_ACCOUNT_DIR/usage.jsonl" 2>/dev/null | jq -r '.model // empty' 2>/dev/null)
+    local last_model
+    last_model=$(last_logged_model)
     local line plain
     line=$(build_advisor_line "$(cat "$uc")" auto "$last_model")
     if [ -z "$line" ]; then
@@ -2366,9 +2379,8 @@ run_week() {
 
     # the budget line under the strip: the advisor, always-mode, so calm
     # weeks still show runway/even/heading; pressure clauses show as-is
-    local last_model=""
-    [ -f "$CLAUDE_ACCOUNT_DIR/usage.jsonl" ] && \
-        last_model=$(tail -1 "$CLAUDE_ACCOUNT_DIR/usage.jsonl" 2>/dev/null | jq -r '.model // empty' 2>/dev/null)
+    local last_model
+    last_model=$(last_logged_model)
     local advisor
     advisor=$(build_advisor_line "$usage" always "$last_model")
     [ -n "$advisor" ] && printf '%s%b\n' "$indent" "$advisor"

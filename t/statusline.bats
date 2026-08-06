@@ -3227,3 +3227,46 @@ _write_ppw_fixture() { # dir ppw
     [ "${#line1}" -eq "${#line2}" ]
     rm -rf "$tmpdir"
 }
+
+# --- last_logged_model: model context survives markers and foreign samples ---
+
+@test "last_logged_model: newest record with a model wins" {
+    tmpdir=$(mktemp -d)
+    printf '%s\n' \
+        '{"type":"usage","timestamp":1,"model":"claude-opus-4-6"}' \
+        '{"type":"usage","timestamp":2,"model":"claude-sonnet-5"}' \
+        >"$tmpdir/usage.jsonl"
+    result=$(CLAUDE_ACCOUNT_DIR="$tmpdir" last_logged_model)
+    [ "$result" = "claude-sonnet-5" ]
+    rm -rf "$tmpdir"
+}
+
+@test "last_logged_model: session markers do not blank the model" {
+    tmpdir=$(mktemp -d)
+    printf '%s\n' \
+        '{"type":"usage","timestamp":1,"model":"claude-opus-4-6"}' \
+        '{"type":"session_end","session_id":"s1","timestamp":2}' \
+        '{"type":"session_start","session_id":"s2","timestamp":3}' \
+        >"$tmpdir/usage.jsonl"
+    result=$(CLAUDE_ACCOUNT_DIR="$tmpdir" last_logged_model)
+    [ "$result" = "claude-opus-4-6" ]
+    rm -rf "$tmpdir"
+}
+
+@test "last_logged_model: cooperating-writer samples (model null) are skipped" {
+    tmpdir=$(mktemp -d)
+    printf '%s\n' \
+        '{"type":"usage","timestamp":1,"model":"claude-opus-4-6"}' \
+        '{"type":"usage","timestamp":2,"source":"ccpace/0.1.1","model":null}' \
+        >"$tmpdir/usage.jsonl"
+    result=$(CLAUDE_ACCOUNT_DIR="$tmpdir" last_logged_model)
+    [ "$result" = "claude-opus-4-6" ]
+    rm -rf "$tmpdir"
+}
+
+@test "last_logged_model: no log, no model, no error" {
+    tmpdir=$(mktemp -d)
+    result=$(CLAUDE_ACCOUNT_DIR="$tmpdir" last_logged_model)
+    [ -z "$result" ]
+    rm -rf "$tmpdir"
+}
