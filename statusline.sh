@@ -1,6 +1,6 @@
 #!/bin/bash
 # Claude Code statusline
-# Usage: statusline.sh [--style STYLE] [--order ORDER] [--theme THEME] [--path-display TYPE] [--alignment TYPE] [--extra MODE] [--cache MODE] [--advisor MODE] [--test JSON] [--debug]
+# Usage: statusline.sh [report|check|session-summary|week] [--style STYLE] [--order ORDER] [--theme THEME] [--path-display TYPE] [--alignment TYPE] [--extra MODE] [--cache MODE] [--advisor MODE] [--test JSON] [--debug]
 # Themes: minimal, compact, detailed, developer, manager
 # Styles: single-block, unicode-blocks, bracketed-bars, filled-dots, square-blocks, line-segments, ascii-bars, percent-only, fraction-display
 # Extra modes: auto (default, shows when quota runs out or extra >= 50%), always, on-limit, off
@@ -238,7 +238,7 @@ debug_log() {
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-    report | check | session-summary)
+    report | check | session-summary | week)
         subcommand="$1"
         shift
         ;;
@@ -2140,6 +2140,20 @@ run_usage_report() {
     return 0
 }
 
+# Model context from the log: the newest record that actually carries a
+# model. `tail -1` alone is wrong twice over — the newest line may be a
+# session_start/session_end marker (no .model), or a cooperating
+# writer's sample (ccpace logs model:null by contract). Bounded scan:
+# 200 records is hours of history, and the answer is almost always in
+# the last few.
+last_logged_model() {
+    local jsonl="$CLAUDE_ACCOUNT_DIR/usage.jsonl"
+    [ -f "$jsonl" ] || return 0
+    tail -n 200 "$jsonl" 2>/dev/null \
+        | jq -r '.model // empty' 2>/dev/null \
+        | awk 'NF { m = $0 } END { if (m != "") print m }'
+}
+
 # `statusline.sh check` — the advisor as an exit code, for tmux segments,
 # cron notifiers, and scripts (`check || notify`). Prints the plain-text
 # advisor verdict (or "calm"/"unknown: ...") and exits:
@@ -2162,9 +2176,8 @@ run_check() {
         echo "unknown: usage.cache ${age}s stale (no active session feeding this account)"
         return 3
     fi
-    local last_model=""
-    [ -f "$CLAUDE_ACCOUNT_DIR/usage.jsonl" ] && \
-        last_model=$(tail -1 "$CLAUDE_ACCOUNT_DIR/usage.jsonl" 2>/dev/null | jq -r '.model // empty' 2>/dev/null)
+    local last_model
+    last_model=$(last_logged_model)
     local line plain
     line=$(build_advisor_line "$(cat "$uc")" auto "$last_model")
     if [ -z "$line" ]; then
@@ -2228,6 +2241,149 @@ run_session_summary() {
         return 1
     fi
     printf '%s\n' "$out"
+    return 0
+}
+
+# `statusline.sh week` — the 7d period as its 5h windows, one cell each:
+#   ▁▂▃▄▅▆▇█  a window that ran; height = 7d points it burned
+#   ·         ran, burned under 1%
+#   ░         unknown: no samples on record for that window
+#   ▮         the window you are in now
+#   ▫         a window still ahead of you
+#   ×         a window the pool will not cover at the current pace
+# Count ▮ and what follows for the budget line's own "~Nx5h left". Past
+# cells come from usage.jsonl; unknown and idle stay different glyphs
+# because drawing a gap in the record as an idle session is the one lie
+# this row must not tell. The prospective glance beside report's
+# retrospective ledger; the same strip claude.py renders, so both
+# surfaces tell one story. Reads usage.cache; stale data renders but says so.
+run_week() {
+    local uc="$CLAUDE_ACCOUNT_DIR/usage.cache"
+    if [ ! -f "$uc" ]; then
+        echo "week: no usage.cache under $CLAUDE_ACCOUNT_DIR"
+        return 3
+    fi
+    local usage seven_util seven_reset fetched
+    usage=$(cat "$uc")
+    eval "$(echo "$usage" | jq -r '
+        @sh "seven_util=\(.seven_day.utilization // 0)",
+        @sh "seven_reset=\(.seven_day.resets_at // "")",
+        @sh "fetched=\(.fetched_at // 0)"
+    ' 2>/dev/null)"
+    local seven_int seven_secs
+    seven_int=$(printf '%.0f' "$seven_util" 2>/dev/null || echo 0)
+    seven_secs=$(get_reset_seconds "$seven_reset")
+    if [ -z "$seven_secs" ] || [ "$seven_secs" -le 0 ] 2>/dev/null; then
+        echo "week: no active 7d window in usage.cache"
+        return 3
+    fi
+    local now age stale=""
+    now=$(date +%s)
+    age=$((now - ${fetched:-0}))
+    [ "$age" -gt 3600 ] 2>/dev/null && stale=" (stale $(format_duration $((age * 1000))))"
+
+    # one cell = one 5h slot of the period (34; the last a 3h stub) on a fixed
+    # grid from the period start. Past cells carry what that window actually
+    # burned, reconstructed from usage.jsonl: a window instance is keyed by its
+    # 5h resets_at rounded to 5min (the API jitters it, and 05:59:59/06:00:00
+    # are one window), and its cost is the 7d delta observed inside it.
+    local width=34 windows period_start
+    windows=$(( (seven_secs + 17999) / 18000 ))
+    period_start=$(( now + seven_secs - SEVEN_DAY_WINDOW_SECS ))
+
+    # slot -> observed 7d cost, plus the store's own coverage span: a slot
+    # inside the span with no samples ran idle; outside it, we simply do not
+    # know, and drawing that as idle is the one lie this row must not tell
+    local hist="" ujl="$CLAUDE_ACCOUNT_DIR/usage.jsonl"
+    if [ -f "$ujl" ]; then
+        hist=$(jq -sr --argjson ps "$period_start" --argjson w "$width" '
+            [ .[] | select(.five_hour.resets_at and .seven_day.utilization != null
+                           and .timestamp >= $ps)
+                  | { k: ((.five_hour.resets_at | sub("\\.[0-9]+";"") | sub("\\+00:00";"Z")
+                           | fromdateiso8601 | . / 300 | round * 300) - 18000),
+                      t: .timestamp, s: .seven_day.utilization } ]
+            | if length == 0 then "" else
+                (map(.t) | min) as $lo | (map(.t) | max) as $hi
+              | (group_by(.k) | map({ slot: ((.[0].k - $ps) / 18000 | floor),
+                                      cost: ((map(.s) | max) - (map(.s) | min)) })
+                 | map(select(.slot >= 0 and .slot < $w))
+                 | map("\(.slot):\(.cost)") | join(","))
+                as $cells | "\($lo) \($hi) \($cells)"
+              end' "$ujl" 2>/dev/null)
+    fi
+    local span_lo="" span_hi="" cells=""
+    [ -n "$hist" ] && read -r span_lo span_hi cells <<<"$hist"
+
+    # dry slot: where burn exhausts the pool before reset. The learned walk
+    # speaks first (gap is in HOURS before reset); with no trained forecast
+    # fall back to the linear projection claude.py's cap_eta uses, so a wall
+    # visible on one surface is visible on the other.
+    local dry=-1 dry_epoch="" walk_gap walk_end elapsed7
+    read -r walk_gap walk_end <<<"$(_seven_day_walk "$seven_int" "$seven_secs")"
+    if [ -n "$walk_gap" ] && [ "$walk_gap" != "-1" ] && [ "$walk_gap" -gt 0 ] 2>/dev/null; then
+        dry_epoch=$(( now + seven_secs - walk_gap * 3600 ))
+    elif [ "$seven_int" -gt 0 ] 2>/dev/null; then
+        elapsed7=$(( SEVEN_DAY_WINDOW_SECS - seven_secs ))
+        [ "$elapsed7" -gt 0 ] && \
+            dry_epoch=$(( now + elapsed7 * (100 - seven_int) / seven_int ))
+    fi
+    if [ -n "$dry_epoch" ] && [ "$dry_epoch" -lt $(( now + seven_secs )) ] 2>/dev/null; then
+        dry=$(( (dry_epoch - period_start) / 18000 ))
+    fi
+
+    local strip fill_color
+    fill_color=$(get_usage_color "$seven_int")
+    strip=$(awk -v w="$width" -v ps="$period_start" -v now="$now" -v dry="$dry" \
+                -v lo="${span_lo:--1}" -v hi="${span_hi:--1}" -v cells="$cells" \
+                -v C_FILL="$fill_color" -v C_DIM="$DIM" -v C_NOW="$BOLD" \
+                -v C_DRY="$RED" -v C_OFF="$RESET" '
+        function glyph(c) {
+            if (c < 1)  return "·"
+            if (c <= 2) return "▁"; if (c <= 4)  return "▂"; if (c <= 6)  return "▃"
+            if (c <= 8) return "▄"; if (c <= 11) return "▅"; if (c <= 15) return "▆"
+            if (c <= 20) return "▇"; return "█"
+        }
+        BEGIN {
+            n = split(cells, a, ",")
+            for (i = 1; i <= n; i++) { split(a[i], kv, ":"); cost[kv[1]] = kv[2] }
+            nowslot = int((now - ps) / 18000)
+            s = ""; prev = ""
+            for (i = 0; i < w; i++) {
+                start = ps + i * 18000
+                if (i < nowslot) {
+                    # a sampled sub-1% window and an idle one both mean "cost
+                    # nothing": one glyph, one tint, no colour-only meaning
+                    if (i in cost)                              { g = glyph(cost[i]); c = (g == "·" ? C_DIM : C_FILL) }
+                    else if (lo >= 0 && lo <= start + 18000 && start <= hi) { g = "·"; c = C_DIM }
+                    else                                        { g = "░"; c = C_DIM }
+                } else if (i == nowslot)                        { g = "▮"; c = C_NOW }
+                else if (dry >= 0 && i >= dry)                  { g = "×"; c = C_DRY }
+                else                                            { g = "▫"; c = "" }
+                if (c != prev) { s = s C_OFF c; prev = c }
+                s = s g
+            }
+            print s C_OFF
+        }')
+
+    # the row carries its own remaining/reset, like every other window row:
+    # a wider bar, not a separate surface (no ruler, no day labels)
+    local label tail
+    label=$(printf '7d %3d%% ' "$seven_int")
+    tail=$(printf '  %-8s @%s' \
+        "$(format_duration $((seven_secs * 1000)))" \
+        "$(_fmt_epoch $((now + seven_secs)) '%a %H:%M')")
+    # the strip carries its own per-role colors (burn / idle / unknown / dry)
+    printf '%s%b\n' "$label" "${strip}${DIM}${tail}${RESET}${stale}"
+
+    local indent="        " # 8 = width of the "7d NNN% " label column
+
+    # the budget line under the strip: the advisor, always-mode, so calm
+    # weeks still show runway/even/heading; pressure clauses show as-is
+    local last_model
+    last_model=$(last_logged_model)
+    local advisor
+    advisor=$(build_advisor_line "$usage" always "$last_model")
+    [ -n "$advisor" ] && printf '%s%b\n' "$indent" "$advisor"
     return 0
 }
 
@@ -2719,8 +2875,12 @@ build_advisor_fleet_hint() {
 #                                         mid-week underuse, engaged sessions
 #                                         only — reaches exactly the users
 #                                         who can act on it
-#   ~19x5h left, even pace 1.1%/win, heading ~52%
-#                                         always-mode calm line
+#   budget ~19x5h left · even 1.1%/win · heading ~52%
+#                                         always-mode calm line (shared
+#                                         budget frame with claude.py's
+#                                         watch advisor); in the last
+#                                         window: budget last window ·
+#                                         N% left · heading ~M%
 build_advisor_line() {
     local usage_data="$1" mode="${2:-auto}" current_model="${3:-}"
     [ "$mode" = "off" ] && return 0
@@ -2970,18 +3130,19 @@ build_advisor_line() {
         return 0
     fi
 
-    # Calm + always: the weekly budget in one breath. ceil'd window count so
-    # a partial window still counts as spendable; "heading ~N%" is the
+    # Calm + always: the weekly budget in one breath, in the shared budget
+    # frame (claude.py's watch advisor speaks the same sentence family):
+    # runway -> what even looks like -> where you land. Ceil'd window count
+    # so a partial window still counts as spendable; "heading ~N%" is the
     # learned end-of-week projection when trained, linear once the window is
-    # at least a day old.
+    # at least a day old. In the last window per-window math degenerates to
+    # the headroom itself, so it degrades to plain "N% left".
     if [ "$mode" = "always" ] && [ "$seven_int" -gt 0 ] && [ "$seven_int" -lt 100 ] \
        && [ -n "$seven_secs" ] && [ "$seven_secs" -gt 0 ] 2>/dev/null; then
         local windows=$(( (seven_secs + 17999) / 18000 ))
         if [ "$windows" -gt 0 ]; then
-            local even heading_part=""
-            even=$(awk -v h=$((100 - seven_int)) -v w="$windows" 'BEGIN{printf "%.1f", h/w}')
             local elapsed7=$((SEVEN_DAY_WINDOW_SECS - seven_secs))
-            local heading="" walk_gap walk_end
+            local heading="" heading_part="" walk_gap walk_end
             read -r walk_gap walk_end <<<"$(_seven_day_walk "$seven_int" "$seven_secs")"
             if [ -n "$walk_end" ]; then
                 heading="$walk_end"
@@ -2989,8 +3150,14 @@ build_advisor_line() {
                 heading=$((seven_int * SEVEN_DAY_WINDOW_SECS / elapsed7))
                 [ "$heading" -gt 100 ] && heading=100
             fi
-            [ -n "$heading" ] && heading_part=", heading ~${heading}%"
-            echo "${DIM}- ~${windows}x5h left, even pace ${even}%/win${heading_part}${RESET}"
+            [ -n "$heading" ] && heading_part=" · heading ~${heading}%"
+            if [ "$windows" -le 1 ]; then
+                echo "${DIM}- budget last window · $((100 - seven_int))% left${heading_part}${RESET}"
+            else
+                local even
+                even=$(awk -v h=$((100 - seven_int)) -v w="$windows" 'BEGIN{printf "%.1f", h/w}')
+                echo "${DIM}- budget ~${windows}x5h left · even ${even}%/win${heading_part}${RESET}"
+            fi
         fi
     fi
     return 0
@@ -3267,6 +3434,7 @@ if [ -n "$subcommand" ]; then
     report) run_usage_report "${report_days:-28}"; exit $? ;;
     check) run_check; exit $? ;;
     session-summary) run_session_summary; exit $? ;;
+    week) run_week; exit $? ;;
     esac
     exit 0
 fi

@@ -1,15 +1,44 @@
 # `~/.claude/statusline/` — state dir contract
 
-The on-disk state statusline.sh maintains, documented as a contract so
-external readers (claudex's `claude.py --watch-usage`, dashboards, ad-hoc
-`jq`) can consume it without reverse-engineering the script. statusline.sh
-is the ONLY writer; everything here is safe to read concurrently.
+The on-disk state under this dir, documented as a contract so external
+readers (dashboards, ad-hoc `jq`) and cooperating writers can consume
+it without reverse-engineering the script. Everything here is safe to
+read concurrently.
 
-- Contract version: **1** (bump on any breaking layout/field change; this
+- Contract version: **2** (bump on any breaking layout/field change; this
   file is the changelog)
 - Synced with: statusline.sh v0.22.0
 - Permissions: the script runs under `umask 077` — files are owner-only.
   Caches hold account PII (email, uuid, org names).
+
+## Cooperating writers (v2)
+
+v1 declared statusline.sh the only writer. v2 opens the dir to
+cooperating writers — tools observing the same account (first:
+[ccpace](https://github.com/thevibeworks/ccpace)) — under these rules;
+a writer that cannot honor all of them must use its own dir instead:
+
+- **Record shapes are law.** A foreign `usage` record carries the same
+  fields this doc specifies, raw API sections verbatim, epoch
+  `timestamp`, `user.uuid` set. Additions are additive-only; foreign
+  writers tag records with `source: "<tool>/<version>"` (statusline
+  omits it). Never rename or re-nest existing fields.
+- **Readers tolerate.** Unknown `type` values and unknown fields are
+  skipped, never errors. Records without `.model` (markers, foreign
+  samples) must not blank model-derived state — take the newest record
+  that has one.
+- **Rotation is shared.** 32 MiB cap, single `.1` backup, and the
+  `usage.jsonl.rotate.lock` mkdir-lock before any `mv`. Either writer
+  may rotate; readers read `.1` then current.
+- **Caches are a fetch pool.** A `usage.cache` with fresh `fetched_at`
+  is a fetch already made — use it instead of hitting the API, and do
+  not re-log a sample served from it (one observation, one record).
+  After a successful fetch, publish it back atomically (tmp + rename).
+  `profile.cache` likewise (raw profile; mtime is the fetch time,
+  24 h TTL). `*.lock` files are advisory between statusline processes;
+  cross-tool safety comes from atomic rename.
+- **Partition by uuid.** Aggregating readers (forecast, report) filter
+  on `user.uuid`, never trust directory placement alone.
 
 ## Layout
 

@@ -817,6 +817,114 @@ _write_ledger_fixture() { # dir
     rm -rf "$tmpdir"
 }
 
+@test "run_week: renders the 34-cell window ledger, remaining/reset, budget line" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    reset_5h=$(date -u -d '+45 minutes' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"fetched_at":%s,"five_hour":{"utilization":20,"resets_at":"%s"},"seven_day":{"utilization":20,"resets_at":"%s"}}' \
+        "$(date +%s)" "$reset_5h" "$reset_7d" > "$tmpdir/usage.cache"
+    run run_week
+    [ "$status" -eq 0 ]
+    plain=$(strip_ansi "$output")
+    [[ "$plain" == "7d  20% "* ]]
+    bar=$(echo "$plain" | head -1 | sed 's/^7d  20% //; s/ .*$//')
+    [ "$(echo "$bar" | grep -o . | wc -l)" -eq 34 ]
+    # no store: the past is honestly unknown, never drawn as idle
+    [[ "$bar" =~ ^░+▮▫+$ ]]
+    # the row carries its own remaining/reset; no ruler, no day labels
+    [[ "$plain" =~ ▫+\ +[0-9]+[dhm].*@[A-Z][a-z][a-z]\ [0-9]{2}:[0-9]{2} ]]
+    [[ "$plain" != *"'-------'"* ]]
+    [[ "$plain" == *"budget ~24x5h left"* ]]
+    [[ "$plain" != *"stale"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "run_week: cells from the now cell count the budget line's windows" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    # 55% used, 31h left -> ceil(31/5) = 7 windows: 7 cells from ▮ rightward
+    reset_7d=$(date -u -d '+31 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"fetched_at":%s,"five_hour":{"utilization":9},"seven_day":{"utilization":55,"resets_at":"%s"}}' \
+        "$(date +%s)" "$reset_7d" > "$tmpdir/usage.cache"
+    run run_week
+    [ "$status" -eq 0 ]
+    plain=$(strip_ansi "$output")
+    bar=$(echo "$plain" | head -1 | sed 's/^7d  55% //; s/ .*$//')
+    stated=$(echo "$plain" | sed -n 's/.*budget ~\([0-9]*\)x5h left.*/\1/p')
+    counted=$(echo "$bar" | grep -o '▮.*' | grep -o . | wc -l)
+    [ "$counted" -eq "$stated" ]
+    rm -rf "$tmpdir"
+}
+
+@test "run_week: a sample store resolves past windows into burn heights" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    now=$(date +%s)
+    reset_7d_epoch=$((now + 31 * 3600))
+    reset_7d=$(date -u -d "@$reset_7d_epoch" '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"fetched_at":%s,"five_hour":{"utilization":9},"seven_day":{"utilization":55,"resets_at":"%s"}}' \
+        "$now" "$reset_7d" > "$tmpdir/usage.cache"
+    # period start + slots 3..5 sampled; slot 4 ran but burned nothing
+    ps=$((reset_7d_epoch - 604800))
+    : > "$tmpdir/usage.jsonl"
+    for spec in "3 10 18" "4 18 18" "5 18 25"; do
+        set -- $spec
+        w_end=$((ps + $1 * 18000 + 18000))
+        for u in "$2" "$3"; do
+            printf '{"timestamp":%s,"five_hour":{"resets_at":"%s"},"seven_day":{"utilization":%s}}\n' \
+                "$((w_end - 18000))" "$(date -u -d "@$w_end" '+%Y-%m-%dT%H:%M:%SZ')" "$u" \
+                >> "$tmpdir/usage.jsonl"
+        done
+    done
+    run run_week
+    [ "$status" -eq 0 ]
+    plain=$(strip_ansi "$output")
+    bar=$(echo "$plain" | head -1 | sed 's/^7d  55% //; s/ .*$//')
+    [ "$(echo "$bar" | grep -o . | wc -l)" -eq 34 ]
+    # burn heights appear, slots before coverage stay unknown
+    [[ "$bar" == ░* ]]
+    [[ "$bar" =~ [▁▂▃▄▅▆▇█] ]]
+    # the zero-burn sampled window reads idle, not unknown
+    [[ "$bar" =~ [▁▂▃▄▅▆▇█]·[▁▂▃▄▅▆▇█] ]]
+    rm -rf "$tmpdir"
+}
+
+@test "run_week: burning ahead of the clock walls off the windows the pool won't cover" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    # 80% used, 6d left: ~14% elapsed — the pool dries long before reset
+    reset_7d=$(date -u -d '+6 days' '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"fetched_at":%s,"five_hour":{"utilization":10},"seven_day":{"utilization":80,"resets_at":"%s"}}' \
+        "$(date +%s)" "$reset_7d" > "$tmpdir/usage.cache"
+    run run_week
+    [ "$status" -eq 0 ]
+    plain=$(strip_ansi "$output")
+    bar=$(echo "$plain" | head -1 | sed 's/^7d  80% //; s/ .*$//')
+    # affordable windows first, then the wall — never × before ▫
+    [[ "$bar" =~ ▮▫*×+$ ]]
+    rm -rf "$tmpdir"
+}
+
+@test "run_week: missing cache or no active window exits 3; stale is tagged" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    run run_week
+    [ "$status" -eq 3 ]
+    [[ "$output" == "week: no usage.cache"* ]]
+    printf '{"fetched_at":%s,"five_hour":{"utilization":10}}' "$(date +%s)" > "$tmpdir/usage.cache"
+    run run_week
+    [ "$status" -eq 3 ]
+    [[ "$output" == "week: no active 7d window"* ]]
+    reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"fetched_at":%s,"seven_day":{"utilization":49,"resets_at":"%s"}}' \
+        "$(( $(date +%s) - 7200 ))" "$reset_7d" > "$tmpdir/usage.cache"
+    run run_week
+    [ "$status" -eq 0 ]
+    [[ "$(strip_ansi "$output")" == *"(stale "* ]]
+    rm -rf "$tmpdir"
+}
+
 _write_session_fixture() { # dir
     local dir="$1" now
     now=$(date +%s)
@@ -2638,7 +2746,20 @@ JSON
     reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":20,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":20,\"resets_at\":\"$reset_7d\"}}"
     plain=$(strip_ansi "$(build_advisor_line "$usage" always)")
-    [[ "$plain" =~ ^-\ ~24x5h\ left,\ even\ pace\ 3\.3%/win,\ heading\ ~70%$ ]]
+    [[ "$plain" =~ ^-\ budget\ ~24x5h\ left\ ·\ even\ 3\.3%/win\ ·\ heading\ ~70%$ ]]
+}
+
+@test "build_advisor_line: budget degrades to plain headroom in the last window" {
+    # 3h to reset = 1 ceil'd window: per-window math would just restate the
+    # headroom, so the line says it straight. Surplus kept under
+    # ADVISOR_SURPLUS_MIN_PCT — a bigger remainder belongs to the expiring
+    # surplus clause, which owns the last-day zone.
+    reset_5h=$(date -u -d '+45 minutes' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_7d=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":20,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":75,\"resets_at\":\"$reset_7d\"}}"
+    plain=$(strip_ansi "$(build_advisor_line "$usage" always)")
+    [[ "$plain" =~ ^-\ budget\ last\ window\ ·\ 25%\ left\ ·\ heading\ ~[0-9]+%$ ]]
+    [[ "$plain" != *"/win"* ]]
 }
 
 @test "build_advisor_line: hot 5h pace projects the cap wall-clock" {
@@ -3110,5 +3231,48 @@ _write_ppw_fixture() { # dir ppw
     line2=$(strip_ansi "$(printf '%s\n' "$out" | sed -n 2p)")
     [ -n "$line2" ]
     [ "${#line1}" -eq "${#line2}" ]
+    rm -rf "$tmpdir"
+}
+
+# --- last_logged_model: model context survives markers and foreign samples ---
+
+@test "last_logged_model: newest record with a model wins" {
+    tmpdir=$(mktemp -d)
+    printf '%s\n' \
+        '{"type":"usage","timestamp":1,"model":"claude-opus-4-6"}' \
+        '{"type":"usage","timestamp":2,"model":"claude-sonnet-5"}' \
+        >"$tmpdir/usage.jsonl"
+    result=$(CLAUDE_ACCOUNT_DIR="$tmpdir" last_logged_model)
+    [ "$result" = "claude-sonnet-5" ]
+    rm -rf "$tmpdir"
+}
+
+@test "last_logged_model: session markers do not blank the model" {
+    tmpdir=$(mktemp -d)
+    printf '%s\n' \
+        '{"type":"usage","timestamp":1,"model":"claude-opus-4-6"}' \
+        '{"type":"session_end","session_id":"s1","timestamp":2}' \
+        '{"type":"session_start","session_id":"s2","timestamp":3}' \
+        >"$tmpdir/usage.jsonl"
+    result=$(CLAUDE_ACCOUNT_DIR="$tmpdir" last_logged_model)
+    [ "$result" = "claude-opus-4-6" ]
+    rm -rf "$tmpdir"
+}
+
+@test "last_logged_model: cooperating-writer samples (model null) are skipped" {
+    tmpdir=$(mktemp -d)
+    printf '%s\n' \
+        '{"type":"usage","timestamp":1,"model":"claude-opus-4-6"}' \
+        '{"type":"usage","timestamp":2,"source":"ccpace/0.1.1","model":null}' \
+        >"$tmpdir/usage.jsonl"
+    result=$(CLAUDE_ACCOUNT_DIR="$tmpdir" last_logged_model)
+    [ "$result" = "claude-opus-4-6" ]
+    rm -rf "$tmpdir"
+}
+
+@test "last_logged_model: no log, no model, no error" {
+    tmpdir=$(mktemp -d)
+    result=$(CLAUDE_ACCOUNT_DIR="$tmpdir" last_logged_model)
+    [ -z "$result" ]
     rm -rf "$tmpdir"
 }

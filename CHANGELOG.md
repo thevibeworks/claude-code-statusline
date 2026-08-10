@@ -1,5 +1,52 @@
 # Changelog
 
+## Unreleased
+
+**State-dir contract v2: cooperating writers.** The state dir is now a
+versioned consumer contract — external tools (ccpace, claudex) write
+alongside the statusline instead of underneath it, and the model
+context resolves through `last_logged_model` (bounded scan that skips
+session markers and cooperating-writer `model:null` samples) instead
+of trusting the last raw line of `usage.jsonl`.
+
+**Trace chip renders the full URL.** `[cctrace:9317]` →
+`[http://localhost:9317]`, linkified by most terminals;
+`DEVA_TRACE_UI_URL` (exported by deva on traced create/reattach)
+outranks the container-side port — only the host knows the published
+port or the portless `https://cctrace.localhost` route.
+
+**New: `week` subcommand.** The 7d period drawn as its own 5h windows,
+one cell each (34 per period): `▁▂▃▄▅▆▇█` a window that ran, height =
+the 7d points it burned; `·` ran but burned under 1%; `░` unknown, no
+samples on record; `▮` the window you're in now; `▫` a window still
+ahead; `×` a window the pool won't cover at the current pace. Count
+`▮` and what follows for the budget line's own `~Nx5h left`, so the
+picture and the sentence under it are the same number.
+
+Past cells are reconstructed from `usage.jsonl` — a window keyed by
+its 5h reset (rounded: the API jitters it by microseconds, and
+`05:59:59`/`06:00:00` are one window), costed by the 7d movement
+observed inside it. `░` and `·` are deliberately different glyphs: a
+gap in the record is not an idle session, and drawing it as one is the
+lie this row must not tell. A fresh install shows an honestly unknown
+past that resolves as the store fills.
+
+The prospective glance beside `report`'s retrospective ledger, and the
+same strip claudex's `claude.py` draws — including the same wall,
+which uses the learned forecast when trained and the linear projection
+otherwise, so a wall visible on one surface is visible on the other.
+Reads the state dir only; stale data renders but says so; no cache or
+no active window exits 3 like `check`.
+
+**Changed: the calm budget line speaks the shared budget frame.**
+`- budget ~19x5h left · even 1.1%/win · heading ~52%` (was `- ~19x5h
+left, even pace 1.1%/win, heading ~52%`): "budget" names the frame,
+"pace" no longer does double duty (it means usage/elapsed everywhere
+else), and in the last window — where per-window math just restates the
+headroom — it degrades to `- budget last window · 61% left · heading
+~40%`. Same frame and the same "heading" verb as claude.py's watch
+advisor, so the two surfaces never phrase one state two ways.
+
 ## v0.23.0 — 2026-07-29 — the trace chip, and a second line that holds its edge
 
 **New: cctrace trace chip.** A session whose wire is being captured by
