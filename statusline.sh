@@ -238,8 +238,8 @@ debug_log() {
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-    report)
-        subcommand="report"
+    report | check | session-summary)
+        subcommand="$1"
         shift
         ;;
     --days)
@@ -2124,6 +2124,97 @@ run_usage_report() {
     return 0
 }
 
+# `statusline.sh check` — the advisor as an exit code, for tmux segments,
+# cron notifiers, and scripts (`check || notify`). Prints the plain-text
+# advisor verdict (or "calm"/"unknown: ...") and exits:
+#   0 calm    1 opportunity (+)    2 pressure (!)    3 unknown/stale
+# We provide the judgment; the host provides the plumbing — no daemon.
+# Model context comes from the last logged snapshot, so scoped clauses
+# know which model this account was last running.
+run_check() {
+    local uc="$CLAUDE_ACCOUNT_DIR/usage.cache"
+    if [ ! -f "$uc" ]; then
+        echo "unknown: no usage.cache under $CLAUDE_ACCOUNT_DIR"
+        return 3
+    fi
+    local fetched age
+    fetched=$(jq -r '.fetched_at // 0' "$uc" 2>/dev/null)
+    age=$(( $(date +%s) - ${fetched:-0} ))
+    if [ "$age" -gt 3600 ] 2>/dev/null; then
+        # The state-dir contract's staleness rule: >1h old means no active
+        # session feeds this account — the numbers describe the past.
+        echo "unknown: usage.cache ${age}s stale (no active session feeding this account)"
+        return 3
+    fi
+    local last_model=""
+    [ -f "$CLAUDE_ACCOUNT_DIR/usage.jsonl" ] && \
+        last_model=$(tail -1 "$CLAUDE_ACCOUNT_DIR/usage.jsonl" 2>/dev/null | jq -r '.model // empty' 2>/dev/null)
+    local line plain
+    line=$(build_advisor_line "$(cat "$uc")" auto "$last_model")
+    if [ -z "$line" ]; then
+        echo "calm"
+        return 0
+    fi
+    plain=$(printf '%b' "$line" | sed 's/\x1b\[[0-9;]*m//g')
+    printf '%s\n' "$plain"
+    case "$plain" in
+    "! "*) return 2 ;;
+    "+ "*) return 1 ;;
+    esac
+    return 0
+}
+
+# `statusline.sh session-summary` — one-line session retrospective, designed
+# as a SessionEnd hook (pipe the hook JSON in; only session_id is read).
+# Falls back to the last session in the log for manual runs. Window deltas
+# are positive-delta sums (resets ignored), the profile builder's rule, so
+# a session that straddles a 5h reset still reports what it consumed.
+run_session_summary() {
+    local sid=""
+    [ ! -t 0 ] && sid=$(cat 2>/dev/null | jq -r '.session_id // empty' 2>/dev/null)
+    local jsonl="$CLAUDE_ACCOUNT_DIR/usage.jsonl"
+    if [ -z "$sid" ] && [ -f "$jsonl" ]; then
+        sid=$(jq -r 'select((.type // "") == "usage") | .session_id // empty' "$jsonl" 2>/dev/null | tail -1)
+    fi
+    if [ -z "$sid" ]; then
+        echo "session-summary: no session id (pipe hook JSON, or log some usage first)"
+        return 1
+    fi
+    if [ ! -f "$jsonl" ] && [ ! -f "${jsonl}.1" ]; then
+        echo "session-summary: no usage log at $jsonl"
+        return 1
+    fi
+    local out
+    out=$( { cat "${jsonl}.1" 2>/dev/null; cat "$jsonl" 2>/dev/null; } | jq -r --arg s "$sid" '
+            select((.type // "") == "usage" and (.session_id // "") == $s)
+            | [.timestamp, (.five_hour.utilization // ""),
+               (.seven_day.utilization // ""), (.model // "")]
+            | @tsv' 2>/dev/null \
+        | sort -n | awk -F'\t' -v sid="${sid:0:8}" '
+        {
+            n++
+            if (first == "") first = $1
+            last = $1
+            if ($2 != "") { if (pf != "" && $2 > pf) df += $2 - pf; pf = $2 }
+            if ($3 != "") { if (ps != "" && $3 > ps) ds += $3 - ps; ps = $3 }
+            if ($4 != "") model = $4
+        }
+        END {
+            if (n == 0) exit 0
+            secs = last - first
+            h = int(secs / 3600); m = int((secs % 3600) / 60)
+            dur = (h > 0 ? h "h" m "m" : m "m")
+            printf "session %s: %s, 5h +%.0fpts, 7d +%.0fpts%s\n", \
+                sid, dur, df, ds, (model != "" ? ", " model : "")
+        }')
+    if [ -z "$out" ]; then
+        echo "session-summary: no samples for session ${sid:0:8}"
+        return 1
+    fi
+    printf '%s\n' "$out"
+    return 0
+}
+
 # Generalized change flash: signed delta between the current value and the
 # last value THIS session rendered, held for QUOTA_BUMP_NOTICE_SECS after the
 # change so the refresh right after a jump still shows it. One JSON state
@@ -3085,6 +3176,8 @@ build_1m_tag() {
 if [ -n "$subcommand" ]; then
     case "$subcommand" in
     report) run_usage_report "${report_days:-28}"; exit $? ;;
+    check) run_check; exit $? ;;
+    session-summary) run_session_summary; exit $? ;;
     esac
     exit 0
 fi

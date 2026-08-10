@@ -6,7 +6,7 @@
 > advisor second row that interprets the numbers (cap projections,
 > expiring-surplus and underuse advice, fleet relief) and a
 > `report` subcommand that ledgers what each closed window expired
-> unused. 327 bats tests, deps are jq + curl, no daemon, no telemetry.
+> unused. 334 bats tests, deps are jq + curl, no daemon, no telemetry.
 
 Key facts for agents:
 - Everything lives in `statusline.sh` (~3400 lines, plain bash). Install
@@ -33,9 +33,10 @@ Key facts for agents:
 
 - [statusline.sh](https://github.com/thevibeworks/claude-code-statusline/blob/main/statusline.sh): the entire product
 - [install.sh](https://github.com/thevibeworks/claude-code-statusline/blob/main/install.sh): installer (curl | bash entrypoint)
-- [t/statusline.bats](https://github.com/thevibeworks/claude-code-statusline/blob/main/t/statusline.bats): 315 statusline tests
+- [t/statusline.bats](https://github.com/thevibeworks/claude-code-statusline/blob/main/t/statusline.bats): 322 statusline tests
 - [t/install.bats](https://github.com/thevibeworks/claude-code-statusline/blob/main/t/install.bats): 12 installer tests
 
 ## Optional
 
 - [Site](https://thevibeworks.github.io/claude-code-statusline/): animated demo of the line
+- [usage-insight skill](https://github.com/thevibeworks/claude-code-statusline/blob/main/skills/usage-insight/SKILL.md): teaches an agent to read the state dir and answer usage questions (install: `cp -r skills/usage-insight ~/.claude/skills/`)

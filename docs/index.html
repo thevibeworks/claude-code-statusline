@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Claude Code Statusline — quota, context, cost. Live, in one bash file.</title>
-<meta name="description" content="Live 5h/7d quota with reset times, per-model weekly limits, context pressure, session cost, prompt-cache expiry detection, git activity, and a usage-advisor second row in your Claude Code prompt. One bash file, 327 tests, no daemon, no telemetry.">
+<meta name="description" content="Live 5h/7d quota with reset times, per-model weekly limits, context pressure, session cost, prompt-cache expiry detection, git activity, and a usage-advisor second row in your Claude Code prompt. One bash file, 334 tests, no daemon, no telemetry.">
 <style>
   :root {
     --bg: #0b0c0e;
@@ -130,7 +130,7 @@
     <h1>Claude Code Statusline</h1>
     <p class="sub">Quota, context, cost, model, and git — live in your Claude Code prompt.
     Know when the 5h window resets, how deep the weekly limit runs, and what this session costs, without leaving the terminal.</p>
-    <p class="facts">one bash file &middot; 327 tests &middot; deps: jq + curl &middot; no daemon &middot; no telemetry</p>
+    <p class="facts">one bash file &middot; 334 tests &middot; deps: jq + curl &middot; no daemon &middot; no telemetry</p>
 
     <div class="term">
       <div class="bar"><i></i><i></i><i></i><span>claude</span></div>
@@ -183,7 +183,7 @@
       <p>Corporate mitm proxy or a local tracer: it builds a combined CA bundle from <code>NODE_EXTRA_CA_CERTS</code> automatically, so fetches survive where plain curl dies.</p></div>
     <div class="val"><h3>Documented wire contract</h3>
       <p>The <a href="https://github.com/thevibeworks/claude-code-statusline/blob/main/docs/api/oauth-usage.md">observed <code>/api/oauth/usage</code> schema</a> is versioned in-repo and re-synced against CLI captures, so parser changes check against ground truth.</p></div>
-    <div class="val"><h3>327 tests on one bash file</h3>
+    <div class="val"><h3>334 tests on one bash file</h3>
       <p>bats suite covering quota math, lock contention (20-contender single-winner), forecast pacing, ANSI rendering, and the installer. CI on every push.</p></div>
     <div class="val"><h3>Nothing running in the background</h3>
       <p>No daemon, no telemetry, no npm. It runs when Claude Code renders the prompt, reads stdin + one cached API call, prints a line, exits.</p></div>
