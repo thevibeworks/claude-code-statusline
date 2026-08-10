@@ -264,7 +264,7 @@ What it says, in value order (max two clauses):
 | `! fb caps ~Wed 18:00, 1d before reset` | The running model's scoped weekly quota caps before its reset — same linear math, gates, and recovery suppression as the 7d aggregate. |
 | `! 7d dry ~Thu 09:00, 2d before reset — then extra billing` (or `then hard stop`) | The learned weekday forecast projects the quota drying up early; cold start falls back to linear pace, but only once `seven_day_pace` already warns. The tail states what actually happens at 100%. |
 | `+ 7d on pace to leave ~62% unused — go heavier` | Underuse: on pace to strand a large chunk of the subscription. The learned weekday profile speaks first — it knows *your* remaining days, so it can warn from day two; cold start falls back to linear pace past half the window. Speaks only in an engaged, unsqueezed session (5h between 25% and 80%, no pressure clause) — it reaches exactly the person who can act on it and never nags an idle one. |
-| `- ~19x5h left, even pace 1.1%/win, heading ~52%` | `--advisor always` only, when calm: the weekly budget in one breath. "heading" is the learned end-of-week projection when trained, linear once the window is a day old. |
+| `- budget ~19x5h left · even 1.1%/win · heading ~52%` | `--advisor always` only, when calm: the weekly budget in one breath — runway, what even looks like, where you land. "heading" is the learned end-of-week projection when trained, linear once the window is a day old. In the last window per-window math would just restate the headroom, so it degrades to `- budget last window · 61% left · heading ~40%`. |
 
 The 7d window gets one voice per render — surplus, dry, or underuse,
 never two that could disagree.
