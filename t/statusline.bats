@@ -3066,7 +3066,13 @@ _write_ppw_fixture() { # dir ppw
 @test "build_trace_component: CCTRACE_SERVER_PORT renders the chip directly" {
     result=$( (CCTRACE_SERVER_PORT=9317; build_trace_component) )
     plain=$(strip_ansi "$result")
-    [ "$plain" = " [cctrace:9317]" ]
+    [ "$plain" = " [http://localhost:9317]" ]
+}
+
+@test "build_trace_component: DEVA_TRACE_UI_URL outranks the container-side port" {
+    result=$( (DEVA_TRACE_UI_URL="https://cctrace.localhost:1355" CCTRACE_SERVER_PORT=9317; build_trace_component) )
+    plain=$(strip_ansi "$result")
+    [ "$plain" = " [https://cctrace.localhost:1355]" ]
 }
 
 @test "build_trace_component: registry stores the sid REDACTED — sid8 prefix still matches" {
@@ -3078,7 +3084,7 @@ _write_ppw_fixture() { # dir ppw
         > "$tmpdir/instances/r1.json"
     result=$( (DEVA_TRACE=1 CCTRACE_DATA_DIR="$tmpdir" stdin_session_id="c3a6e0f3-871b-4047-a282-60ca3d2244e6" current_dir="/t"; build_trace_component) )
     plain=$(strip_ansi "$result")
-    [ "$plain" = " [cctrace:9319]" ]
+    [ "$plain" = " [http://localhost:9319]" ]
     rm -rf "$tmpdir"
 }
 
@@ -3092,7 +3098,7 @@ _write_ppw_fixture() { # dir ppw
     touch -d '10 minutes ago' "$tmpdir/instances/r1.json"
     result=$( (DEVA_TRACE=1 CCTRACE_DATA_DIR="$tmpdir" stdin_session_id="c3a6e0f3-871b-4047-a282-60ca3d2244e6" current_dir="/t"; build_trace_component) )
     plain=$(strip_ansi "$result")
-    [ "$plain" = " [cctrace:9319]" ]
+    [ "$plain" = " [http://localhost:9319]" ]
     rm -rf "$tmpdir"
 }
 
@@ -3130,7 +3136,7 @@ _write_ppw_fixture() { # dir ppw
         > "$tmpdir/instances/r1.json"
     result=$( (NODE_EXTRA_CA_CERTS="$tmpdir/mitm/ca-cert.pem" stdin_session_id="sid-x" current_dir="/t"; build_trace_component) )
     plain=$(strip_ansi "$result")
-    [ "$plain" = " [cctrace:9321]" ]
+    [ "$plain" = " [http://localhost:9321]" ]
     rm -rf "$base"
 }
 
@@ -3143,7 +3149,7 @@ _write_ppw_fixture() { # dir ppw
         > "$tmpdir/instances/r2.json"
     result=$( (DEVA_TRACE=1 CCTRACE_DATA_DIR="$tmpdir" stdin_session_id="unseen" current_dir="/my/proj"; build_trace_component) )
     plain=$(strip_ansi "$result")
-    [ "$plain" = " [cctrace:9320]" ]
+    [ "$plain" = " [http://localhost:9320]" ]
     rm -rf "$tmpdir"
 }
 
@@ -3167,7 +3173,7 @@ _write_ppw_fixture() { # dir ppw
         > "$tmpdir/instances/r1.json"
     result=$( (DEVA_TRACE=1 CCTRACE_DATA_DIR="$tmpdir" stdin_session_id="unseen" current_dir="/c"; build_trace_component) )
     plain=$(strip_ansi "$result")
-    [ "$plain" = " [cctrace:9322]" ]
+    [ "$plain" = " [http://localhost:9322]" ]
     rm -rf "$tmpdir"
 }
 
@@ -3177,7 +3183,7 @@ _write_ppw_fixture() { # dir ppw
     out=$(echo '{"session_id":"trace-int","model":{"id":"claude-opus-4-6","display_name":"Opus"},"cwd":"/t/proj","workspace":{"current_dir":"/t/proj"},"version":"2.1.174","cost":{"total_cost_usd":0}}' \
         | HOME="$tmpdir" CCTRACE_SERVER_PORT=9317 bash "$SCRIPT_DIR/statusline.sh" --test)
     plain=$(strip_ansi "$out")
-    [[ "$plain" == "proj [cctrace:9317]"* ]]
+    [[ "$plain" == "proj [http://localhost:9317]"* ]]
     rm -rf "$tmpdir"
 }
 

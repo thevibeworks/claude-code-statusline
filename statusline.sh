@@ -3340,8 +3340,14 @@ build_trace_component() {
         fi
     fi
 
-    if [ -n "$port" ]; then
-        echo " ${DIM}[cctrace:${port}]${RESET}"
+    # Full URL so terminals linkify it. DEVA_TRACE_UI_URL is the
+    # host-reachable URL deva exports on create/reattach (deva#547) —
+    # the container-side port is not what the host browser can reach,
+    # so it wins over anything derived locally.
+    if [ -n "${DEVA_TRACE_UI_URL:-}" ]; then
+        echo " ${DIM}[${DEVA_TRACE_UI_URL}]${RESET}"
+    elif [ -n "$port" ]; then
+        echo " ${DIM}[http://localhost:${port}]${RESET}"
     else
         echo " ${DIM}[cctrace]${RESET}"
     fi

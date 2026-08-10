@@ -81,7 +81,7 @@ Every component earns its place:
 | Signal | Why it matters |
 |--------|----------------|
 | Path and branch | Know where Claude Code is writing. Neutral grey; a dirty branch brightens to white with a `*`. |
-| Trace chip | `[cctrace:9317]` when the session's wire is being captured by [cctrace](https://github.com/thevibeworks/cctrace) (`deva --trace`, or `cctrace` directly) — the port is the live trace UI on localhost. Session identity, so it sits on the left with path and branch, dim (red stays reserved for pressure). Detected from the trace env cctrace exports into the traced process (`CCTRACE_SERVER_PORT`), from the capture's CA plumbing (`NODE_EXTRA_CA_CERTS` under a cctrace dir), or from `DEVA_TRACE=1`; when only the plumbing is visible (older cctrace) the port resolves through cctrace's live-instance registry, matched by session id (sid8 prefix — the registry stores ids redacted), then project path, then by being the only live capture, with the fallbacks trusting heartbeat-fresh entries only. A traced session with no resolvable port still shows a bare `[cctrace]` — "recorded" matters even portless. |
+| Trace chip | `[http://localhost:9317]` when the session's wire is being captured by [cctrace](https://github.com/thevibeworks/cctrace) (`deva --trace`, or `cctrace` directly) — the full live trace UI URL, linkified by most terminals. `DEVA_TRACE_UI_URL` (exported by deva on traced create/reattach) outranks the container-side port, since only the host side knows the published port or the portless route. Session identity, so it sits on the left with path and branch, dim (red stays reserved for pressure). Detected from the trace env cctrace exports into the traced process (`CCTRACE_SERVER_PORT`), from the capture's CA plumbing (`NODE_EXTRA_CA_CERTS` under a cctrace dir), or from `DEVA_TRACE=1`; when only the plumbing is visible (older cctrace) the port resolves through cctrace's live-instance registry, matched by session id (sid8 prefix — the registry stores ids redacted), then project path, then by being the only live capture, with the fallbacks trusting heartbeat-fresh entries only. A traced session with no resolvable port still shows a bare `[cctrace]` — "recorded" matters even portless. |
 | Activity | Session diff without opening git. |
 | Time and cost | Track long sessions. Hours format above 60m (`1h30m`). |
 | Model | Abbreviated: `claude-opus-4-8` becomes `opus4.8`, `claude-fable-5` becomes `fabl5`, `claude-sonnet-5` becomes `sonnet5`. The `[1m]` tag marks a 1M-context session, detected from the window the CLI reports (`context_window_size`) — not the name — so it shows even when Claude Code strips the `[1m]` suffix (which it does since 2.1.173 whenever 1M is the default; Sonnet 5 joined Fable 5 on that path in 2.1.197). |
@@ -264,7 +264,7 @@ What it says, in value order (max two clauses):
 | `! fb caps ~Wed 18:00, 1d before reset` | The running model's scoped weekly quota caps before its reset — same linear math, gates, and recovery suppression as the 7d aggregate. |
 | `! 7d dry ~Thu 09:00, 2d before reset — then extra billing` (or `then hard stop`) | The learned weekday forecast projects the quota drying up early; cold start falls back to linear pace, but only once `seven_day_pace` already warns. The tail states what actually happens at 100%. |
 | `+ 7d on pace to leave ~62% unused — go heavier` | Underuse: on pace to strand a large chunk of the subscription. The learned weekday profile speaks first — it knows *your* remaining days, so it can warn from day two; cold start falls back to linear pace past half the window. Speaks only in an engaged, unsqueezed session (5h between 25% and 80%, no pressure clause) — it reaches exactly the person who can act on it and never nags an idle one. |
-| `- budget ~19x5h left · even 1.1%/win · heading ~52%` | `--advisor always` only, when calm: the weekly budget in one breath — runway, what even looks like, where you land. "heading" is the learned end-of-week projection when trained, linear once the window is a day old. In the last window per-window math would just restate the headroom, so it degrades to `- budget last window · 61% left · heading ~40%`. |
+| `- ~19x5h left, even pace 1.1%/win, heading ~52%` | `--advisor always` only, when calm: the weekly budget in one breath. "heading" is the learned end-of-week projection when trained, linear once the window is a day old. |
 
 The 7d window gets one voice per render — surplus, dry, or underuse,
 never two that could disagree.
@@ -316,7 +316,7 @@ its reset, so usage from other devices after your last local render is
 invisible, and a week you never opened a session in never appears at
 all. The ledger reports what the log observed, nothing more.
 
-## Scripting: `check`, `session-summary`, and `week`
+## Scripting: `check` and `session-summary`
 
 The statusline never runs when you're away — exactly when expiring
 capacity needs a voice. Instead of shipping a daemon, `check` exposes
@@ -351,35 +351,6 @@ hook (it reads the hook JSON on stdin):
 
 ```text
 session 8f3c02aa: 3h12m, 5h +34pts, 7d +4pts, claude-fable-5
-```
-
-`week` is the prospective glance beside `report`'s retrospective
-ledger: the 7d period drawn as its own 5h windows, one cell each (34
-per period, the last a 3h stub), left to right in time.
-
-| Cell | Meaning |
-|---|---|
-| `▁▂▃▄▅▆▇█` | A window that ran — height is the 7d points it burned |
-| `·` | Ran, burned under 1% |
-| `░` | Unknown: no samples on record for that window |
-| `▮` | The window you're in now |
-| `▫` | A window still ahead of you |
-| `×` | A window the pool won't cover at the current pace |
-
-**Count `▮` and what follows it and you get the budget line's own
-`~Nx5h left`.** Past cells are reconstructed from `usage.jsonl`: a
-window is keyed by its 5h reset (rounded, since the API jitters it),
-and its cost is the 7d movement observed inside it. `░` and `·` stay
-different glyphs on purpose — drawing a gap in the record as an idle
-session is the one lie this row must not tell, so a fresh install
-shows an honestly unknown past that fills in as the store grows. The
-advisor renders underneath (always-mode, so calm weeks still show the
-budget). Reads the state dir only; stale data renders but says so.
-
-```text
-$ ~/.claude/statusline.sh week
-7d  56% ▁▁▂▃▁·▂▄▁··▁▁·····▁···▂▂▄▃▂▮▫▫▫▫▫▫  30h25m   @Wed 09:00
-        - budget ~7x5h left · even 6.3%/win · heading ~68%
 ```
 
 Run it bare and it summarizes the last session in the log. Window

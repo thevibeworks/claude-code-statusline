@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+**State-dir contract v2: cooperating writers.** The state dir is now a
+versioned consumer contract — external tools (ccpace, claudex) write
+alongside the statusline instead of underneath it, and the model
+context resolves through `last_logged_model` (bounded scan that skips
+session markers and cooperating-writer `model:null` samples) instead
+of trusting the last raw line of `usage.jsonl`.
+
+**Trace chip renders the full URL.** `[cctrace:9317]` →
+`[http://localhost:9317]`, linkified by most terminals;
+`DEVA_TRACE_UI_URL` (exported by deva on traced create/reattach)
+outranks the container-side port — only the host knows the published
+port or the portless `https://cctrace.localhost` route.
+
 **New: `week` subcommand.** The 7d period drawn as its own 5h windows,
 one cell each (34 per period): `▁▂▃▄▅▆▇█` a window that ran, height =
 the 7d points it burned; `·` ran but burned under 1%; `░` unknown, no
