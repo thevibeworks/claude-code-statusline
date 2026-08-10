@@ -3378,9 +3378,9 @@ build_trace_component() {
     # the container-side port is not what the host browser can reach,
     # so it wins over anything derived locally.
     if [ -n "${DEVA_TRACE_UI_URL:-}" ]; then
-        echo " ${DIM}[${DEVA_TRACE_UI_URL}]${RESET}"
+        echo " ${DIM}[${DEVA_TRACE_UI_URL%/}/trace]${RESET}"
     elif [ -n "$port" ]; then
-        echo " ${DIM}[http://localhost:${port}]${RESET}"
+        echo " ${DIM}[http://localhost:${port}/trace]${RESET}"
     else
         echo " ${DIM}[cctrace]${RESET}"
     fi

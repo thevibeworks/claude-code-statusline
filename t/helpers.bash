@@ -27,7 +27,7 @@ unset STATUSLINE_DEADMAN
 # `deva --trace` / cctrace (this repo's own dev loop, literally) carries the
 # capture env and a live instance registry — leaking either in would put a
 # [cctrace:PORT] chip into every integration render.
-unset CCTRACE_SERVER_PORT CCTRACE_TRACE_FILE CCTRACE_INSTANCE_ID CCTRACE_DATA_DIR DEVA_TRACE NODE_EXTRA_CA_CERTS
+unset CCTRACE_SERVER_PORT CCTRACE_TRACE_FILE CCTRACE_INSTANCE_ID CCTRACE_DATA_DIR DEVA_TRACE DEVA_TRACE_UI_URL NODE_EXTRA_CA_CERTS
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
