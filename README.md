@@ -356,6 +356,25 @@ Run it bare and it summarizes the last session in the log. Window
 deltas are positive-delta sums, so a session that straddles a 5h reset
 still reports what it actually consumed.
 
+## The agent surface
+
+Three layers, one source of truth: line 1 shows the numbers, line 2
+says the one sentence that matters, and for the full conversation —
+"should I start a heavy task now?", "which account has headroom?",
+"what did I waste this week?" — there's a skill that teaches Claude
+Code itself to read the state dir:
+
+```bash
+cp -r skills/usage-insight ~/.claude/skills/
+```
+
+Then just ask. The skill knows the state-dir contract
+(`docs/api/state-dir.md`), the learned-forecast semantics
+(`pct_per_window`, weekday profile, prediction calibration), and the
+advisor's judgment rules — including the important one: never advise
+what the data can't back. It reads the same files and runs the same
+`report`/`check` subcommands, so all three layers always agree.
+
 <details><summary>OAuth and API behavior</summary>
 
 Quota, profile, and extra-usage requests use Claude Code's OAuth credentials

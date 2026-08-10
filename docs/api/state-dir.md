@@ -7,7 +7,7 @@ is the ONLY writer; everything here is safe to read concurrently.
 
 - Contract version: **1** (bump on any breaking layout/field change; this
   file is the changelog)
-- Synced with: statusline.sh v0.21.0
+- Synced with: statusline.sh v0.22.0
 - Permissions: the script runs under `umask 077` — files are owner-only.
   Caches hold account PII (email, uuid, org names).
 
