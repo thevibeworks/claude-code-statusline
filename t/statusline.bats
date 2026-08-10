@@ -650,6 +650,329 @@ _write_forecast_fixture() {
     rm -rf "$tmpdir"
 }
 
+# --- widened snapshots + the waste ledger ----------------------------------
+
+@test "log_usage_snapshot: records limits, model, null prediction while unlearned" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    model_id="claude-fable-5"
+    usage='{"five_hour":{"utilization":50},"seven_day":{"utilization":40},"limits":[{"kind":"weekly_scoped","percent":97,"scope":{"model":{"display_name":"Fable"}}}]}'
+    log_usage_snapshot "sess-1" "$usage" ""
+    line=$(grep '"type":"usage"' "$tmpdir/usage.jsonl" | tail -1)
+    [ "$(echo "$line" | jq -r '.model')" = "claude-fable-5" ]
+    [ "$(echo "$line" | jq -r '.limits[0].kind')" = "weekly_scoped" ]
+    [ "$(echo "$line" | jq -r '.predicted_end')" = "null" ]
+    rm -rf "$tmpdir"
+}
+
+@test "log_usage_snapshot: stamps the learned end-of-week projection" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    model_id=""
+    printf '{"computed_at":0,"days_history":20,"recent_24h":0,"recent_48h":0,"weekday_profile":{"0":10,"1":10,"2":10,"3":10,"4":10,"5":10,"6":10}}' > "$tmpdir/forecast.cache"
+    reset=$(date -u -d '+4 days' '+%Y-%m-%dT%H:%M:%SZ')
+    usage=$(printf '{"five_hour":{"utilization":50},"seven_day":{"utilization":43,"resets_at":"%s"}}' "$reset")
+    log_usage_snapshot "sess-1" "$usage" ""
+    line=$(grep '"type":"usage"' "$tmpdir/usage.jsonl" | tail -1)
+    pe=$(echo "$line" | jq -r '.predicted_end')
+    # 43% used + 4 days x 10%/day = ~83 (walk rounding may land 82)
+    [ "$pe" -ge 82 ] && [ "$pe" -le 83 ]
+    [ "$(echo "$line" | jq -r '.model')" = "null" ]
+    rm -rf "$tmpdir"
+}
+
+# Two 7d windows (W1 closes at 62%), three 5h windows (F1 closes at 80,
+# F2 at 99.5 = capped; F3 still open). Timestamps relative to now so the
+# default cutoff keeps everything.
+_write_ledger_fixture() { # dir
+    local dir="$1" now w1 w2 f1 f2 f3
+    now=$(date +%s)
+    echo '{"account":{"uuid":"acct-A"}}' > "$dir/profile.cache"
+    w1=$(date -u -d "@$(( now - 3 * 86400 ))" '+%Y-%m-%dT%H:%M:%SZ')
+    w2=$(date -u -d "@$(( now + 4 * 86400 ))" '+%Y-%m-%dT%H:%M:%SZ')
+    f1=$(date -u -d "@$(( now - 4 * 86400 + 10800 ))" '+%Y-%m-%dT%H:%M:%SZ')
+    f2=$(date -u -d "@$(( now - 2 * 86400 + 10800 ))" '+%Y-%m-%dT%H:%M:%SZ')
+    f3=$(date -u -d "@$(( now - 86400 + 10800 ))" '+%Y-%m-%dT%H:%M:%SZ')
+    : > "$dir/usage.jsonl"
+    _lg() { # ts five five_reset seven seven_reset
+        printf '{"type":"usage","timestamp":%s,"user":{"uuid":"acct-A"},"five_hour":{"utilization":%s,"resets_at":"%s"},"seven_day":{"utilization":%s,"resets_at":"%s"}}\n' \
+            "$1" "$2" "$3" "$4" "$5" >> "$dir/usage.jsonl"
+    }
+    _lg "$(( now - 4 * 86400 ))"        30   "$f1" 55 "$w1"
+    _lg "$(( now - 4 * 86400 + 3600 ))" 80   "$f1" 62 "$w1"
+    _lg "$(( now - 2 * 86400 ))"        20   "$f2" 5  "$w2"
+    _lg "$(( now - 2 * 86400 + 3600 ))" 99.5 "$f2" 12 "$w2"
+    _lg "$(( now - 86400 ))"            10   "$f3" 20 "$w2"
+}
+
+@test "run_usage_report: ledgers closed windows and expired capacity" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    _write_ledger_fixture "$tmpdir"
+    run run_usage_report 28
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"7d windows closed: 1"* ]]
+    [[ "$output" == *"used 62%  expired 38%"* ]]
+    [[ "$output" == *"5h windows closed: 2   avg 90% at close   1 hit the cap"* ]]
+    [[ "$output" == *"still learning"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "run_usage_report: converts waste to windows once the ratio is learned" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    _write_ledger_fixture "$tmpdir"
+    printf '{"computed_at":0,"days_history":20,"recent_24h":0,"recent_48h":0,"pct_per_window":10,"weekday_profile":{"0":10,"1":10,"2":10,"3":10,"4":10,"5":10,"6":10}}' > "$tmpdir/forecast.cache"
+    reset=$(date -u -d '+4 days' '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"seven_day":{"utilization":44,"resets_at":"%s"}}' "$reset" > "$tmpdir/usage.cache"
+    run run_usage_report 28
+    [ "$status" -eq 0 ]
+    # 38% expired / 10 ppw = 3.8 windows' worth
+    [[ "$output" == *"(~3.8 x 5h windows unused)"* ]]
+    [[ "$output" == *"one full 5h window = ~10.00% of the week"* ]]
+    [[ "$output" == *"week in progress: 44% used"* ]]
+    # 44% + 4d x 10%/day: heading ~83-84%
+    [[ "$output" == *"heading ~8"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "run_usage_report: --days cutoff hides older closes; no history exits 1" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    _write_ledger_fixture "$tmpdir"
+    run run_usage_report 2
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"7d windows closed: 0"* ]]
+    empty=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$empty"
+    run run_usage_report 28
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"no usage history yet"* ]]
+    rm -rf "$tmpdir" "$empty"
+}
+
+@test "integration: statusline.sh report renders the ledger end-to-end" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/data"
+    _write_ledger_fixture "$tmpdir/data"
+    run env HOME="$tmpdir" CLAUDE_DATA_DIR="$tmpdir/data" bash "$SCRIPT_DIR/statusline.sh" report --days 14
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"usage report - default"* ]]
+    [[ "$output" == *"7d windows closed: 1"* ]]
+    rm -rf "$tmpdir"
+}
+
+# --- check + session-summary subcommands -----------------------------------
+
+@test "run_check: calm cache prints calm and exits 0" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    reset_5h=$(date -u -d '+45 minutes' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"fetched_at":%s,"five_hour":{"utilization":20,"resets_at":"%s"},"seven_day":{"utilization":20,"resets_at":"%s"}}' \
+        "$(date +%s)" "$reset_5h" "$reset_7d" > "$tmpdir/usage.cache"
+    run run_check
+    [ "$status" -eq 0 ]
+    [ "$output" = "calm" ]
+    rm -rf "$tmpdir"
+}
+
+@test "run_check: pressure exits 2 with the plain advisor text" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    # 85% only 2h into the window: hot pace, caps before reset (pressure)
+    reset_5h=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"fetched_at":%s,"five_hour":{"utilization":85,"resets_at":"%s"},"seven_day":{"utilization":10}}' \
+        "$(date +%s)" "$reset_5h" > "$tmpdir/usage.cache"
+    run run_check
+    [ "$status" -eq 2 ]
+    [[ "$output" == "! 5h caps"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "run_check: expiring surplus exits 1 (opportunity)" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    # 5h on pace (40% at 60% elapsed), 7d resets in 10h with 56% unused
+    reset_5h=$(date -u -d '+2 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_7d=$(date -u -d '+10 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"fetched_at":%s,"five_hour":{"utilization":40,"resets_at":"%s"},"seven_day":{"utilization":44,"resets_at":"%s"}}' \
+        "$(date +%s)" "$reset_5h" "$reset_7d" > "$tmpdir/usage.cache"
+    run run_check
+    [ "$status" -eq 1 ]
+    [[ "$output" == "+ 7d resets"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "run_check: missing or stale cache exits 3" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    run run_check
+    [ "$status" -eq 3 ]
+    [[ "$output" == "unknown: no usage.cache"* ]]
+    printf '{"fetched_at":%s,"five_hour":{"utilization":85}}' "$(( $(date +%s) - 7200 ))" > "$tmpdir/usage.cache"
+    run run_check
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"stale"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "run_week: renders the 34-cell window ledger, remaining/reset, budget line" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    reset_5h=$(date -u -d '+45 minutes' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"fetched_at":%s,"five_hour":{"utilization":20,"resets_at":"%s"},"seven_day":{"utilization":20,"resets_at":"%s"}}' \
+        "$(date +%s)" "$reset_5h" "$reset_7d" > "$tmpdir/usage.cache"
+    run run_week
+    [ "$status" -eq 0 ]
+    plain=$(strip_ansi "$output")
+    [[ "$plain" == "7d  20% "* ]]
+    bar=$(echo "$plain" | head -1 | sed 's/^7d  20% //; s/ .*$//')
+    [ "$(echo "$bar" | grep -o . | wc -l)" -eq 34 ]
+    # no store: the past is honestly unknown, never drawn as idle
+    [[ "$bar" =~ ^░+▮▫+$ ]]
+    # the row carries its own remaining/reset; no ruler, no day labels
+    [[ "$plain" =~ ▫+\ +[0-9]+[dhm].*@[A-Z][a-z][a-z]\ [0-9]{2}:[0-9]{2} ]]
+    [[ "$plain" != *"'-------'"* ]]
+    [[ "$plain" == *"budget ~24x5h left"* ]]
+    [[ "$plain" != *"stale"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "run_week: cells from the now cell count the budget line's windows" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    # 55% used, 31h left -> ceil(31/5) = 7 windows: 7 cells from ▮ rightward
+    reset_7d=$(date -u -d '+31 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"fetched_at":%s,"five_hour":{"utilization":9},"seven_day":{"utilization":55,"resets_at":"%s"}}' \
+        "$(date +%s)" "$reset_7d" > "$tmpdir/usage.cache"
+    run run_week
+    [ "$status" -eq 0 ]
+    plain=$(strip_ansi "$output")
+    bar=$(echo "$plain" | head -1 | sed 's/^7d  55% //; s/ .*$//')
+    stated=$(echo "$plain" | sed -n 's/.*budget ~\([0-9]*\)x5h left.*/\1/p')
+    counted=$(echo "$bar" | grep -o '▮.*' | grep -o . | wc -l)
+    [ "$counted" -eq "$stated" ]
+    rm -rf "$tmpdir"
+}
+
+@test "run_week: a sample store resolves past windows into burn heights" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    now=$(date +%s)
+    reset_7d_epoch=$((now + 31 * 3600))
+    reset_7d=$(date -u -d "@$reset_7d_epoch" '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"fetched_at":%s,"five_hour":{"utilization":9},"seven_day":{"utilization":55,"resets_at":"%s"}}' \
+        "$now" "$reset_7d" > "$tmpdir/usage.cache"
+    # period start + slots 3..5 sampled; slot 4 ran but burned nothing
+    ps=$((reset_7d_epoch - 604800))
+    : > "$tmpdir/usage.jsonl"
+    for spec in "3 10 18" "4 18 18" "5 18 25"; do
+        set -- $spec
+        w_end=$((ps + $1 * 18000 + 18000))
+        for u in "$2" "$3"; do
+            printf '{"timestamp":%s,"five_hour":{"resets_at":"%s"},"seven_day":{"utilization":%s}}\n' \
+                "$((w_end - 18000))" "$(date -u -d "@$w_end" '+%Y-%m-%dT%H:%M:%SZ')" "$u" \
+                >> "$tmpdir/usage.jsonl"
+        done
+    done
+    run run_week
+    [ "$status" -eq 0 ]
+    plain=$(strip_ansi "$output")
+    bar=$(echo "$plain" | head -1 | sed 's/^7d  55% //; s/ .*$//')
+    [ "$(echo "$bar" | grep -o . | wc -l)" -eq 34 ]
+    # burn heights appear, slots before coverage stay unknown
+    [[ "$bar" == ░* ]]
+    [[ "$bar" =~ [▁▂▃▄▅▆▇█] ]]
+    # the zero-burn sampled window reads idle, not unknown
+    [[ "$bar" =~ [▁▂▃▄▅▆▇█]·[▁▂▃▄▅▆▇█] ]]
+    rm -rf "$tmpdir"
+}
+
+@test "run_week: burning ahead of the clock walls off the windows the pool won't cover" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    # 80% used, 6d left: ~14% elapsed — the pool dries long before reset
+    reset_7d=$(date -u -d '+6 days' '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"fetched_at":%s,"five_hour":{"utilization":10},"seven_day":{"utilization":80,"resets_at":"%s"}}' \
+        "$(date +%s)" "$reset_7d" > "$tmpdir/usage.cache"
+    run run_week
+    [ "$status" -eq 0 ]
+    plain=$(strip_ansi "$output")
+    bar=$(echo "$plain" | head -1 | sed 's/^7d  80% //; s/ .*$//')
+    # affordable windows first, then the wall — never × before ▫
+    [[ "$bar" =~ ▮▫*×+$ ]]
+    rm -rf "$tmpdir"
+}
+
+@test "run_week: missing cache or no active window exits 3; stale is tagged" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    run run_week
+    [ "$status" -eq 3 ]
+    [[ "$output" == "week: no usage.cache"* ]]
+    printf '{"fetched_at":%s,"five_hour":{"utilization":10}}' "$(date +%s)" > "$tmpdir/usage.cache"
+    run run_week
+    [ "$status" -eq 3 ]
+    [[ "$output" == "week: no active 7d window"* ]]
+    reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"fetched_at":%s,"seven_day":{"utilization":49,"resets_at":"%s"}}' \
+        "$(( $(date +%s) - 7200 ))" "$reset_7d" > "$tmpdir/usage.cache"
+    run run_week
+    [ "$status" -eq 0 ]
+    [[ "$(strip_ansi "$output")" == *"(stale "* ]]
+    rm -rf "$tmpdir"
+}
+
+_write_session_fixture() { # dir
+    local dir="$1" now
+    now=$(date +%s)
+    : > "$dir/usage.jsonl"
+    printf '{"type":"usage","session_id":"S1","timestamp":%s,"five_hour":{"utilization":10},"seven_day":{"utilization":5}}\n' "$(( now - 4000 ))" >> "$dir/usage.jsonl"
+    printf '{"type":"usage","session_id":"S1","timestamp":%s,"five_hour":{"utilization":40},"seven_day":{"utilization":7}}\n' "$(( now - 2000 ))" >> "$dir/usage.jsonl"
+    printf '{"type":"usage","session_id":"S1","timestamp":%s,"five_hour":{"utilization":70},"seven_day":{"utilization":9},"model":"claude-fable-5"}\n' "$(( now - 300 ))" >> "$dir/usage.jsonl"
+}
+
+@test "run_session_summary: summarizes the piped hook session" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    _write_session_fixture "$tmpdir"
+    out=$(printf '{"session_id":"S1"}' | run_session_summary)
+    # 3700s span, +60 five-points, +4 seven-points, model from the last sample
+    [ "$out" = "session S1: 1h1m, 5h +60pts, 7d +4pts, claude-fable-5" ]
+    rm -rf "$tmpdir"
+}
+
+@test "run_session_summary: falls back to the last logged session; unknown exits 1" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    _write_session_fixture "$tmpdir"
+    out=$(run_session_summary < /dev/null)
+    [[ "$out" == "session S1:"* ]]
+    if printf '{"session_id":"nope"}' | run_session_summary > /dev/null; then
+        false
+    fi
+    rm -rf "$tmpdir"
+}
+
+@test "integration: check and session-summary run end-to-end" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/data"
+    reset_5h=$(date -u -d '+45 minutes' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"fetched_at":%s,"five_hour":{"utilization":20,"resets_at":"%s"},"seven_day":{"utilization":20,"resets_at":"%s"}}' \
+        "$(date +%s)" "$reset_5h" "$reset_7d" > "$tmpdir/data/usage.cache"
+    _write_session_fixture "$tmpdir/data"
+    run env HOME="$tmpdir" CLAUDE_DATA_DIR="$tmpdir/data" bash "$SCRIPT_DIR/statusline.sh" check
+    [ "$status" -eq 0 ]
+    [ "$output" = "calm" ]
+    run bash -c "printf '{\"session_id\":\"S1\"}' | env HOME='$tmpdir' CLAUDE_DATA_DIR='$tmpdir/data' bash '$SCRIPT_DIR/statusline.sh' session-summary"
+    [ "$status" -eq 0 ]
+    [[ "$output" == "session S1:"* ]]
+    rm -rf "$tmpdir"
+}
+
 _write_profile_cache() { # $1=dir $2=days_history $3=rate_all_days $4=recent24
     cat > "$1/forecast.cache" <<EOF
 {"computed_at":$(date +%s),"days_history":$2,"recent_24h":$4,"recent_48h":0,
@@ -2423,7 +2746,20 @@ JSON
     reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":20,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":20,\"resets_at\":\"$reset_7d\"}}"
     plain=$(strip_ansi "$(build_advisor_line "$usage" always)")
-    [[ "$plain" =~ ^-\ ~24x5h\ left,\ even\ pace\ 3\.3%/win,\ heading\ ~70%$ ]]
+    [[ "$plain" =~ ^-\ budget\ ~24x5h\ left\ ·\ even\ 3\.3%/win\ ·\ heading\ ~70%$ ]]
+}
+
+@test "build_advisor_line: budget degrades to plain headroom in the last window" {
+    # 3h to reset = 1 ceil'd window: per-window math would just restate the
+    # headroom, so the line says it straight. Surplus kept under
+    # ADVISOR_SURPLUS_MIN_PCT — a bigger remainder belongs to the expiring
+    # surplus clause, which owns the last-day zone.
+    reset_5h=$(date -u -d '+45 minutes' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_7d=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":20,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":75,\"resets_at\":\"$reset_7d\"}}"
+    plain=$(strip_ansi "$(build_advisor_line "$usage" always)")
+    [[ "$plain" =~ ^-\ budget\ last\ window\ ·\ 25%\ left\ ·\ heading\ ~[0-9]+%$ ]]
+    [[ "$plain" != *"/win"* ]]
 }
 
 @test "build_advisor_line: hot 5h pace projects the cap wall-clock" {
@@ -2829,5 +3165,226 @@ make_deadman_shim() { # $1=tmpdir $2=chip output
     out=$(echo '{"session_id":"dm-int-off","model":{"id":"claude-opus-4-6","display_name":"Opus"},"cwd":"/t","workspace":{"current_dir":"/t"},"version":"2.1.174","cost":{"total_cost_usd":0}}' \
         | PATH="$tmpdir/bin:$PATH" bash "$SCRIPT_DIR/statusline.sh" --test --deadman off)
     [[ "$(strip_ansi "$out")" != *"☠"* ]]
+    rm -rf "$tmpdir"
+}
+
+# --- cctrace trace chip (left cluster) ---
+
+@test "build_trace_component: silent without any trace signal" {
+    result=$(stdin_session_id="s1" current_dir="/t"; build_trace_component)
+    [ -z "$result" ]
+}
+
+@test "build_trace_component: CCTRACE_SERVER_PORT renders the chip directly" {
+    result=$( (CCTRACE_SERVER_PORT=9317; build_trace_component) )
+    plain=$(strip_ansi "$result")
+    [ "$plain" = " [http://localhost:9317]" ]
+}
+
+@test "build_trace_component: DEVA_TRACE_UI_URL outranks the container-side port" {
+    result=$( (DEVA_TRACE_UI_URL="https://cctrace.localhost:1355" CCTRACE_SERVER_PORT=9317; build_trace_component) )
+    plain=$(strip_ansi "$result")
+    [ "$plain" = " [https://cctrace.localhost:1355]" ]
+}
+
+@test "build_trace_component: registry stores the sid REDACTED — sid8 prefix still matches" {
+    # cctrace's capture-time redaction masks session ids past the first 8 hex
+    # before anything lands on disk; the sid8 prefix is the join key.
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/instances"
+    printf '{"id":"r1","pid":1,"port":9319,"project":"p","projectPath":"/elsewhere","logFile":"","mode":"mitm","startedAt":"2026-01-01T00:00:00Z","sessionId":"c3a6e0f3-****-****-****-************"}' \
+        > "$tmpdir/instances/r1.json"
+    result=$( (DEVA_TRACE=1 CCTRACE_DATA_DIR="$tmpdir" stdin_session_id="c3a6e0f3-871b-4047-a282-60ca3d2244e6" current_dir="/t"; build_trace_component) )
+    plain=$(strip_ansi "$result")
+    [ "$plain" = " [http://localhost:9319]" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_trace_component: sid8 claims its own entry even when the heartbeat looks stale" {
+    # If OUR capture died the session's proxy died with it — an identity
+    # match never needs freshness.
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/instances"
+    printf '{"id":"r1","pid":1,"port":9319,"project":"p","projectPath":"/elsewhere","logFile":"","mode":"mitm","startedAt":"2026-01-01T00:00:00Z","sessionId":"c3a6e0f3-****-****-****-************"}' \
+        > "$tmpdir/instances/r1.json"
+    touch -d '10 minutes ago' "$tmpdir/instances/r1.json"
+    result=$( (DEVA_TRACE=1 CCTRACE_DATA_DIR="$tmpdir" stdin_session_id="c3a6e0f3-871b-4047-a282-60ca3d2244e6" current_dir="/t"; build_trace_component) )
+    plain=$(strip_ansi "$result")
+    [ "$plain" = " [http://localhost:9319]" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_trace_component: a stale live entry never lends its port via fallback" {
+    # Crashed captures leave non-tombstoned entries behind for up to a day;
+    # the path/only-live fallbacks trust heartbeat-fresh files only.
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/instances"
+    printf '{"id":"r1","pid":1,"port":9319,"project":"p","projectPath":"/my/proj","logFile":"","mode":"mitm","startedAt":"2026-01-01T00:00:00Z"}' \
+        > "$tmpdir/instances/r1.json"
+    touch -d '10 minutes ago' "$tmpdir/instances/r1.json"
+    result=$( (DEVA_TRACE=1 CCTRACE_DATA_DIR="$tmpdir" stdin_session_id="unseen-sid-123" current_dir="/my/proj"; build_trace_component) )
+    plain=$(strip_ansi "$result")
+    [ "$plain" = " [cctrace]" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_trace_component: tombstoned runs never lend their port (bare chip)" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/instances"
+    printf '{"id":"r1","pid":1,"port":9319,"project":"p","projectPath":"/t","logFile":"","mode":"mitm","startedAt":"2026-01-01T00:00:00Z","sessionId":"sid-1","endedAt":"2026-01-01T01:00:00Z"}' \
+        > "$tmpdir/instances/r1.json"
+    result=$( (DEVA_TRACE=1 CCTRACE_DATA_DIR="$tmpdir" stdin_session_id="sid-1" current_dir="/t"; build_trace_component) )
+    plain=$(strip_ansi "$result")
+    [ "$plain" = " [cctrace]" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_trace_component: NODE_EXTRA_CA_CERTS marker derives the registry dir" {
+    base=$(mktemp -d)
+    tmpdir="$base/cctrace"
+    mkdir -p "$tmpdir/mitm" "$tmpdir/instances"
+    touch "$tmpdir/mitm/ca-cert.pem"
+    printf '{"id":"r1","pid":1,"port":9321,"project":"p","projectPath":"/proj","logFile":"","mode":"mitm","startedAt":"2026-01-01T00:00:00Z","sessionId":"sid-x"}' \
+        > "$tmpdir/instances/r1.json"
+    result=$( (NODE_EXTRA_CA_CERTS="$tmpdir/mitm/ca-cert.pem" stdin_session_id="sid-x" current_dir="/t"; build_trace_component) )
+    plain=$(strip_ansi "$result")
+    [ "$plain" = " [http://localhost:9321]" ]
+    rm -rf "$base"
+}
+
+@test "build_trace_component: project-path fallback when the session id is not registered yet" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/instances"
+    printf '{"id":"r1","pid":1,"port":9320,"project":"p","projectPath":"/my/proj","logFile":"","mode":"mitm","startedAt":"2026-01-01T00:00:00Z"}' \
+        > "$tmpdir/instances/r1.json"
+    printf '{"id":"r2","pid":2,"port":9325,"project":"q","projectPath":"/other","logFile":"","mode":"mitm","startedAt":"2026-01-01T00:00:00Z"}' \
+        > "$tmpdir/instances/r2.json"
+    result=$( (DEVA_TRACE=1 CCTRACE_DATA_DIR="$tmpdir" stdin_session_id="unseen" current_dir="/my/proj"; build_trace_component) )
+    plain=$(strip_ansi "$result")
+    [ "$plain" = " [http://localhost:9320]" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_trace_component: two live captures with no match stay honest (bare chip)" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/instances"
+    printf '{"id":"r1","pid":1,"port":9320,"project":"p","projectPath":"/a","logFile":"","mode":"mitm","startedAt":"2026-01-01T00:00:00Z"}' \
+        > "$tmpdir/instances/r1.json"
+    printf '{"id":"r2","pid":2,"port":9325,"project":"q","projectPath":"/b","logFile":"","mode":"mitm","startedAt":"2026-01-01T00:00:00Z"}' \
+        > "$tmpdir/instances/r2.json"
+    result=$( (DEVA_TRACE=1 CCTRACE_DATA_DIR="$tmpdir" stdin_session_id="unseen" current_dir="/c"; build_trace_component) )
+    plain=$(strip_ansi "$result")
+    [ "$plain" = " [cctrace]" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_trace_component: a lone live capture is claimed without a match" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/instances"
+    printf '{"id":"r1","pid":1,"port":9322,"project":"p","projectPath":"/a","logFile":"","mode":"mitm","startedAt":"2026-01-01T00:00:00Z"}' \
+        > "$tmpdir/instances/r1.json"
+    result=$( (DEVA_TRACE=1 CCTRACE_DATA_DIR="$tmpdir" stdin_session_id="unseen" current_dir="/c"; build_trace_component) )
+    plain=$(strip_ansi "$result")
+    [ "$plain" = " [http://localhost:9322]" ]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: traced session wears the chip on the left, next to path" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    out=$(echo '{"session_id":"trace-int","model":{"id":"claude-opus-4-6","display_name":"Opus"},"cwd":"/t/proj","workspace":{"current_dir":"/t/proj"},"version":"2.1.174","cost":{"total_cost_usd":0}}' \
+        | HOME="$tmpdir" CCTRACE_SERVER_PORT=9317 bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$out")
+    [[ "$plain" == "proj [http://localhost:9317]"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: untraced session has no chip" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    out=$(echo '{"session_id":"trace-int2","model":{"id":"claude-opus-4-6","display_name":"Opus"},"cwd":"/t/proj","workspace":{"current_dir":"/t/proj"},"version":"2.1.174","cost":{"total_cost_usd":0}}' \
+        | HOME="$tmpdir" bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$out")
+    [[ "$plain" != *"cctrace"* ]]
+    rm -rf "$tmpdir"
+}
+
+# --- advisor row alignment (second line meets line 1's right edge) ---
+
+@test "integration: advisor row right-aligns to line 1's actual edge" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude/statusline"
+    printf '{"claudeAiOauth":{"accessToken":"tok"}}' > "$tmpdir/.claude/.credentials.json"
+    # 85% only 2h into the 5h window: pace-hot, the advisor projects the cap.
+    reset_5h=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"five_hour":{"utilization":85,"resets_at":"%s"},"seven_day":{"utilization":10},"fetched_at":%s}' \
+        "$reset_5h" "$(date +%s)" > "$tmpdir/.claude/statusline/usage.cache"
+    out=$(echo '{"session_id":"align-test","model":{"id":"claude-opus-4-6","display_name":"Opus"},"cwd":"/t/proj","workspace":{"current_dir":"/t/proj"},"version":"2.1.174","cost":{"total_cost_usd":0}}' \
+        | HOME="$tmpdir" COLUMNS=110 bash "$SCRIPT_DIR/statusline.sh" --test)
+    line1=$(strip_ansi "$(printf '%s\n' "$out" | sed -n 1p)")
+    line2=$(strip_ansi "$(printf '%s\n' "$out" | sed -n 2p)")
+    [ -n "$line2" ]
+    [ "${#line1}" -eq "${#line2}" ]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: advisor row still meets the edge when the width guess is low" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude/statusline"
+    printf '{"claudeAiOauth":{"accessToken":"tok"}}' > "$tmpdir/.claude/.credentials.json"
+    reset_5h=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"five_hour":{"utilization":85,"resets_at":"%s"},"seven_day":{"utilization":10},"fetched_at":%s}' \
+        "$reset_5h" "$(date +%s)" > "$tmpdir/.claude/statusline/usage.cache"
+    # A phantom 40-col terminal: line 1 overflows it (padding clamps to 6);
+    # the advisor must anchor on line 1's real edge, not the phantom one.
+    out=$(echo '{"session_id":"align-low","model":{"id":"claude-opus-4-6","display_name":"Opus"},"cwd":"/t/proj","workspace":{"current_dir":"/t/proj"},"version":"2.1.174","cost":{"total_cost_usd":0}}' \
+        | HOME="$tmpdir" COLUMNS=40 bash "$SCRIPT_DIR/statusline.sh" --test)
+    line1=$(strip_ansi "$(printf '%s\n' "$out" | sed -n 1p)")
+    line2=$(strip_ansi "$(printf '%s\n' "$out" | sed -n 2p)")
+    [ -n "$line2" ]
+    [ "${#line1}" -eq "${#line2}" ]
+    rm -rf "$tmpdir"
+}
+
+# --- last_logged_model: model context survives markers and foreign samples ---
+
+@test "last_logged_model: newest record with a model wins" {
+    tmpdir=$(mktemp -d)
+    printf '%s\n' \
+        '{"type":"usage","timestamp":1,"model":"claude-opus-4-6"}' \
+        '{"type":"usage","timestamp":2,"model":"claude-sonnet-5"}' \
+        >"$tmpdir/usage.jsonl"
+    result=$(CLAUDE_ACCOUNT_DIR="$tmpdir" last_logged_model)
+    [ "$result" = "claude-sonnet-5" ]
+    rm -rf "$tmpdir"
+}
+
+@test "last_logged_model: session markers do not blank the model" {
+    tmpdir=$(mktemp -d)
+    printf '%s\n' \
+        '{"type":"usage","timestamp":1,"model":"claude-opus-4-6"}' \
+        '{"type":"session_end","session_id":"s1","timestamp":2}' \
+        '{"type":"session_start","session_id":"s2","timestamp":3}' \
+        >"$tmpdir/usage.jsonl"
+    result=$(CLAUDE_ACCOUNT_DIR="$tmpdir" last_logged_model)
+    [ "$result" = "claude-opus-4-6" ]
+    rm -rf "$tmpdir"
+}
+
+@test "last_logged_model: cooperating-writer samples (model null) are skipped" {
+    tmpdir=$(mktemp -d)
+    printf '%s\n' \
+        '{"type":"usage","timestamp":1,"model":"claude-opus-4-6"}' \
+        '{"type":"usage","timestamp":2,"source":"ccpace/0.1.1","model":null}' \
+        >"$tmpdir/usage.jsonl"
+    result=$(CLAUDE_ACCOUNT_DIR="$tmpdir" last_logged_model)
+    [ "$result" = "claude-opus-4-6" ]
+    rm -rf "$tmpdir"
+}
+
+@test "last_logged_model: no log, no model, no error" {
+    tmpdir=$(mktemp -d)
+    result=$(CLAUDE_ACCOUNT_DIR="$tmpdir" last_logged_model)
+    [ -z "$result" ]
     rm -rf "$tmpdir"
 }

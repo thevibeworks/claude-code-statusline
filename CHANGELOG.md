@@ -18,6 +18,164 @@ presentation — no U+FE0F — so alignment math is unaffected.
 - Tests: 321 -> 331 (chip states, color escalation, zero-cost absence,
   off mode, end-to-end render).
 
+
+**State-dir contract v2: cooperating writers.** The state dir is now a
+versioned consumer contract — external tools (ccpace, claudex) write
+alongside the statusline instead of underneath it, and the model
+context resolves through `last_logged_model` (bounded scan that skips
+session markers and cooperating-writer `model:null` samples) instead
+of trusting the last raw line of `usage.jsonl`.
+
+**Trace chip renders the full URL.** `[cctrace:9317]` →
+`[http://localhost:9317]`, linkified by most terminals;
+`DEVA_TRACE_UI_URL` (exported by deva on traced create/reattach)
+outranks the container-side port — only the host knows the published
+port or the portless `https://cctrace.localhost` route.
+
+**New: `week` subcommand.** The 7d period drawn as its own 5h windows,
+one cell each (34 per period): `▁▂▃▄▅▆▇█` a window that ran, height =
+the 7d points it burned; `·` ran but burned under 1%; `░` unknown, no
+samples on record; `▮` the window you're in now; `▫` a window still
+ahead; `×` a window the pool won't cover at the current pace. Count
+`▮` and what follows for the budget line's own `~Nx5h left`, so the
+picture and the sentence under it are the same number.
+
+Past cells are reconstructed from `usage.jsonl` — a window keyed by
+its 5h reset (rounded: the API jitters it by microseconds, and
+`05:59:59`/`06:00:00` are one window), costed by the 7d movement
+observed inside it. `░` and `·` are deliberately different glyphs: a
+gap in the record is not an idle session, and drawing it as one is the
+lie this row must not tell. A fresh install shows an honestly unknown
+past that resolves as the store fills.
+
+The prospective glance beside `report`'s retrospective ledger, and the
+same strip claudex's `claude.py` draws — including the same wall,
+which uses the learned forecast when trained and the linear projection
+otherwise, so a wall visible on one surface is visible on the other.
+Reads the state dir only; stale data renders but says so; no cache or
+no active window exits 3 like `check`.
+
+**Changed: the calm budget line speaks the shared budget frame.**
+`- budget ~19x5h left · even 1.1%/win · heading ~52%` (was `- ~19x5h
+left, even pace 1.1%/win, heading ~52%`): "budget" names the frame,
+"pace" no longer does double duty (it means usage/elapsed everywhere
+else), and in the last window — where per-window math just restates the
+headroom — it degrades to `- budget last window · 61% left · heading
+~40%`. Same frame and the same "heading" verb as claude.py's watch
+advisor, so the two surfaces never phrase one state two ways.
+
+## v0.23.0 — 2026-07-29 — the trace chip, and a second line that holds its edge
+
+**New: cctrace trace chip.** A session whose wire is being captured by
+[cctrace](https://github.com/thevibeworks/cctrace) (`deva --trace`, or
+`cctrace` directly) now says so: `[cctrace:9317]` on the left, next to
+path and branch — the port is the live trace UI on localhost. Session
+identity, not pressure, so it's dim in the neutral lane. Detection takes
+the strongest signal available: the trace env cctrace exports into the
+traced process (`CCTRACE_SERVER_PORT`), the capture's CA plumbing
+(`NODE_EXTRA_CA_CERTS` under a cctrace dir), or deva's `DEVA_TRACE=1`;
+plumbing-only captures resolve the port through cctrace's live-instance
+registry — by session id (sid8 prefix: the registry stores ids redacted
+past the first 8 hex), then project path, then by being the only live
+capture; the fallbacks trust heartbeat-fresh entries only, since crashed
+runs leave "live" files behind. No resolvable port still shows a bare
+`[cctrace]`: "recorded" matters even portless.
+
+**Fixed: the advisor row right-aligns to line 1's actual edge.** The
+statusline runs with stdout on a pipe, where `tput cols` answers a flat
+80 no matter how wide the terminal is — line 1 overflowed the phantom
+edge while the advisor anchored on it, leaving the advice dangling
+mid-line under a much longer badge cluster. The advisor now anchors on
+line 1's actual rendered width, so the second line's right edge meets
+the first's whatever the width guess was. Width detection itself also
+got honest: the controlling tty (`stty size </dev/tty`) and an inherited
+`COLUMNS` both beat `tput`'s default. 348 tests (336 statusline + 12 installer).
+
+## v0.22.0 — 2026-07-28 — the agent surface
+
+**New: `skills/usage-insight` — teach Claude Code to read its own
+usage.** Three layers, one source of truth: line 1 shows the numbers,
+the advisor row says the one sentence that matters, and the skill
+carries the full conversation — "should I start a heavy task now?",
+"which account has headroom?", "what did I waste this week?". Install
+with `cp -r skills/usage-insight ~/.claude/skills/` and ask.
+
+The skill encodes the state-dir contract, the learned-forecast
+semantics, and the advisor's judgment rules — feasibility before
+advice, facts only while the ratio is unlearned, staleness said out
+loud, fresh siblings only. It runs the same `report`/`check`
+subcommands instead of re-mining, so all three layers always agree.
+Docs-only release: no script changes, test count unchanged.
+
+## v0.21.0 — 2026-07-28 — the advisor, wired into your world
+
+**New: `statusline.sh check` — the advisor as an exit code.** The
+statusline never runs when you're away, which is exactly when expiring
+capacity needs a voice. Instead of a daemon (still no daemon, ever),
+`check` prints the plain-text advisor verdict and exits 0 calm / 1
+opportunity / 2 pressure / 3 unknown-or-stale — you wire it into tmux,
+cron, or CI. We provide the judgment; the host provides the plumbing.
+Model context for the scoped clauses comes from the last logged
+snapshot — the first consumer of v0.20's widened `model` field.
+
+**New: `statusline.sh session-summary` — one-line session
+retrospectives.** Designed as a `SessionEnd` hook (reads the hook JSON
+on stdin; falls back to the last logged session for manual runs):
+
+```
+session 8f3c02aa: 3h12m, 5h +34pts, 7d +4pts, claude-fable-5
+```
+
+Window deltas are positive-delta sums (the profile builder's rule), so
+a session that straddles a 5h reset still reports what it actually
+consumed. 334 tests (322 statusline + 12 installer).
+
+## v0.20.0 — 2026-07-28 — the waste ledger: see what you paid for and didn't use
+
+**New: `statusline.sh report [--days N]` — the waste ledger.** The
+advisor (v0.19) prevents waste prospectively; this proves it
+retroactively. It replays the usage log the statusline has been writing
+all along, detects every window close (consecutive samples disagreeing
+on `resets_at`, normalized to the minute — the ratio learner's identity
+rule), and ledgers each closed 7d window as used% / expired%, converted
+into 5h-windows-worth via the learned `pct_per_window` exchange rate:
+
+```
+7d windows closed: 1
+  Tue 07-28 00:00  used 51%  expired 49% (~4.7 x 5h windows unused)
+5h windows closed: 3   avg 95% at close   2 hit the cap
+exchange rate: one full 5h window = ~10.46% of the week (~9.6 windows/week, learned)
+week in progress: 5% used, resets Mon 08-03 23:59
+```
+
+"week in progress" runs the same learned walk the advisor's heading
+uses — the surfaces cannot disagree. Honest limits are documented: the
+final utilization is the last sample before a reset, so usage from other
+clients after your last local render is invisible, and never-sampled
+windows don't appear.
+
+**Widened snapshots: log today what the learner needs next month.**
+Every `usage` line in usage.jsonl now also records `limits[]` (scoped
+per-model weekly caps, verbatim), `model` (the id active in the logging
+session), and `predicted_end` — the learned walk's end-of-week
+projection *at sample time*. That last one is the calibration seed: once
+windows close, predictions can be scored against observed finals, and
+the forecast's accuracy becomes measurable instead of assumed. Learning
+lags logging by weeks; fields absent today are patterns that can't be
+learned next month.
+
+**Fixed: `catch .` gave every empty `resets_at` one shared fake window
+identity.** jq's `catch .` yields the error *message*, not the original
+input — so snapshots with an empty/unparseable `resets_at` all
+normalized to the same error string and could pair across real windows
+in the ratio learner, quietly skewing `pct_per_window` (observed on real
+data: phantom window closes and a drifted ratio). Both norm sites now
+fall back to the raw input string and treat empty as empty.
+
+Mechanics: subcommands dispatch after all function definitions, take no
+stdin, and are read-only against the state dir. 327 tests (315
+statusline + 12 installer).
+
 ## v0.19.0 — 2026-07-28 — smart advisor line, claude-watch retired
 
 **New: the advisor — a second statusline row that interprets the badges.**

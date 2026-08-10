@@ -1,6 +1,6 @@
 #!/bin/bash
 # Claude Code statusline
-# Usage: statusline.sh [--style STYLE] [--order ORDER] [--theme THEME] [--path-display TYPE] [--alignment TYPE] [--extra MODE] [--cache MODE] [--advisor MODE] [--deadman MODE] [--test JSON] [--debug]
+# Usage: statusline.sh [report|check|session-summary|week] [--style STYLE] [--order ORDER] [--theme THEME] [--path-display TYPE] [--alignment TYPE] [--extra MODE] [--cache MODE] [--advisor MODE] [--deadman MODE] [--test JSON] [--debug]
 # Themes: minimal, compact, detailed, developer, manager
 # Styles: single-block, unicode-blocks, bracketed-bars, filled-dots, square-blocks, line-segments, ascii-bars, percent-only, fraction-display
 # Extra modes: auto (default, shows when quota runs out or extra >= 50%), always, on-limit, off
@@ -23,6 +23,9 @@ deadman_display_mode="${STATUSLINE_DEADMAN:-auto}" # auto, off — dead man's sw
 test_mode=false
 test_data=""
 debug_mode=false
+subcommand=""               # report (see run_usage_report); dispatched late,
+                            # after every function it needs is defined
+report_days=""
 
 # Auto-display thresholds. The 5h countdown itself is always visible (see
 # build_usage_display); these gate the recovery color and extra visibility.
@@ -236,6 +239,14 @@ debug_log() {
 
 while [[ $# -gt 0 ]]; do
     case $1 in
+    report | check | session-summary | week)
+        subcommand="$1"
+        shift
+        ;;
+    --days)
+        report_days="$2"
+        shift 2
+        ;;
     --style)
         progress_bar_style="$2"
         shift 2
@@ -341,7 +352,12 @@ if [ -n "$theme" ]; then
     apply_theme
 fi
 
-if [ "$test_mode" = true ]; then
+if [ -n "$subcommand" ]; then
+    # Subcommands take no stdin; the shared parse below still runs, so give
+    # it an empty object and let the late dispatch (after all function
+    # definitions) do the real work.
+    input='{}'
+elif [ "$test_mode" = true ]; then
     if [ -n "$test_data" ]; then
         input="$test_data"
     else
@@ -440,7 +456,23 @@ get_context_limit() {
 
 debug_log "PARSED INPUT: model=$model_display (id=$model_id) cwd=$current_dir cost=$cost_usd ctx_pct=$ctx_pct exceeds_200k=$exceeds_200k api_duration_ms=$api_duration_ms"
 
-term_width=$(tput cols 2>/dev/null || echo 80)
+# Terminal width, best signal first. The statusline runs with stdout on a
+# pipe, where bare `tput cols` answers a flat 80 no matter how wide the real
+# terminal is — the controlling tty (when we still have one) and an inherited
+# COLUMNS both beat it. The advisor row additionally anchors on line 1's
+# actual rendered width (see format_output), so a wrong width degrades the
+# gap, never the alignment between the two rows.
+term_width=""
+if [ -e /dev/tty ]; then
+    term_width=$({ stty size </dev/tty; } 2>/dev/null | awk '{print $2}')
+fi
+if ! [ "$term_width" -gt 0 ] 2>/dev/null; then
+    term_width="${COLUMNS:-}"
+fi
+if ! [ "$term_width" -gt 0 ] 2>/dev/null; then
+    term_width=$(tput cols 2>/dev/null || echo 80)
+fi
+debug_log "TERM WIDTH: $term_width"
 
 # Palette is organized in three lanes so a glance is unambiguous:
 #   STATUS  (green/yellow/red) — pressure ONLY: quota, context, cache, premium
@@ -1037,9 +1069,22 @@ log_usage_snapshot() {
         debug_log "log_usage_snapshot: no token provided"
     fi
 
+    # Calibration seed: the learned walk's end-of-week projection AT SAMPLE
+    # TIME. When this window later closes, `report` can compare what we
+    # predicted against what actually happened — the forecast's accuracy
+    # becomes measurable instead of assumed. Empty until the profile is warm.
+    local predicted_end="" _s_util _s_secs
+    _s_util=$(echo "$usage_data" | jq -r '.seven_day.utilization // empty' 2>/dev/null)
+    if [ -n "$_s_util" ]; then
+        _s_secs=$(get_reset_seconds "$(echo "$usage_data" | jq -r '.seven_day.resets_at // empty' 2>/dev/null)")
+        [ -n "$_s_secs" ] && read -r _ predicted_end <<<"$(_seven_day_walk "$_s_util" "$_s_secs")"
+    fi
+
     echo "$usage_data" | jq -c \
         --arg sid "$session_id" \
         --arg ts "$(date +%s)" \
+        --arg model "${model_id:-}" \
+        --arg pend "${predicted_end:-}" \
         --arg email "$user_email" \
         --arg name "$user_name" \
         --arg uuid "$user_uuid" \
@@ -1073,7 +1118,10 @@ log_usage_snapshot() {
             five_hour:.five_hour,
             seven_day:.seven_day,
             seven_day_opus:.seven_day_opus,
-            extra_usage:.extra_usage
+            extra_usage:.extra_usage,
+            limits:(.limits // []),
+            model:($model | if . == "" then null else . end),
+            predicted_end:($pend | if . == "" then null else tonumber end)
         }' \
         >>"$usage_log" 2>/dev/null
 }
@@ -1809,16 +1857,21 @@ build_seven_day_profile() {
     tzoff_s=$(date +%z | awk '{ s=substr($0,1,1)=="-"?-1:1; h=substr($0,2,2)+0; m=substr($0,4,2)+0; print s*(h*3600+m*60) }')
     local data
     data=$( { cat "${jsonl}.1" 2>/dev/null; cat "$jsonl"; } | jq -r --arg a "$acct" '
-            select((.user.uuid // "") == $a)
             # Window identity for the ratio pairs: resets_at wobbles per
             # fetch (microseconds, and 06:59:59 vs 07:00:00 across the
-            # boundary), so normalize to the nearest minute; non-ISO values
-            # fall back to the raw string.
+            # boundary), so normalize to the nearest minute. Non-ISO values
+            # fall back to the raw string ($raw — NOT `catch .`, which would
+            # yield the error MESSAGE and give every empty/broken value one
+            # shared fake identity, silently pairing across real windows).
+            def norm: tostring | . as $raw
+                | if $raw == "" then "" else
+                    (try (sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z")
+                          | fromdateiso8601 | (. + 30) / 60 | floor) catch $raw)
+                  end;
+            select((.user.uuid // "") == $a)
             | [.timestamp, (.seven_day.utilization // ""),
                (.five_hour.utilization // ""),
-               ((.five_hour.resets_at // "") | tostring
-                | (try (sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z")
-                        | fromdateiso8601 | (. + 30) / 60 | floor) catch .))] | @tsv' 2>/dev/null \
+               ((.five_hour.resets_at // "") | norm)] | @tsv' 2>/dev/null \
         | sort -n | awk -F'\t' -v now="$now" -v tz="$tzoff_s" '
         $2 != "" {
             if (prev_set && $2 > prev) {
@@ -1956,6 +2009,387 @@ forecast_pct_per_window() {
     local ppw
     ppw=$(jq -r '.pct_per_window // -1' "$fc" 2>/dev/null)
     awk -v p="${ppw:--1}" 'BEGIN{ if (p > 0) printf "%.2f", p }'
+}
+
+# ---------------------------------------------------------------------------
+# The waste ledger: `statusline.sh report [--days N]`. Mines usage.jsonl for
+# closed windows and says, in percent and in windows, what expired unused.
+# The advisor prevents waste prospectively; this proves it retroactively.
+#
+# A window "closes" when consecutive samples disagree on resets_at (normalized
+# to the minute — the same identity rule the ratio learner uses): the last
+# sample before the flip is that window's final utilization. Honest limits:
+# usage from other clients after the last local render is invisible, and a
+# window that was never sampled never existed as far as the log knows.
+# ---------------------------------------------------------------------------
+run_usage_report() {
+    local days="${1:-28}"
+    case "$days" in '' | *[!0-9]*) days=28 ;; esac
+    [ "$days" -ge 1 ] 2>/dev/null || days=28
+    local jsonl="$CLAUDE_ACCOUNT_DIR/usage.jsonl"
+    if [ ! -f "$jsonl" ] && [ ! -f "${jsonl}.1" ]; then
+        echo "no usage history yet ($jsonl)"
+        echo "the statusline logs every quota fetch; come back after a session or two."
+        return 1
+    fi
+    local acct
+    acct=$(jq -r '.account.uuid // empty' "$CLAUDE_ACCOUNT_DIR/profile.cache" 2>/dev/null)
+    # profile.cache can postdate the log (fresh install): fall back to the
+    # last snapshot's identity rather than reporting nothing.
+    [ -n "$acct" ] || acct=$(tail -1 "$jsonl" 2>/dev/null | jq -r '.user.uuid // empty' 2>/dev/null)
+    local now cutoff
+    now=$(date +%s)
+    cutoff=$(( now - days * 86400 ))
+    # Mined stream: "S <7d-close-key> <final%>" per closed 7d window,
+    # then "F <closed> <avg%> <capped>" for 5h windows, "N <samples>".
+    local mined
+    mined=$( { cat "${jsonl}.1" 2>/dev/null; cat "$jsonl" 2>/dev/null; } | jq -r --arg a "$acct" --argjson cut "$cutoff" '
+        def norm: tostring | . as $raw
+            | if $raw == "" then "" else
+                (try (sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z")
+                      | fromdateiso8601 | (. + 30) / 60 | floor) catch $raw)
+              end;
+        select((.type // "usage") == "usage" and (.user.uuid // "") == $a
+               and (.timestamp // 0) >= $cut)
+        | [.timestamp, (.five_hour.utilization // ""), (.seven_day.utilization // ""),
+           ((.five_hour.resets_at // "") | norm), ((.seven_day.resets_at // "") | norm)]
+        | @tsv' 2>/dev/null \
+        | sort -n | awk -F'\t' '
+        {
+            n++
+            if ($4 != "" && pfk != "" && $4 != pfk && pfu != "") {
+                fcl++; fsum += pfu; if (pfu >= 99) fcap++
+            }
+            if ($5 != "" && psk != "" && $5 != psk && psu != "") {
+                print "S", psk, psu
+            }
+            if ($4 != "") { pfk = $4; if ($2 != "") pfu = $2 }
+            if ($5 != "") { psk = $5; if ($3 != "") psu = $3 }
+        }
+        END {
+            printf "F %d %.0f %d\n", fcl, (fcl ? fsum / fcl : 0), fcap
+            printf "N %d\n", n
+        }')
+
+    local ppw
+    ppw=$(forecast_pct_per_window)
+    local f_closed=0 f_avg=0 f_cap=0 samples=0
+    read -r _ f_closed f_avg f_cap <<<"$(printf '%s\n' "$mined" | grep '^F ' | head -1)"
+    read -r _ samples <<<"$(printf '%s\n' "$mined" | grep '^N ' | head -1)"
+
+    printf 'usage report - %s (last %sd, %s samples)\n\n' "${ACCOUNT_TAG:-default}" "$days" "${samples:-0}"
+
+    local s_count
+    s_count=$(printf '%s\n' "$mined" | grep -c '^S ')
+    printf '7d windows closed: %s\n' "$s_count"
+    if [ "$s_count" -gt 0 ] 2>/dev/null; then
+        local key final used_i waste wins when sum_final=0
+        while read -r _ key final; do
+            used_i=$(printf '%.0f' "$final" 2>/dev/null || echo 0)
+            waste=$(( 100 - used_i )); [ "$waste" -lt 0 ] && waste=0
+            sum_final=$(( sum_final + used_i ))
+            case "$key" in
+            *[!0-9]*) when="$key" ;;
+            *) when=$(_fmt_epoch "$(( key * 60 ))" '%a %m-%d %H:%M') ;;
+            esac
+            if [ -n "$ppw" ]; then
+                wins=$(awk -v w="$waste" -v p="$ppw" 'BEGIN{printf "%.1f", w / p}')
+                printf '  %s  used %s%%  expired %s%% (~%s x 5h windows unused)\n' \
+                    "$when" "$used_i" "$waste" "$wins"
+            else
+                printf '  %s  used %s%%  expired %s%%\n' "$when" "$used_i" "$waste"
+            fi
+        done <<<"$(printf '%s\n' "$mined" | grep '^S ')"
+        if [ "$s_count" -gt 1 ] 2>/dev/null; then
+            local avg_used=$(( sum_final / s_count ))
+            printf '  avg at close: %s%% used / %s%% expired\n' "$avg_used" "$(( 100 - avg_used ))"
+        fi
+    fi
+
+    if [ "${f_closed:-0}" -gt 0 ] 2>/dev/null; then
+        printf '\n5h windows closed: %s   avg %s%% at close   %s hit the cap\n' \
+            "$f_closed" "$f_avg" "$f_cap"
+    else
+        printf '\n5h windows closed: 0\n'
+    fi
+
+    if [ -n "$ppw" ]; then
+        local wpw
+        wpw=$(awk -v p="$ppw" 'BEGIN{printf "%.1f", 100 / p}')
+        printf 'exchange rate: one full 5h window = ~%s%% of the week (~%s windows/week, learned)\n' \
+            "$ppw" "$wpw"
+    else
+        printf 'exchange rate: still learning (needs ~half a window of paired burn)\n'
+    fi
+
+    # Week in progress, from the freshest source (usage.cache), projected with
+    # the same learned walk the advisor uses — the surfaces must not disagree.
+    local uc="$CLAUDE_ACCOUNT_DIR/usage.cache"
+    if [ -f "$uc" ]; then
+        local cur_su cur_reset secs repoch when gap end
+        cur_su=$(jq -r '.seven_day.utilization // empty' "$uc" 2>/dev/null)
+        cur_reset=$(jq -r '.seven_day.resets_at // empty' "$uc" 2>/dev/null)
+        if [ -n "$cur_su" ] && [ -n "$cur_reset" ]; then
+            secs=$(get_reset_seconds "$cur_reset")
+            repoch=$(_epoch_from_ts "$cur_reset")
+            when=$(_fmt_epoch "${repoch:-0}" '%a %m-%d %H:%M')
+            read -r gap end <<<"$(_seven_day_walk "$cur_su" "${secs:-0}")"
+            if [ -n "$end" ]; then
+                printf '\nweek in progress: %.0f%% used, resets %s - heading ~%s%%\n' \
+                    "$cur_su" "$when" "$end"
+            else
+                printf '\nweek in progress: %.0f%% used, resets %s\n' "$cur_su" "$when"
+            fi
+        fi
+    fi
+    return 0
+}
+
+# Model context from the log: the newest record that actually carries a
+# model. `tail -1` alone is wrong twice over — the newest line may be a
+# session_start/session_end marker (no .model), or a cooperating
+# writer's sample (ccpace logs model:null by contract). Bounded scan:
+# 200 records is hours of history, and the answer is almost always in
+# the last few.
+last_logged_model() {
+    local jsonl="$CLAUDE_ACCOUNT_DIR/usage.jsonl"
+    [ -f "$jsonl" ] || return 0
+    tail -n 200 "$jsonl" 2>/dev/null \
+        | jq -r '.model // empty' 2>/dev/null \
+        | awk 'NF { m = $0 } END { if (m != "") print m }'
+}
+
+# `statusline.sh check` — the advisor as an exit code, for tmux segments,
+# cron notifiers, and scripts (`check || notify`). Prints the plain-text
+# advisor verdict (or "calm"/"unknown: ...") and exits:
+#   0 calm    1 opportunity (+)    2 pressure (!)    3 unknown/stale
+# We provide the judgment; the host provides the plumbing — no daemon.
+# Model context comes from the last logged snapshot, so scoped clauses
+# know which model this account was last running.
+run_check() {
+    local uc="$CLAUDE_ACCOUNT_DIR/usage.cache"
+    if [ ! -f "$uc" ]; then
+        echo "unknown: no usage.cache under $CLAUDE_ACCOUNT_DIR"
+        return 3
+    fi
+    local fetched age
+    fetched=$(jq -r '.fetched_at // 0' "$uc" 2>/dev/null)
+    age=$(( $(date +%s) - ${fetched:-0} ))
+    if [ "$age" -gt 3600 ] 2>/dev/null; then
+        # The state-dir contract's staleness rule: >1h old means no active
+        # session feeds this account — the numbers describe the past.
+        echo "unknown: usage.cache ${age}s stale (no active session feeding this account)"
+        return 3
+    fi
+    local last_model
+    last_model=$(last_logged_model)
+    local line plain
+    line=$(build_advisor_line "$(cat "$uc")" auto "$last_model")
+    if [ -z "$line" ]; then
+        echo "calm"
+        return 0
+    fi
+    plain=$(printf '%b' "$line" | sed 's/\x1b\[[0-9;]*m//g')
+    printf '%s\n' "$plain"
+    case "$plain" in
+    "! "*) return 2 ;;
+    "+ "*) return 1 ;;
+    esac
+    return 0
+}
+
+# `statusline.sh session-summary` — one-line session retrospective, designed
+# as a SessionEnd hook (pipe the hook JSON in; only session_id is read).
+# Falls back to the last session in the log for manual runs. Window deltas
+# are positive-delta sums (resets ignored), the profile builder's rule, so
+# a session that straddles a 5h reset still reports what it consumed.
+run_session_summary() {
+    local sid=""
+    [ ! -t 0 ] && sid=$(cat 2>/dev/null | jq -r '.session_id // empty' 2>/dev/null)
+    local jsonl="$CLAUDE_ACCOUNT_DIR/usage.jsonl"
+    if [ -z "$sid" ] && [ -f "$jsonl" ]; then
+        sid=$(jq -r 'select((.type // "") == "usage") | .session_id // empty' "$jsonl" 2>/dev/null | tail -1)
+    fi
+    if [ -z "$sid" ]; then
+        echo "session-summary: no session id (pipe hook JSON, or log some usage first)"
+        return 1
+    fi
+    if [ ! -f "$jsonl" ] && [ ! -f "${jsonl}.1" ]; then
+        echo "session-summary: no usage log at $jsonl"
+        return 1
+    fi
+    local out
+    out=$( { cat "${jsonl}.1" 2>/dev/null; cat "$jsonl" 2>/dev/null; } | jq -r --arg s "$sid" '
+            select((.type // "") == "usage" and (.session_id // "") == $s)
+            | [.timestamp, (.five_hour.utilization // ""),
+               (.seven_day.utilization // ""), (.model // "")]
+            | @tsv' 2>/dev/null \
+        | sort -n | awk -F'\t' -v sid="${sid:0:8}" '
+        {
+            n++
+            if (first == "") first = $1
+            last = $1
+            if ($2 != "") { if (pf != "" && $2 > pf) df += $2 - pf; pf = $2 }
+            if ($3 != "") { if (ps != "" && $3 > ps) ds += $3 - ps; ps = $3 }
+            if ($4 != "") model = $4
+        }
+        END {
+            if (n == 0) exit 0
+            secs = last - first
+            h = int(secs / 3600); m = int((secs % 3600) / 60)
+            dur = (h > 0 ? h "h" m "m" : m "m")
+            printf "session %s: %s, 5h +%.0fpts, 7d +%.0fpts%s\n", \
+                sid, dur, df, ds, (model != "" ? ", " model : "")
+        }')
+    if [ -z "$out" ]; then
+        echo "session-summary: no samples for session ${sid:0:8}"
+        return 1
+    fi
+    printf '%s\n' "$out"
+    return 0
+}
+
+# `statusline.sh week` — the 7d period as its 5h windows, one cell each:
+#   ▁▂▃▄▅▆▇█  a window that ran; height = 7d points it burned
+#   ·         ran, burned under 1%
+#   ░         unknown: no samples on record for that window
+#   ▮         the window you are in now
+#   ▫         a window still ahead of you
+#   ×         a window the pool will not cover at the current pace
+# Count ▮ and what follows for the budget line's own "~Nx5h left". Past
+# cells come from usage.jsonl; unknown and idle stay different glyphs
+# because drawing a gap in the record as an idle session is the one lie
+# this row must not tell. The prospective glance beside report's
+# retrospective ledger; the same strip claude.py renders, so both
+# surfaces tell one story. Reads usage.cache; stale data renders but says so.
+run_week() {
+    local uc="$CLAUDE_ACCOUNT_DIR/usage.cache"
+    if [ ! -f "$uc" ]; then
+        echo "week: no usage.cache under $CLAUDE_ACCOUNT_DIR"
+        return 3
+    fi
+    local usage seven_util seven_reset fetched
+    usage=$(cat "$uc")
+    eval "$(echo "$usage" | jq -r '
+        @sh "seven_util=\(.seven_day.utilization // 0)",
+        @sh "seven_reset=\(.seven_day.resets_at // "")",
+        @sh "fetched=\(.fetched_at // 0)"
+    ' 2>/dev/null)"
+    local seven_int seven_secs
+    seven_int=$(printf '%.0f' "$seven_util" 2>/dev/null || echo 0)
+    seven_secs=$(get_reset_seconds "$seven_reset")
+    if [ -z "$seven_secs" ] || [ "$seven_secs" -le 0 ] 2>/dev/null; then
+        echo "week: no active 7d window in usage.cache"
+        return 3
+    fi
+    local now age stale=""
+    now=$(date +%s)
+    age=$((now - ${fetched:-0}))
+    [ "$age" -gt 3600 ] 2>/dev/null && stale=" (stale $(format_duration $((age * 1000))))"
+
+    # one cell = one 5h slot of the period (34; the last a 3h stub) on a fixed
+    # grid from the period start. Past cells carry what that window actually
+    # burned, reconstructed from usage.jsonl: a window instance is keyed by its
+    # 5h resets_at rounded to 5min (the API jitters it, and 05:59:59/06:00:00
+    # are one window), and its cost is the 7d delta observed inside it.
+    local width=34 windows period_start
+    windows=$(( (seven_secs + 17999) / 18000 ))
+    period_start=$(( now + seven_secs - SEVEN_DAY_WINDOW_SECS ))
+
+    # slot -> observed 7d cost, plus the store's own coverage span: a slot
+    # inside the span with no samples ran idle; outside it, we simply do not
+    # know, and drawing that as idle is the one lie this row must not tell
+    local hist="" ujl="$CLAUDE_ACCOUNT_DIR/usage.jsonl"
+    if [ -f "$ujl" ]; then
+        hist=$(jq -sr --argjson ps "$period_start" --argjson w "$width" '
+            [ .[] | select(.five_hour.resets_at and .seven_day.utilization != null
+                           and .timestamp >= $ps)
+                  | { k: ((.five_hour.resets_at | sub("\\.[0-9]+";"") | sub("\\+00:00";"Z")
+                           | fromdateiso8601 | . / 300 | round * 300) - 18000),
+                      t: .timestamp, s: .seven_day.utilization } ]
+            | if length == 0 then "" else
+                (map(.t) | min) as $lo | (map(.t) | max) as $hi
+              | (group_by(.k) | map({ slot: ((.[0].k - $ps) / 18000 | floor),
+                                      cost: ((map(.s) | max) - (map(.s) | min)) })
+                 | map(select(.slot >= 0 and .slot < $w))
+                 | map("\(.slot):\(.cost)") | join(","))
+                as $cells | "\($lo) \($hi) \($cells)"
+              end' "$ujl" 2>/dev/null)
+    fi
+    local span_lo="" span_hi="" cells=""
+    [ -n "$hist" ] && read -r span_lo span_hi cells <<<"$hist"
+
+    # dry slot: where burn exhausts the pool before reset. The learned walk
+    # speaks first (gap is in HOURS before reset); with no trained forecast
+    # fall back to the linear projection claude.py's cap_eta uses, so a wall
+    # visible on one surface is visible on the other.
+    local dry=-1 dry_epoch="" walk_gap walk_end elapsed7
+    read -r walk_gap walk_end <<<"$(_seven_day_walk "$seven_int" "$seven_secs")"
+    if [ -n "$walk_gap" ] && [ "$walk_gap" != "-1" ] && [ "$walk_gap" -gt 0 ] 2>/dev/null; then
+        dry_epoch=$(( now + seven_secs - walk_gap * 3600 ))
+    elif [ "$seven_int" -gt 0 ] 2>/dev/null; then
+        elapsed7=$(( SEVEN_DAY_WINDOW_SECS - seven_secs ))
+        [ "$elapsed7" -gt 0 ] && \
+            dry_epoch=$(( now + elapsed7 * (100 - seven_int) / seven_int ))
+    fi
+    if [ -n "$dry_epoch" ] && [ "$dry_epoch" -lt $(( now + seven_secs )) ] 2>/dev/null; then
+        dry=$(( (dry_epoch - period_start) / 18000 ))
+    fi
+
+    local strip fill_color
+    fill_color=$(get_usage_color "$seven_int")
+    strip=$(awk -v w="$width" -v ps="$period_start" -v now="$now" -v dry="$dry" \
+                -v lo="${span_lo:--1}" -v hi="${span_hi:--1}" -v cells="$cells" \
+                -v C_FILL="$fill_color" -v C_DIM="$DIM" -v C_NOW="$BOLD" \
+                -v C_DRY="$RED" -v C_OFF="$RESET" '
+        function glyph(c) {
+            if (c < 1)  return "·"
+            if (c <= 2) return "▁"; if (c <= 4)  return "▂"; if (c <= 6)  return "▃"
+            if (c <= 8) return "▄"; if (c <= 11) return "▅"; if (c <= 15) return "▆"
+            if (c <= 20) return "▇"; return "█"
+        }
+        BEGIN {
+            n = split(cells, a, ",")
+            for (i = 1; i <= n; i++) { split(a[i], kv, ":"); cost[kv[1]] = kv[2] }
+            nowslot = int((now - ps) / 18000)
+            s = ""; prev = ""
+            for (i = 0; i < w; i++) {
+                start = ps + i * 18000
+                if (i < nowslot) {
+                    # a sampled sub-1% window and an idle one both mean "cost
+                    # nothing": one glyph, one tint, no colour-only meaning
+                    if (i in cost)                              { g = glyph(cost[i]); c = (g == "·" ? C_DIM : C_FILL) }
+                    else if (lo >= 0 && lo <= start + 18000 && start <= hi) { g = "·"; c = C_DIM }
+                    else                                        { g = "░"; c = C_DIM }
+                } else if (i == nowslot)                        { g = "▮"; c = C_NOW }
+                else if (dry >= 0 && i >= dry)                  { g = "×"; c = C_DRY }
+                else                                            { g = "▫"; c = "" }
+                if (c != prev) { s = s C_OFF c; prev = c }
+                s = s g
+            }
+            print s C_OFF
+        }')
+
+    # the row carries its own remaining/reset, like every other window row:
+    # a wider bar, not a separate surface (no ruler, no day labels)
+    local label tail
+    label=$(printf '7d %3d%% ' "$seven_int")
+    tail=$(printf '  %-8s @%s' \
+        "$(format_duration $((seven_secs * 1000)))" \
+        "$(_fmt_epoch $((now + seven_secs)) '%a %H:%M')")
+    # the strip carries its own per-role colors (burn / idle / unknown / dry)
+    printf '%s%b\n' "$label" "${strip}${DIM}${tail}${RESET}${stale}"
+
+    local indent="        " # 8 = width of the "7d NNN% " label column
+
+    # the budget line under the strip: the advisor, always-mode, so calm
+    # weeks still show runway/even/heading; pressure clauses show as-is
+    local last_model
+    last_model=$(last_logged_model)
+    local advisor
+    advisor=$(build_advisor_line "$usage" always "$last_model")
+    [ -n "$advisor" ] && printf '%s%b\n' "$indent" "$advisor"
+    return 0
 }
 
 # Generalized change flash: signed delta between the current value and the
@@ -2446,8 +2880,12 @@ build_advisor_fleet_hint() {
 #                                         mid-week underuse, engaged sessions
 #                                         only — reaches exactly the users
 #                                         who can act on it
-#   ~19x5h left, even pace 1.1%/win, heading ~52%
-#                                         always-mode calm line
+#   budget ~19x5h left · even 1.1%/win · heading ~52%
+#                                         always-mode calm line (shared
+#                                         budget frame with claude.py's
+#                                         watch advisor); in the last
+#                                         window: budget last window ·
+#                                         N% left · heading ~M%
 build_advisor_line() {
     local usage_data="$1" mode="${2:-auto}" current_model="${3:-}"
     [ "$mode" = "off" ] && return 0
@@ -2697,18 +3135,19 @@ build_advisor_line() {
         return 0
     fi
 
-    # Calm + always: the weekly budget in one breath. ceil'd window count so
-    # a partial window still counts as spendable; "heading ~N%" is the
+    # Calm + always: the weekly budget in one breath, in the shared budget
+    # frame (claude.py's watch advisor speaks the same sentence family):
+    # runway -> what even looks like -> where you land. Ceil'd window count
+    # so a partial window still counts as spendable; "heading ~N%" is the
     # learned end-of-week projection when trained, linear once the window is
-    # at least a day old.
+    # at least a day old. In the last window per-window math degenerates to
+    # the headroom itself, so it degrades to plain "N% left".
     if [ "$mode" = "always" ] && [ "$seven_int" -gt 0 ] && [ "$seven_int" -lt 100 ] \
        && [ -n "$seven_secs" ] && [ "$seven_secs" -gt 0 ] 2>/dev/null; then
         local windows=$(( (seven_secs + 17999) / 18000 ))
         if [ "$windows" -gt 0 ]; then
-            local even heading_part=""
-            even=$(awk -v h=$((100 - seven_int)) -v w="$windows" 'BEGIN{printf "%.1f", h/w}')
             local elapsed7=$((SEVEN_DAY_WINDOW_SECS - seven_secs))
-            local heading="" walk_gap walk_end
+            local heading="" heading_part="" walk_gap walk_end
             read -r walk_gap walk_end <<<"$(_seven_day_walk "$seven_int" "$seven_secs")"
             if [ -n "$walk_end" ]; then
                 heading="$walk_end"
@@ -2716,8 +3155,14 @@ build_advisor_line() {
                 heading=$((seven_int * SEVEN_DAY_WINDOW_SECS / elapsed7))
                 [ "$heading" -gt 100 ] && heading=100
             fi
-            [ -n "$heading" ] && heading_part=", heading ~${heading}%"
-            echo "${DIM}- ~${windows}x5h left, even pace ${even}%/win${heading_part}${RESET}"
+            [ -n "$heading" ] && heading_part=" · heading ~${heading}%"
+            if [ "$windows" -le 1 ]; then
+                echo "${DIM}- budget last window · $((100 - seven_int))% left${heading_part}${RESET}"
+            else
+                local even
+                even=$(awk -v h=$((100 - seven_int)) -v w="$windows" 'BEGIN{printf "%.1f", h/w}')
+                echo "${DIM}- budget ~${windows}x5h left · even ${even}%/win${heading_part}${RESET}"
+            fi
         fi
     fi
     return 0
@@ -2870,6 +3315,79 @@ build_deadman_component() {
 
 deadman_info=$(build_deadman_component)
 
+# cctrace trace chip: is this session's wire being captured, and where does
+# the live UI serve? Session identity, so it lives on the LEFT with path and
+# branch (structure lane, dim — red stays reserved for pressure). Detection,
+# strongest signal first:
+#   CCTRACE_SERVER_PORT / CCTRACE_TRACE_FILE   cctrace >= 0.29 exports trace
+#                                              identity into the child env
+#   NODE_EXTRA_CA_CERTS under a cctrace dir    older mitm captures leave only
+#                                              proxy plumbing behind
+#   DEVA_TRACE=1                               deva --trace says so outright
+# Without the port env (old cctrace), the live-instance registry
+# (<data-dir>/instances/*.json, a documented contract) is matched by this
+# session's id, then by project path, then by being the only live capture.
+# The registry stores session ids REDACTED past the first 8 hex
+# ("c3a6e0f3-****-…" — capture-time redaction, ids never land on disk in
+# full), so the sid8 prefix is the join key — the same convention cctrace's
+# own UI uses. The id match trusts any non-tombstone entry (if OUR capture
+# died, this session's proxy died with it); the path/only-live fallbacks
+# trust only heartbeat-fresh files (<2min, heartbeat is 30s) — crashed runs
+# leave "live" entries behind for up to a day, and a stale port is worse
+# than no port. No match still shows the bare chip: "recorded" matters
+# even portless.
+build_trace_component() {
+    local port="${CCTRACE_SERVER_PORT:-}"
+    local traced=""
+    [ -n "$port" ] && traced=1
+    [ -n "${CCTRACE_TRACE_FILE:-}" ] && traced=1
+    case "${NODE_EXTRA_CA_CERTS:-}" in
+    */cctrace/*) traced=1 ;;
+    esac
+    [ "${DEVA_TRACE:-}" = "1" ] && traced=1
+    [ -n "$traced" ] || return 0
+
+    if [ -z "$port" ]; then
+        local reg="${CCTRACE_DATA_DIR:-}"
+        if [ -z "$reg" ]; then
+            case "${NODE_EXTRA_CA_CERTS:-}" in
+            */cctrace/*) reg=$(dirname "$(dirname "$NODE_EXTRA_CA_CERTS")") ;;
+            *) reg="$CLAUDE_HOME/.local/share/cctrace" ;;
+            esac
+        fi
+        reg="$reg/instances"
+        if [ -d "$reg" ]; then
+            port=$(cat "$reg"/*.json 2>/dev/null | jq -rs --arg sid "${stdin_session_id:-}" '
+                [ .[] | select(type == "object" and .endedAt == null) ]
+                | map(select(($sid | length) >= 8 and
+                             ((.sessionId // "")[0:8] == $sid[0:8])))
+                | first.port // empty' 2>/dev/null)
+            if [ -z "$port" ]; then
+                port=$(find "$reg" -name '*.json' -newermt '-120 seconds' 2>/dev/null \
+                    | xargs cat 2>/dev/null | jq -rs --arg cwd "${current_dir:-}" '
+                    [ .[] | select(type == "object" and .endedAt == null) ] as $fresh |
+                    (($fresh | map(select(.projectPath == $cwd and $cwd != ""))) +
+                     (if ($fresh | length) == 1 then $fresh else [] end))
+                    | first.port // empty' 2>/dev/null)
+            fi
+        fi
+    fi
+
+    # Full URL so terminals linkify it. DEVA_TRACE_UI_URL is the
+    # host-reachable URL deva exports on create/reattach (deva#547) —
+    # the container-side port is not what the host browser can reach,
+    # so it wins over anything derived locally.
+    if [ -n "${DEVA_TRACE_UI_URL:-}" ]; then
+        echo " ${DIM}[${DEVA_TRACE_UI_URL}]${RESET}"
+    elif [ -n "$port" ]; then
+        echo " ${DIM}[http://localhost:${port}]${RESET}"
+    else
+        echo " ${DIM}[cctrace]${RESET}"
+    fi
+}
+
+trace_info=$(build_trace_component)
+
 # settings.json .model is only a fallback for the rare case stdin carries no
 # model id — it's a static default a session can override, so it must not be
 # read (let alone preferred) when stdin already tells us the running model.
@@ -2939,6 +3457,20 @@ premium_band_level() {
 build_1m_tag() {
     echo "[1m]"
 }
+
+# Subcommand dispatch. Sits here on purpose: every function a subcommand
+# needs is defined above, and none of the per-session render work (fetches,
+# state writes, component building) has started below. Subcommands are
+# read-only against the state dir.
+if [ -n "$subcommand" ]; then
+    case "$subcommand" in
+    report) run_usage_report "${report_days:-28}"; exit $? ;;
+    check) run_check; exit $? ;;
+    session-summary) run_session_summary; exit $? ;;
+    week) run_week; exit $? ;;
+    esac
+    exit 0
+fi
 
 runtime_model=$(get_runtime_model "$model_id")
 
@@ -3436,8 +3968,14 @@ for item in "${order_array[@]}"; do
     esac
 done
 
+# Renders line 1 and records its actual width in line1_cols: the advisor row
+# right-aligns to THAT edge, not to term_width — when the width guess is
+# wrong (tput's flat 80 under a pipe) line 1 overflows its phantom edge, and
+# anchoring line 2 on the same phantom left it dangling mid-line.
+line1_cols=0
+
 format_output() {
-    local path_part="${DIM}${display_path}${RESET}${git_info}${deadman_info}"
+    local path_part="${DIM}${display_path}${RESET}${git_info}${trace_info}${deadman_info}"
     local stats_part="${right_parts}"
 
     # Strip ANSI escapes for length calculation (portable: printf %b instead of echo -e)
@@ -3448,11 +3986,13 @@ format_output() {
     "left-right")
         local padding=$((term_width - ${#path_plain} - ${#stats_plain} - 5))
         [ $padding -lt 6 ] && padding=6
+        line1_cols=$((${#path_plain} + padding + ${#stats_plain}))
         printf "%b%*s%b\n" "$path_part" $padding "" "$stats_part"
         ;;
     "right-left")
         local padding=$((term_width - ${#path_plain} - ${#stats_plain} - 5))
         [ $padding -lt 6 ] && padding=6
+        line1_cols=$((${#stats_plain} + padding + ${#path_plain}))
         printf "%b%*s%b\n" "$stats_part" $padding "" "$path_part"
         ;;
     "center")
@@ -3461,16 +4001,19 @@ format_output() {
             local left_padding=$(((term_width - ${#path_plain}) / 2))
             local right_padding=$((term_width - left_padding - ${#path_plain} - ${#stats_plain}))
             [ $right_padding -lt 2 ] && right_padding=2
+            line1_cols=$((left_padding + ${#path_plain} + right_padding + ${#stats_plain}))
             printf "%*s%b%*s%b\n" $left_padding "" "$path_part" $right_padding "" "$stats_part"
         else
             local padding=$((term_width - ${#path_plain} - ${#stats_plain} - 5))
             [ $padding -lt 6 ] && padding=6
+            line1_cols=$((${#path_plain} + padding + ${#stats_plain}))
             printf "%b%*s%b\n" "$path_part" $padding "" "$stats_part"
         fi
         ;;
     *)
         local padding=$((term_width - ${#path_plain} - ${#stats_plain} - 5))
         [ $padding -lt 6 ] && padding=6
+        line1_cols=$((${#path_plain} + padding + ${#stats_plain}))
         printf "%b%*s%b\n" "$path_part" $padding "" "$stats_part"
         ;;
     esac
@@ -3481,15 +4024,18 @@ format_output
 # Advisor row: a second stdout line renders as its own row in Claude Code's
 # status area, and printing nothing produces no row — so a quiet advisor
 # costs zero height. Single-hue by design, which keeps truncation honest.
-# Right-aligned to the same anchor the stats cluster ends at in format_output
-# (term_width - 5), so the advice sits directly beneath the usage badges it
-# interprets, stable across widths and message lengths; when the stats sit
-# left (right-left alignment) the advisor stays left with them.
+# Right-aligned to line 1's ACTUAL rendered edge (line1_cols, recorded by
+# format_output) — not to term_width, which lies under a pipe (tput says 80,
+# line 1 overflows it, and a term_width anchor left the advice dangling
+# mid-line). Anchoring on the row above keeps the advice directly beneath
+# the usage badges it interprets, whatever the width guess was; when the
+# stats sit left (right-left alignment) the advisor stays left with them.
 if [ "$advisor_display_mode" != "off" ] && [ -n "${usage_data:-}" ]; then
     advisor_line=$(build_advisor_line "$usage_data" "$advisor_display_mode" "${model_id:-$model_display}")
     if [ -n "$advisor_line" ]; then
         advisor_plain=$(printf '%b' "$advisor_line" | sed 's/\x1b\[[0-9;]*m//g')
-        advisor_max=$((term_width - 1))
+        advisor_anchor=$((line1_cols > 0 ? line1_cols : term_width - 5))
+        advisor_max=$((advisor_anchor > term_width - 1 ? advisor_anchor : term_width - 1))
         if [ "${#advisor_plain}" -gt "$advisor_max" ] 2>/dev/null && [ "$advisor_max" -gt 1 ]; then
             advisor_color=$(printf '%s' "$advisor_line" | grep -o '^\\033\[[0-9;]*m' | head -1)
             advisor_plain="${advisor_plain:0:$((advisor_max - 1))}…"
@@ -3497,7 +4043,7 @@ if [ "$advisor_display_mode" != "off" ] && [ -n "${usage_data:-}" ]; then
         fi
         advisor_pad=0
         if [ "$alignment" != "right-left" ]; then
-            advisor_pad=$((term_width - 5 - ${#advisor_plain}))
+            advisor_pad=$((advisor_anchor - ${#advisor_plain}))
             [ "$advisor_pad" -gt 0 ] 2>/dev/null || advisor_pad=0
         fi
         debug_log "ADVISOR: $advisor_plain"

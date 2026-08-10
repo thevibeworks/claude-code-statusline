@@ -81,6 +81,7 @@ Every component earns its place:
 | Signal | Why it matters |
 |--------|----------------|
 | Path and branch | Know where Claude Code is writing. Neutral grey; a dirty branch brightens to white with a `*`. |
+| Trace chip | `[http://localhost:9317]` when the session's wire is being captured by [cctrace](https://github.com/thevibeworks/cctrace) (`deva --trace`, or `cctrace` directly) — the full live trace UI URL, linkified by most terminals. `DEVA_TRACE_UI_URL` (exported by deva on traced create/reattach) outranks the container-side port, since only the host side knows the published port or the portless route. Session identity, so it sits on the left with path and branch, dim (red stays reserved for pressure). Detected from the trace env cctrace exports into the traced process (`CCTRACE_SERVER_PORT`), from the capture's CA plumbing (`NODE_EXTRA_CA_CERTS` under a cctrace dir), or from `DEVA_TRACE=1`; when only the plumbing is visible (older cctrace) the port resolves through cctrace's live-instance registry, matched by session id (sid8 prefix — the registry stores ids redacted), then project path, then by being the only live capture, with the fallbacks trusting heartbeat-fresh entries only. A traced session with no resolvable port still shows a bare `[cctrace]` — "recorded" matters even portless. |
 | Activity | Session diff without opening git. |
 | Time and cost | Track long sessions. Hours format above 60m (`1h30m`). |
 | Model | Abbreviated: `claude-opus-4-8` becomes `opus4.8`, `claude-fable-5` becomes `fabl5`, `claude-sonnet-5` becomes `sonnet5`. The `[1m]` tag marks a 1M-context session, detected from the window the CLI reports (`context_window_size`) — not the name — so it shows even when Claude Code strips the `[1m]` suffix (which it does since 2.1.173 whenever 1M is the default; Sonnet 5 joined Fable 5 on that path in 2.1.197). |
@@ -265,7 +266,7 @@ What it says, in value order (max two clauses):
 | `! fb caps ~Wed 18:00, 1d before reset` | The running model's scoped weekly quota caps before its reset — same linear math, gates, and recovery suppression as the 7d aggregate. |
 | `! 7d dry ~Thu 09:00, 2d before reset — then extra billing` (or `then hard stop`) | The learned weekday forecast projects the quota drying up early; cold start falls back to linear pace, but only once `seven_day_pace` already warns. The tail states what actually happens at 100%. |
 | `+ 7d on pace to leave ~62% unused — go heavier` | Underuse: on pace to strand a large chunk of the subscription. The learned weekday profile speaks first — it knows *your* remaining days, so it can warn from day two; cold start falls back to linear pace past half the window. Speaks only in an engaged, unsqueezed session (5h between 25% and 80%, no pressure clause) — it reaches exactly the person who can act on it and never nags an idle one. |
-| `- ~19x5h left, even pace 1.1%/win, heading ~52%` | `--advisor always` only, when calm: the weekly budget in one breath. "heading" is the learned end-of-week projection when trained, linear once the window is a day old. |
+| `- budget ~19x5h left · even 1.1%/win · heading ~52%` | `--advisor always` only, when calm: the weekly budget in one breath — runway, what even looks like, where you land. "heading" is the learned end-of-week projection when trained, linear once the window is a day old. In the last window per-window math would just restate the headroom, so it degrades to `- budget last window · 61% left · heading ~40%`. |
 
 The 7d window gets one voice per render — surplus, dry, or underuse,
 never two that could disagree.
@@ -286,6 +287,96 @@ For a standalone full-screen watcher (multi-account polling,
 notifications), see `claude.py --watch-usage` in
 [claudex](https://github.com/thevibeworks/claudex) — it consumes the same
 state dir this script maintains (see `docs/api/state-dir.md`).
+
+## The waste ledger
+
+The advisor prevents waste prospectively; `report` proves it
+retroactively. It replays the usage log the statusline has been writing
+all along and ledgers every closed window — what you used, what expired:
+
+```bash
+$ ~/.claude/statusline.sh report          # or --days 90
+usage report - work (last 28d, 79 samples)
+
+7d windows closed: 1
+  Tue 07-28 00:00  used 51%  expired 49% (~4.7 x 5h windows unused)
+
+5h windows closed: 3   avg 95% at close   2 hit the cap
+exchange rate: one full 5h window = ~10.46% of the week (~9.6 windows/week, learned)
+
+week in progress: 5% used, resets Mon 08-03 23:59
+```
+
+That "expired 49%" line is the subscription math nobody shows you: half
+a week of paid capacity, gone. The windows-worth figure uses the same
+learned `pct_per_window` ratio the advisor's feasibility check uses, and
+"week in progress" runs the same learned projection — the surfaces
+cannot disagree.
+
+Honest limits: a window's final utilization is the last sample before
+its reset, so usage from other devices after your last local render is
+invisible, and a week you never opened a session in never appears at
+all. The ledger reports what the log observed, nothing more.
+
+## Scripting: `check` and `session-summary`
+
+The statusline never runs when you're away — exactly when expiring
+capacity needs a voice. Instead of shipping a daemon, `check` exposes
+the advisor's judgment as an exit code; you provide the plumbing (tmux
+segment, cron, CI):
+
+```bash
+~/.claude/statusline.sh check
+# stdout: the plain advisor text, or "calm" / "unknown: ..."
+# exit 0 calm | 1 opportunity (+) | 2 pressure (!) | 3 unknown/stale
+```
+
+```bash
+# cron: nudge yourself when paid capacity is about to expire unused
+*/30 * * * * ~/.claude/statusline.sh check; [ $? -eq 1 ] && notify-send "$(~/.claude/statusline.sh check)"
+
+# tmux: advisor verdict in the status bar
+set -g status-right '#(~/.claude/statusline.sh check)'
+```
+
+`session-summary` is the same idea for session retrospectives — one
+line per session, built from the usage log, designed as a `SessionEnd`
+hook (it reads the hook JSON on stdin):
+
+```jsonc
+// settings.json
+"hooks": {
+  "SessionEnd": [{"hooks": [{"type": "command",
+    "command": "~/.claude/statusline.sh session-summary >> ~/.claude/statusline/session-summaries.log"}]}]
+}
+```
+
+```text
+session 8f3c02aa: 3h12m, 5h +34pts, 7d +4pts, claude-fable-5
+```
+
+Run it bare and it summarizes the last session in the log. Window
+deltas are positive-delta sums, so a session that straddles a 5h reset
+still reports what it actually consumed.
+
+## The agent surface
+
+Three layers, one source of truth: line 1 shows the numbers, line 2
+says the one sentence that matters, and for the full conversation —
+"should I start a heavy task now?", "which account has headroom?",
+"what did I waste this week?" — there's a skill that teaches Claude
+Code itself to read the state dir:
+
+```bash
+cp -r skills/usage-insight ~/.claude/skills/
+```
+
+Then just ask. The skill knows the state-dir contract
+(`docs/api/state-dir.md`), the learned-forecast semantics
+(`pct_per_window`, weekday profile, prediction calibration), and the
+advisor's judgment rules — including the important one: never advise
+what the data can't back. It reads the same files and runs the same
+`report`/`check` subcommands, so all three layers always agree.
 
 <details><summary>OAuth and API behavior</summary>
 
@@ -335,7 +426,7 @@ run. Setting only `CLAUDE_CACHE_DIR` keeps the legacy single-dir behavior.
 npm exec --yes bats -- t/
 ```
 
-321 tests across `t/statusline.bats` (309 statusline + integration) and
+334 tests across `t/statusline.bats` (322 statusline + integration) and
 `t/install.bats` (12 installer). CI runs on push and PR to `main`.
 
 ## Project Structure
