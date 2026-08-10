@@ -7,7 +7,7 @@ is the ONLY writer; everything here is safe to read concurrently.
 
 - Contract version: **1** (bump on any breaking layout/field change; this
   file is the changelog)
-- Synced with: statusline.sh v0.19.0
+- Synced with: statusline.sh v0.20.0
 - Permissions: the script runs under `umask 077` — files are owner-only.
   Caches hold account PII (email, uuid, org names).
 
@@ -91,12 +91,26 @@ Append-only, one JSON object per line, three event types:
 
 | `type` | Emitted | Payload |
 |--------|---------|---------|
-| `usage` | every successful usage fetch | `session_id`, `timestamp`, `user{email,name,uuid,…}`, `organization{…}`, `five_hour`, `seven_day`, `seven_day_opus`, `extra_usage` |
+| `usage` | every successful usage fetch | `session_id`, `timestamp`, `user{email,name,uuid,…}`, `organization{…}`, `five_hour`, `seven_day`, `seven_day_opus`, `extra_usage`, `limits[]`, `model`, `predicted_end` |
 | `session_start` | first fetch of a new 5h window | `session_id`, `timestamp`, `five_hour_window_end`, `seven_day_window_end` |
 | `session_end` | 5h window rolled while a different session was last | `session_id`, `timestamp` |
 
+Since v0.20.0 each `usage` line also records what the learner will need
+later (learning lags logging — a field absent today is a pattern that
+cannot be learned next month):
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `limits[]` | array | scoped limits verbatim (per-model weekly caps) |
+| `model` | string \| null | model id active in the logging session |
+| `predicted_end` | int \| null | the learned walk's end-of-week projection at sample time; null until the profile is warm. Compare against the window's observed final to measure forecast accuracy. |
+
 Rotation keeps exactly one `.1` backup; readers wanting full history read
 `usage.jsonl.1` then `usage.jsonl`.
+
+The `report` subcommand (`statusline.sh report [--days N]`) is the
+reference consumer: it replays this log and ledgers what each closed
+window expired unused.
 
 ## Consumer rules
 

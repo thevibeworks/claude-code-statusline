@@ -285,6 +285,36 @@ notifications), see `claude.py --watch-usage` in
 [claudex](https://github.com/thevibeworks/claudex) — it consumes the same
 state dir this script maintains (see `docs/api/state-dir.md`).
 
+## The waste ledger
+
+The advisor prevents waste prospectively; `report` proves it
+retroactively. It replays the usage log the statusline has been writing
+all along and ledgers every closed window — what you used, what expired:
+
+```bash
+$ ~/.claude/statusline.sh report          # or --days 90
+usage report - work (last 28d, 79 samples)
+
+7d windows closed: 1
+  Tue 07-28 00:00  used 51%  expired 49% (~4.7 x 5h windows unused)
+
+5h windows closed: 3   avg 95% at close   2 hit the cap
+exchange rate: one full 5h window = ~10.46% of the week (~9.6 windows/week, learned)
+
+week in progress: 5% used, resets Mon 08-03 23:59
+```
+
+That "expired 49%" line is the subscription math nobody shows you: half
+a week of paid capacity, gone. The windows-worth figure uses the same
+learned `pct_per_window` ratio the advisor's feasibility check uses, and
+"week in progress" runs the same learned projection — the surfaces
+cannot disagree.
+
+Honest limits: a window's final utilization is the last sample before
+its reset, so usage from other devices after your last local render is
+invisible, and a week you never opened a session in never appears at
+all. The ledger reports what the log observed, nothing more.
+
 <details><summary>OAuth and API behavior</summary>
 
 Quota, profile, and extra-usage requests use Claude Code's OAuth credentials
@@ -332,7 +362,7 @@ run. Setting only `CLAUDE_CACHE_DIR` keeps the legacy single-dir behavior.
 npm exec --yes bats -- t/
 ```
 
-321 tests across `t/statusline.bats` (309 statusline + integration) and
+327 tests across `t/statusline.bats` (315 statusline + integration) and
 `t/install.bats` (12 installer). CI runs on push and PR to `main`.
 
 ## Project Structure

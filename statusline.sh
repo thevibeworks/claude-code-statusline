@@ -22,6 +22,9 @@ cache_display_mode="auto" # auto, always, off
 test_mode=false
 test_data=""
 debug_mode=false
+subcommand=""               # report (see run_usage_report); dispatched late,
+                            # after every function it needs is defined
+report_days=""
 
 # Auto-display thresholds. The 5h countdown itself is always visible (see
 # build_usage_display); these gate the recovery color and extra visibility.
@@ -235,6 +238,14 @@ debug_log() {
 
 while [[ $# -gt 0 ]]; do
     case $1 in
+    report)
+        subcommand="report"
+        shift
+        ;;
+    --days)
+        report_days="$2"
+        shift 2
+        ;;
     --style)
         progress_bar_style="$2"
         shift 2
@@ -336,7 +347,12 @@ if [ -n "$theme" ]; then
     apply_theme
 fi
 
-if [ "$test_mode" = true ]; then
+if [ -n "$subcommand" ]; then
+    # Subcommands take no stdin; the shared parse below still runs, so give
+    # it an empty object and let the late dispatch (after all function
+    # definitions) do the real work.
+    input='{}'
+elif [ "$test_mode" = true ]; then
     if [ -n "$test_data" ]; then
         input="$test_data"
     else
@@ -1032,9 +1048,22 @@ log_usage_snapshot() {
         debug_log "log_usage_snapshot: no token provided"
     fi
 
+    # Calibration seed: the learned walk's end-of-week projection AT SAMPLE
+    # TIME. When this window later closes, `report` can compare what we
+    # predicted against what actually happened — the forecast's accuracy
+    # becomes measurable instead of assumed. Empty until the profile is warm.
+    local predicted_end="" _s_util _s_secs
+    _s_util=$(echo "$usage_data" | jq -r '.seven_day.utilization // empty' 2>/dev/null)
+    if [ -n "$_s_util" ]; then
+        _s_secs=$(get_reset_seconds "$(echo "$usage_data" | jq -r '.seven_day.resets_at // empty' 2>/dev/null)")
+        [ -n "$_s_secs" ] && read -r _ predicted_end <<<"$(_seven_day_walk "$_s_util" "$_s_secs")"
+    fi
+
     echo "$usage_data" | jq -c \
         --arg sid "$session_id" \
         --arg ts "$(date +%s)" \
+        --arg model "${model_id:-}" \
+        --arg pend "${predicted_end:-}" \
         --arg email "$user_email" \
         --arg name "$user_name" \
         --arg uuid "$user_uuid" \
@@ -1068,7 +1097,10 @@ log_usage_snapshot() {
             five_hour:.five_hour,
             seven_day:.seven_day,
             seven_day_opus:.seven_day_opus,
-            extra_usage:.extra_usage
+            extra_usage:.extra_usage,
+            limits:(.limits // []),
+            model:($model | if . == "" then null else . end),
+            predicted_end:($pend | if . == "" then null else tonumber end)
         }' \
         >>"$usage_log" 2>/dev/null
 }
@@ -1804,16 +1836,21 @@ build_seven_day_profile() {
     tzoff_s=$(date +%z | awk '{ s=substr($0,1,1)=="-"?-1:1; h=substr($0,2,2)+0; m=substr($0,4,2)+0; print s*(h*3600+m*60) }')
     local data
     data=$( { cat "${jsonl}.1" 2>/dev/null; cat "$jsonl"; } | jq -r --arg a "$acct" '
-            select((.user.uuid // "") == $a)
             # Window identity for the ratio pairs: resets_at wobbles per
             # fetch (microseconds, and 06:59:59 vs 07:00:00 across the
-            # boundary), so normalize to the nearest minute; non-ISO values
-            # fall back to the raw string.
+            # boundary), so normalize to the nearest minute. Non-ISO values
+            # fall back to the raw string ($raw — NOT `catch .`, which would
+            # yield the error MESSAGE and give every empty/broken value one
+            # shared fake identity, silently pairing across real windows).
+            def norm: tostring | . as $raw
+                | if $raw == "" then "" else
+                    (try (sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z")
+                          | fromdateiso8601 | (. + 30) / 60 | floor) catch $raw)
+                  end;
+            select((.user.uuid // "") == $a)
             | [.timestamp, (.seven_day.utilization // ""),
                (.five_hour.utilization // ""),
-               ((.five_hour.resets_at // "") | tostring
-                | (try (sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z")
-                        | fromdateiso8601 | (. + 30) / 60 | floor) catch .))] | @tsv' 2>/dev/null \
+               ((.five_hour.resets_at // "") | norm)] | @tsv' 2>/dev/null \
         | sort -n | awk -F'\t' -v now="$now" -v tz="$tzoff_s" '
         $2 != "" {
             if (prev_set && $2 > prev) {
@@ -1951,6 +1988,140 @@ forecast_pct_per_window() {
     local ppw
     ppw=$(jq -r '.pct_per_window // -1' "$fc" 2>/dev/null)
     awk -v p="${ppw:--1}" 'BEGIN{ if (p > 0) printf "%.2f", p }'
+}
+
+# ---------------------------------------------------------------------------
+# The waste ledger: `statusline.sh report [--days N]`. Mines usage.jsonl for
+# closed windows and says, in percent and in windows, what expired unused.
+# The advisor prevents waste prospectively; this proves it retroactively.
+#
+# A window "closes" when consecutive samples disagree on resets_at (normalized
+# to the minute — the same identity rule the ratio learner uses): the last
+# sample before the flip is that window's final utilization. Honest limits:
+# usage from other clients after the last local render is invisible, and a
+# window that was never sampled never existed as far as the log knows.
+# ---------------------------------------------------------------------------
+run_usage_report() {
+    local days="${1:-28}"
+    case "$days" in '' | *[!0-9]*) days=28 ;; esac
+    [ "$days" -ge 1 ] 2>/dev/null || days=28
+    local jsonl="$CLAUDE_ACCOUNT_DIR/usage.jsonl"
+    if [ ! -f "$jsonl" ] && [ ! -f "${jsonl}.1" ]; then
+        echo "no usage history yet ($jsonl)"
+        echo "the statusline logs every quota fetch; come back after a session or two."
+        return 1
+    fi
+    local acct
+    acct=$(jq -r '.account.uuid // empty' "$CLAUDE_ACCOUNT_DIR/profile.cache" 2>/dev/null)
+    # profile.cache can postdate the log (fresh install): fall back to the
+    # last snapshot's identity rather than reporting nothing.
+    [ -n "$acct" ] || acct=$(tail -1 "$jsonl" 2>/dev/null | jq -r '.user.uuid // empty' 2>/dev/null)
+    local now cutoff
+    now=$(date +%s)
+    cutoff=$(( now - days * 86400 ))
+    # Mined stream: "S <7d-close-key> <final%>" per closed 7d window,
+    # then "F <closed> <avg%> <capped>" for 5h windows, "N <samples>".
+    local mined
+    mined=$( { cat "${jsonl}.1" 2>/dev/null; cat "$jsonl" 2>/dev/null; } | jq -r --arg a "$acct" --argjson cut "$cutoff" '
+        def norm: tostring | . as $raw
+            | if $raw == "" then "" else
+                (try (sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z")
+                      | fromdateiso8601 | (. + 30) / 60 | floor) catch $raw)
+              end;
+        select((.type // "usage") == "usage" and (.user.uuid // "") == $a
+               and (.timestamp // 0) >= $cut)
+        | [.timestamp, (.five_hour.utilization // ""), (.seven_day.utilization // ""),
+           ((.five_hour.resets_at // "") | norm), ((.seven_day.resets_at // "") | norm)]
+        | @tsv' 2>/dev/null \
+        | sort -n | awk -F'\t' '
+        {
+            n++
+            if ($4 != "" && pfk != "" && $4 != pfk && pfu != "") {
+                fcl++; fsum += pfu; if (pfu >= 99) fcap++
+            }
+            if ($5 != "" && psk != "" && $5 != psk && psu != "") {
+                print "S", psk, psu
+            }
+            if ($4 != "") { pfk = $4; if ($2 != "") pfu = $2 }
+            if ($5 != "") { psk = $5; if ($3 != "") psu = $3 }
+        }
+        END {
+            printf "F %d %.0f %d\n", fcl, (fcl ? fsum / fcl : 0), fcap
+            printf "N %d\n", n
+        }')
+
+    local ppw
+    ppw=$(forecast_pct_per_window)
+    local f_closed=0 f_avg=0 f_cap=0 samples=0
+    read -r _ f_closed f_avg f_cap <<<"$(printf '%s\n' "$mined" | grep '^F ' | head -1)"
+    read -r _ samples <<<"$(printf '%s\n' "$mined" | grep '^N ' | head -1)"
+
+    printf 'usage report - %s (last %sd, %s samples)\n\n' "${ACCOUNT_TAG:-default}" "$days" "${samples:-0}"
+
+    local s_count
+    s_count=$(printf '%s\n' "$mined" | grep -c '^S ')
+    printf '7d windows closed: %s\n' "$s_count"
+    if [ "$s_count" -gt 0 ] 2>/dev/null; then
+        local key final used_i waste wins when sum_final=0
+        while read -r _ key final; do
+            used_i=$(printf '%.0f' "$final" 2>/dev/null || echo 0)
+            waste=$(( 100 - used_i )); [ "$waste" -lt 0 ] && waste=0
+            sum_final=$(( sum_final + used_i ))
+            case "$key" in
+            *[!0-9]*) when="$key" ;;
+            *) when=$(_fmt_epoch "$(( key * 60 ))" '%a %m-%d %H:%M') ;;
+            esac
+            if [ -n "$ppw" ]; then
+                wins=$(awk -v w="$waste" -v p="$ppw" 'BEGIN{printf "%.1f", w / p}')
+                printf '  %s  used %s%%  expired %s%% (~%s x 5h windows unused)\n' \
+                    "$when" "$used_i" "$waste" "$wins"
+            else
+                printf '  %s  used %s%%  expired %s%%\n' "$when" "$used_i" "$waste"
+            fi
+        done <<<"$(printf '%s\n' "$mined" | grep '^S ')"
+        if [ "$s_count" -gt 1 ] 2>/dev/null; then
+            local avg_used=$(( sum_final / s_count ))
+            printf '  avg at close: %s%% used / %s%% expired\n' "$avg_used" "$(( 100 - avg_used ))"
+        fi
+    fi
+
+    if [ "${f_closed:-0}" -gt 0 ] 2>/dev/null; then
+        printf '\n5h windows closed: %s   avg %s%% at close   %s hit the cap\n' \
+            "$f_closed" "$f_avg" "$f_cap"
+    else
+        printf '\n5h windows closed: 0\n'
+    fi
+
+    if [ -n "$ppw" ]; then
+        local wpw
+        wpw=$(awk -v p="$ppw" 'BEGIN{printf "%.1f", 100 / p}')
+        printf 'exchange rate: one full 5h window = ~%s%% of the week (~%s windows/week, learned)\n' \
+            "$ppw" "$wpw"
+    else
+        printf 'exchange rate: still learning (needs ~half a window of paired burn)\n'
+    fi
+
+    # Week in progress, from the freshest source (usage.cache), projected with
+    # the same learned walk the advisor uses — the surfaces must not disagree.
+    local uc="$CLAUDE_ACCOUNT_DIR/usage.cache"
+    if [ -f "$uc" ]; then
+        local cur_su cur_reset secs repoch when gap end
+        cur_su=$(jq -r '.seven_day.utilization // empty' "$uc" 2>/dev/null)
+        cur_reset=$(jq -r '.seven_day.resets_at // empty' "$uc" 2>/dev/null)
+        if [ -n "$cur_su" ] && [ -n "$cur_reset" ]; then
+            secs=$(get_reset_seconds "$cur_reset")
+            repoch=$(_epoch_from_ts "$cur_reset")
+            when=$(_fmt_epoch "${repoch:-0}" '%a %m-%d %H:%M')
+            read -r gap end <<<"$(_seven_day_walk "$cur_su" "${secs:-0}")"
+            if [ -n "$end" ]; then
+                printf '\nweek in progress: %.0f%% used, resets %s - heading ~%s%%\n' \
+                    "$cur_su" "$when" "$end"
+            else
+                printf '\nweek in progress: %.0f%% used, resets %s\n' "$cur_su" "$when"
+            fi
+        fi
+    fi
+    return 0
 }
 
 # Generalized change flash: signed delta between the current value and the
@@ -2906,6 +3077,17 @@ premium_band_level() {
 build_1m_tag() {
     echo "[1m]"
 }
+
+# Subcommand dispatch. Sits here on purpose: every function a subcommand
+# needs is defined above, and none of the per-session render work (fetches,
+# state writes, component building) has started below. Subcommands are
+# read-only against the state dir.
+if [ -n "$subcommand" ]; then
+    case "$subcommand" in
+    report) run_usage_report "${report_days:-28}"; exit $? ;;
+    esac
+    exit 0
+fi
 
 runtime_model=$(get_runtime_model "$model_id")
 
