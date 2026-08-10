@@ -90,6 +90,7 @@ Every component earns its place:
 | User tier | Neutral white-weight (MAX bold, PRO normal, dim otherwise) — identity, never a status color. Truncated display name. |
 | Quota | Integer percentages. The 5h badge always carries its reset time while a window is live — `5h[42%@14:30]` reads "42% used, resets at 14:30" — because on a 5h horizon the reset is the number you plan the current sitting around. Wall-clock, not a countdown, on purpose: Claude Code only re-renders the statusline on activity, so a relative "@1h38m" silently decays into a lie during idle gaps, while "@14:30" stays true in a frozen frame. (The 7d badge is hybrid: day-relative `@5d` while the reset is >= 24h out — decays one day per day, mild and narrow — switching to the same wall-clock `@04:00` inside the last day, where an `@6h`/`@<1h` countdown decayed by the hour exactly when pressure keeps the suffix visible.) When a window's utilization climbs between renders, a reverse-video `+N` token appears right after the badge for ~60s: `5h[44%@14:32]+2` means "you just burned 2%". A drop (window reset) stays quiet — the fresh low number is its own signal. **7d is forecast, not leveled**: a learned per-weekday burn profile (EWMA over your own usage history) plus your recent 24h burn project whether the quota outlasts the window — your heavy Tuesday counts more than a generic average. The verdict is color alone; under pressure the badge shows when relief arrives: `7d[44%@5d]` red means "at your pace, dry days before the reset 5 days from now"; inside the last day it reads `7d[92%@04:00]` — resets at 04:00. Cold start (<14 days history) falls back to window-average pacing. Recovery color when reset is imminent. **Model-scoped weekly quota**: when the usage API carries a per-model weekly limit (`limits[]`, `kind=weekly_scoped`) for the model your session is running, it renders right after the model+context block — `fabl5[1m][12%] fb[67%]` on a Fable 5 session, `op[33%]` on Opus — because the quota is a property of the model you're running, not of the account-wide 5h/7d cluster. It's a weekly number (same reset as the 7d badge), scoped to one model. Other models' scoped quotas stay hidden: only the limit constraining *this* session is signal. Supersedes the legacy `seven_day_opus`/`seven_day_sonnet` fields, which the API now sends as null. |
 | Extra usage | Monthly spend, limit, prepaid balance. `--extra auto` shows when quota runs out. |
+| Deadman | **Invisible until a switch is armed.** Surfaces [deadman](https://github.com/thevibeworks/deadman) — a dead man's switch that hands the session off when you stop responding. `[☠ armed 42m]` (dim) counts down to the auto-handoff; `[☠ warned 3m]` (yellow) means the phone warning went out; `[☠ due]` means the handoff fires imminently. Sits on the left lane next to the path — it describes this session's lifecycle, not a quota. One `command -v` when the tool is absent, one fast file read when present; nothing armed renders nothing. `--deadman off` disables it. |
 | Cache health | **Quiet until it bites.** Claude Code never re-renders an idle session, and while you work the prompt cache is always freshly ~1 TTL from expiry — so a proactive "expiring soon" isn't honestly observable, and `auto` spends no width on it. It speaks only when a rewrite actually happens: `≡!419k` the instant you resume onto a dead cache (idle longer than the TTL) or a mid-session prefix collapse — a 419k-token re-cache at ~20x the read rate (and the same burn on your 5h/7d quota on subscriptions). **Bold red past 200k** — the premium-band miss. `≡~` while a large prefix rebuilds. `--cache always` additionally keeps the freeze-safe deadline `≡@15:20` (last request + TTL; a past time in a frozen frame reads "expired at 15:20"). TTL defaults to 1h (claude.ai subscriber sessions) or 5m (API-key auth); an observed usage breakdown overrides it. The `≡` glyph (U+2261) reads as stacked cache layers — one terminal column, quiet and distinct. |
 
 **Color follows three lanes** so a glance is unambiguous: **status**
@@ -116,7 +117,7 @@ red, matching its Claude Code TUI color) = model family; everything else is
 | Change flash on every refresh (`+.37` cost, `+9`/`-27` context, `+N` quota) | -- | Yes |
 | Model-scoped weekly quota (`fb`/`op`/`sn`) | -- | Yes |
 | Works behind trusted mitm proxies (NODE_EXTRA_CA_CERTS) | -- | Yes |
-| 266 bats tests + CI | -- | Yes |
+| 331 bats tests + CI | -- | Yes |
 
 ## Configuration
 
@@ -136,6 +137,7 @@ Flags go in the command string in `~/.claude/settings.json`:
 | `--extra` | `auto`, `always`, `on-limit`, `off` | `auto` |
 | `--cache` | `auto`, `always`, `off` | `auto` |
 | `--advisor` | `auto`, `always`, `off` — second-row projection line, see [Advisor line](#advisor-line) | `auto` |
+| `--deadman` | `auto`, `off` — [deadman](https://github.com/thevibeworks/deadman) switch chip | `auto` |
 | `--debug` | Write logs to `~/.claude/statusline/logs/statusline.log` | off |
 | `--test [json]` | Render with mock data | off |
 
@@ -408,6 +410,7 @@ run. Setting only `CLAUDE_CACHE_DIR` keeps the legacy single-dir behavior.
 | `CLAUDE_7D_WORKDAYS` | unset | Skip weekends in the 7d pace deadline — quota you won't spend Sat/Sun no longer counts against runway (opt-in; the limit itself stays calendar-based) |
 | `CLAUDE_DATA_DIR` | `~/.claude/statusline` | Account-scoped cache + usage log location |
 | `CLAUDE_CACHE_DIR` | `$CLAUDE_DATA_DIR/sessions` | Per-session cache-health state |
+| `STATUSLINE_DEADMAN` | `auto` | Default for the deadman chip (`auto`/`off`); the `--deadman` flag wins |
 | `STATUSLINE_ACCOUNT` | unset | Account label for multi-account setups: renders an `@label` chip and moves account caches to `accounts/<label>/` so concurrent accounts stop sharing one quota cache |
 | `DEVA_AUTH_TAG` | unset | Same as above, set automatically by [deva](https://github.com/thevibeworks/deva) from `--auth-with` (`auth-file-<stem>` -> `@<stem>`); `auth-default` means single-account and is ignored. Containers from pre-v0.18 deva without the tag are resolved from `DEVA_AUTH_METHOD`/`DEVA_AUTH_DETAILS` instead |
 | `DEBUG_LOG` | `~/.claude/statusline/logs/statusline.log` | Debug log path |

@@ -3056,6 +3056,118 @@ _write_ppw_fixture() { # dir ppw
     rm -rf "$tmpdir"
 }
 
+# --- deadman chip (dead man's switch) ---
+
+# PATH shim standing in for the real deadman binary. Writes a marker file on
+# every invocation so tests can assert the fast paths spend NO subshell at all,
+# not merely that they render nothing.
+make_deadman_shim() { # $1=tmpdir $2=chip output
+    mkdir -p "$1/bin"
+    printf '#!/bin/bash\ntouch "%s/called"\necho "%s"\n' "$1" "$2" > "$1/bin/deadman"
+    chmod +x "$1/bin/deadman"
+}
+
+@test "build_deadman_component: armed renders dim countdown chip" {
+    tmpdir=$(mktemp -d)
+    make_deadman_shim "$tmpdir" "armed 42m"
+    deadman_display_mode="auto"
+    stdin_session_id="dm-armed"
+    result=$(PATH="$tmpdir/bin:$PATH"; build_deadman_component)
+    [ "$result" = " ${DIM}[☠ armed 42m]${RESET}" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_deadman_component: warned escalates to warning color" {
+    tmpdir=$(mktemp -d)
+    make_deadman_shim "$tmpdir" "warned 3m"
+    deadman_display_mode="auto"
+    stdin_session_id="dm-warned"
+    result=$(PATH="$tmpdir/bin:$PATH"; build_deadman_component)
+    [ "$result" = " ${YELLOW}[☠ warned 3m]${RESET}" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_deadman_component: due keeps the warning color" {
+    tmpdir=$(mktemp -d)
+    make_deadman_shim "$tmpdir" "due"
+    deadman_display_mode="auto"
+    stdin_session_id="dm-due"
+    result=$(PATH="$tmpdir/bin:$PATH"; build_deadman_component)
+    [ "$result" = " ${YELLOW}[☠ due]${RESET}" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_deadman_component: empty chip output (nothing armed) renders nothing" {
+    tmpdir=$(mktemp -d)
+    make_deadman_shim "$tmpdir" ""
+    deadman_display_mode="auto"
+    stdin_session_id="dm-idle"
+    result=$(PATH="$tmpdir/bin:$PATH"; build_deadman_component)
+    [ -z "$result" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_deadman_component: deadman not installed renders nothing" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/emptybin"
+    deadman_display_mode="auto"
+    stdin_session_id="dm-noinstall"
+    # Builtins-only PATH: the function must bail at `command -v` before ever
+    # needing an external binary — this is the zero-cost absence contract.
+    result=$(PATH="$tmpdir/emptybin"; build_deadman_component)
+    [ -z "$result" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_deadman_component: off mode spends nothing even with deadman armed" {
+    tmpdir=$(mktemp -d)
+    make_deadman_shim "$tmpdir" "armed 42m"
+    deadman_display_mode="off"
+    stdin_session_id="dm-off"
+    result=$(PATH="$tmpdir/bin:$PATH"; build_deadman_component)
+    [ -z "$result" ]
+    [ ! -e "$tmpdir/called" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_deadman_component: empty session id never invokes the tool" {
+    tmpdir=$(mktemp -d)
+    make_deadman_shim "$tmpdir" "armed 42m"
+    deadman_display_mode="auto"
+    stdin_session_id=""
+    result=$(PATH="$tmpdir/bin:$PATH"; build_deadman_component)
+    [ -z "$result" ]
+    [ ! -e "$tmpdir/called" ]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: deadman chip renders on line 1 next to the path" {
+    tmpdir=$(mktemp -d)
+    make_deadman_shim "$tmpdir" "armed 42m"
+    out=$(echo '{"session_id":"dm-int","model":{"id":"claude-opus-4-6","display_name":"Opus"},"cwd":"/t","workspace":{"current_dir":"/t"},"version":"2.1.174","cost":{"total_cost_usd":0}}' \
+        | PATH="$tmpdir/bin:$PATH" bash "$SCRIPT_DIR/statusline.sh" --test)
+    line1=$(strip_ansi "$out" | head -n1)
+    [[ "$line1" == *"[☠ armed 42m]"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: no chip without a deadman shim on PATH" {
+    # Hosts with a real deadman installed still pass: an unarmed/unknown
+    # session prints empty by contract, and empty renders nothing.
+    out=$(echo '{"session_id":"dm-int-none-e5b1","model":{"id":"claude-opus-4-6","display_name":"Opus"},"cwd":"/t","workspace":{"current_dir":"/t"},"version":"2.1.174","cost":{"total_cost_usd":0}}' \
+        | bash "$SCRIPT_DIR/statusline.sh" --test)
+    [[ "$(strip_ansi "$out")" != *"☠"* ]]
+}
+
+@test "integration: --deadman off suppresses the chip" {
+    tmpdir=$(mktemp -d)
+    make_deadman_shim "$tmpdir" "armed 42m"
+    out=$(echo '{"session_id":"dm-int-off","model":{"id":"claude-opus-4-6","display_name":"Opus"},"cwd":"/t","workspace":{"current_dir":"/t"},"version":"2.1.174","cost":{"total_cost_usd":0}}' \
+        | PATH="$tmpdir/bin:$PATH" bash "$SCRIPT_DIR/statusline.sh" --test --deadman off)
+    [[ "$(strip_ansi "$out")" != *"☠"* ]]
+    rm -rf "$tmpdir"
+}
+
 # --- cctrace trace chip (left cluster) ---
 
 @test "build_trace_component: silent without any trace signal" {
