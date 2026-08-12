@@ -3187,6 +3187,15 @@ make_deadman_shim() { # $1=tmpdir $2=chip output
     [ "$plain" = " [https://cctrace.localhost:1355/trace]" ]
 }
 
+@test "build_trace_component: a known session id deep-links /s/<sid8>, not /trace" {
+    # cctrace >= 0.40 serves /s/<sid8> — a rewrite to /trace#/session/<sid8>,
+    # landing on THIS session's conversation scrolled to the newest turn.
+    result=$( (DEVA_TRACE_UI_URL="https://cctrace.localhost" CCTRACE_SERVER_PORT=9317 \
+        stdin_session_id="c3a6e0f3-871b-4047-a282-60ca3d2244e6"; build_trace_component) )
+    plain=$(strip_ansi "$result")
+    [ "$plain" = " [https://cctrace.localhost/s/c3a6e0f3]" ]
+}
+
 @test "build_trace_component: registry stores the sid REDACTED — sid8 prefix still matches" {
     # cctrace's capture-time redaction masks session ids past the first 8 hex
     # before anything lands on disk; the sid8 prefix is the join key.
@@ -3196,7 +3205,7 @@ make_deadman_shim() { # $1=tmpdir $2=chip output
         > "$tmpdir/instances/r1.json"
     result=$( (DEVA_TRACE=1 CCTRACE_DATA_DIR="$tmpdir" stdin_session_id="c3a6e0f3-871b-4047-a282-60ca3d2244e6" current_dir="/t"; build_trace_component) )
     plain=$(strip_ansi "$result")
-    [ "$plain" = " [http://localhost:9319/trace]" ]
+    [ "$plain" = " [http://localhost:9319/s/c3a6e0f3]" ]
     rm -rf "$tmpdir"
 }
 
@@ -3210,7 +3219,7 @@ make_deadman_shim() { # $1=tmpdir $2=chip output
     touch -d '10 minutes ago' "$tmpdir/instances/r1.json"
     result=$( (DEVA_TRACE=1 CCTRACE_DATA_DIR="$tmpdir" stdin_session_id="c3a6e0f3-871b-4047-a282-60ca3d2244e6" current_dir="/t"; build_trace_component) )
     plain=$(strip_ansi "$result")
-    [ "$plain" = " [http://localhost:9319/trace]" ]
+    [ "$plain" = " [http://localhost:9319/s/c3a6e0f3]" ]
     rm -rf "$tmpdir"
 }
 
@@ -3248,7 +3257,7 @@ make_deadman_shim() { # $1=tmpdir $2=chip output
         > "$tmpdir/instances/r1.json"
     result=$( (NODE_EXTRA_CA_CERTS="$tmpdir/mitm/ca-cert.pem" stdin_session_id="sid-x" current_dir="/t"; build_trace_component) )
     plain=$(strip_ansi "$result")
-    [ "$plain" = " [http://localhost:9321/trace]" ]
+    [ "$plain" = " [http://localhost:9321/s/sid-x]" ]
     rm -rf "$base"
 }
 
@@ -3261,7 +3270,7 @@ make_deadman_shim() { # $1=tmpdir $2=chip output
         > "$tmpdir/instances/r2.json"
     result=$( (DEVA_TRACE=1 CCTRACE_DATA_DIR="$tmpdir" stdin_session_id="unseen" current_dir="/my/proj"; build_trace_component) )
     plain=$(strip_ansi "$result")
-    [ "$plain" = " [http://localhost:9320/trace]" ]
+    [ "$plain" = " [http://localhost:9320/s/unseen]" ]
     rm -rf "$tmpdir"
 }
 
@@ -3285,7 +3294,7 @@ make_deadman_shim() { # $1=tmpdir $2=chip output
         > "$tmpdir/instances/r1.json"
     result=$( (DEVA_TRACE=1 CCTRACE_DATA_DIR="$tmpdir" stdin_session_id="unseen" current_dir="/c"; build_trace_component) )
     plain=$(strip_ansi "$result")
-    [ "$plain" = " [http://localhost:9322/trace]" ]
+    [ "$plain" = " [http://localhost:9322/s/unseen]" ]
     rm -rf "$tmpdir"
 }
 
@@ -3295,7 +3304,7 @@ make_deadman_shim() { # $1=tmpdir $2=chip output
     out=$(echo '{"session_id":"trace-int","model":{"id":"claude-opus-4-6","display_name":"Opus"},"cwd":"/t/proj","workspace":{"current_dir":"/t/proj"},"version":"2.1.174","cost":{"total_cost_usd":0}}' \
         | HOME="$tmpdir" CCTRACE_SERVER_PORT=9317 DEVA_TRACE_UI_URL="" bash "$SCRIPT_DIR/statusline.sh" --test)
     plain=$(strip_ansi "$out")
-    [[ "$plain" == "proj [http://localhost:9317/trace]"* ]]
+    [[ "$plain" == "proj [http://localhost:9317/s/test-ses]"* ]]
     rm -rf "$tmpdir"
 }
 
