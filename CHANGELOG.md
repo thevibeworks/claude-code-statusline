@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+**Trace chip deep-links the current session.** The cctrace link now
+jumps straight to *this* session's conversation, scrolled to the newest
+turn: `[https://cctrace.localhost/s/c3a6e0f3]` instead of the generic
+`/trace` landing page. `/s/<sid8>` is cctrace's (>= 0.40) short session
+jump — a redirect to `/trace#/session/<sid8>` — and the sid8 prefix is
+the same join key the chip's registry match already uses, so the link
+stays exact even when the server carries other sessions (a resume, a
+deadman `-p` run). Sessions without an id (and older cctrace paths)
+keep the `/trace` link; the bare `[cctrace]` chip is unchanged.
+
 **New: deadman chip — the dead man's switch becomes visible.**
 When [deadman](https://github.com/thevibeworks/deadman) has a switch armed
 for the current session, a chip joins the left lane next to the path:
