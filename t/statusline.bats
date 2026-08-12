@@ -2742,9 +2742,16 @@ JSON
 }
 
 @test "build_advisor_line: calm windows show weekly budget in always" {
+    # +4d22h at 21% sits inside every band with real slack: windows
+    # ceil(424800/18000)=24 tolerates hours of skew, heading
+    # floor(21*604800/elapsed)=70 tolerates ~24 minutes between this
+    # date call and the function's own now-read. The former +5d/20%
+    # fixture was a knife edge — heading=70 needed elapsed<=172800 while
+    # windows=24 needed elapsed>=172800, so any second-boundary crossing
+    # between the two clock reads flipped heading to 69 and failed CI.
     reset_5h=$(date -u -d '+45 minutes' '+%Y-%m-%dT%H:%M:%SZ')
-    reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
-    usage="{\"five_hour\":{\"utilization\":20,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":20,\"resets_at\":\"$reset_7d\"}}"
+    reset_7d=$(date -u -d '+4 days 22 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":20,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":21,\"resets_at\":\"$reset_7d\"}}"
     plain=$(strip_ansi "$(build_advisor_line "$usage" always)")
     [[ "$plain" =~ ^-\ budget\ ~24x5h\ left\ ·\ even\ 3\.3%/win\ ·\ heading\ ~70%$ ]]
 }
