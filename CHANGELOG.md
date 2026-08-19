@@ -2,6 +2,54 @@
 
 ## Unreleased
 
+## v0.28.0 — 2026-08-19 — the notice engine
+
+**New: a notice engine behind rows 2 and 3.** The advisor was one
+sentence built by one function; it is now a set of readers that emit
+*notices* — records carrying rank, voice, scope, a key for the
+condition, the number worth bolding, and both a short and a long form.
+Row 2 **pins** the top notice (compacted to the room the ledgers leave,
+cut at the rightmost joint so it gives up as little as possible) and
+keeps it while the condition holds. Row 3 **flashes** the same notice in
+full, but only for ~90 s after that condition first appears in this
+session: the explanation arrives once, then leaves the pin alone. A
+later story takes row 3 next. `--notice off` (or `STATUSLINE_NOTICE=off`)
+keeps row 3 quiet.
+
+**New: notices that know which limit binds.**
+
+- `fb 91% vs 7d 55% · go op` — the *model's* weekly limit caps before the
+  account's 7d does. Line 1 shows both numbers, never their relation,
+  and the relation is the whole decision: switch and the week's
+  remaining capacity comes back. The roomiest other `weekly_scoped`
+  limit in the payload gets named; with a projected wall it speaks in
+  the pressure voice and carries `dry ~Wed 18:00` in the long form.
+- `7d rebased 53%→12%` — utilization fell *inside* one window instance.
+  Burn never runs backwards, so this is a plan change or an out-of-band
+  reset moving the denominator. Tracked per account, newsworthy for
+  30 min, and it mutes the underuse voice while the learned walk still
+  describes the old period.
+- `last 5h of the week · 47% unused` — the 7d reset lands inside this 5h
+  window: no later window exists to spend the remainder through. Carries
+  the same feasibility tail as the surplus notice.
+- `5h ~40m left · 70% unused` — throughput you cannot bank, said *only*
+  when the week is stranding capacity. An unspent 5h window is otherwise
+  headroom, not waste: the 5h window is a rate limit, not a budget.
+
+**Shorter rows.** The pin drops what line 1 already prints
+(`! 5h caps ~05:18`, not `..., 42m before reset`); the full sentence is
+one row down, or on `--check` / `--week`, which have a line to spend.
+The number you act on is **bold**. And the 5h strip no longer repeats
+the reset the 5h badge carries — one badge per fact, in both directions;
+the 7d strip keeps its own label until the 7d badge shows one.
+
+**Fixed: a record with an empty field lost everything after it.** Notice
+records were tab-separated, and tab is IFS whitespace — bash collapses
+runs of it, so one empty field shifted every field after it. They use US
+(0x1f) now. Also fixed a `{ printf; [ -f ] && tail; }` group whose exit
+status came from the `[ -f ]` test, so a first-ever notice was never
+stamped and the flash never faded.
+
 ## v0.27.0 — 2026-08-19 — row 2 mirrors line 1
 
 **The advisor moves up beside the ledgers.** Row 2 now mirrors line 1:

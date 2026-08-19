@@ -1,6 +1,6 @@
 #!/bin/bash
 # Claude Code statusline
-# Usage: statusline.sh [report|check|session-summary|week] [--style STYLE] [--order ORDER] [--theme THEME] [--path-display TYPE] [--alignment TYPE] [--extra MODE] [--cache MODE] [--advisor MODE] [--week MODE] [--deadman MODE] [--test JSON] [--debug]
+# Usage: statusline.sh [report|check|session-summary|week] [--style STYLE] [--order ORDER] [--theme THEME] [--path-display TYPE] [--alignment TYPE] [--extra MODE] [--cache MODE] [--advisor MODE] [--week MODE] [--notice MODE] [--deadman MODE] [--test JSON] [--debug]
 # Themes: minimal, compact, detailed, developer, manager
 # Styles: single-block, unicode-blocks, bracketed-bars, filled-dots, square-blocks, line-segments, ascii-bars, percent-only, fraction-display
 # Extra modes: auto (default, shows when quota runs out or extra >= 50%), always, on-limit, off
@@ -29,6 +29,7 @@ path_display="project" # project, cwd, full, relative
 alignment="left-right" # left-right, right-left, center
 theme=""
 advisor_display_mode="auto" # auto, always, off
+notice_display_mode="${STATUSLINE_NOTICE:-auto}" # auto, off — the fading row 3
 week_display_mode="auto"    # auto, always, off — the 7d window ledger row
 # Context limit: auto-detected from model.id. 1M when the family ships 1M by
 # default (e.g. fable — CLI strips its [1m] suffix since 2.1.173) OR when the id
@@ -62,6 +63,14 @@ ADVISOR_FLEET_FREE_PCT=40        # sibling counts as "free" at or under this 5h%
 ADVISOR_EXPIRY_HORIZON_SECS=86400 # 7d surplus clause: inside the last day of the week
 ADVISOR_SURPLUS_MIN_PCT=30       # unused weekly % that counts as expiring waste
 ADVISOR_UNDERUSE_END_PCT=60      # projected end-of-week <= this => underuse advice
+NOTICE_FLASH_SECS=90             # a new notice explains itself on row 3 this long
+NOTICE_FLASH_MIN_GAIN=12         # ...and only while it still says more than the pin
+NOTICE_REBASE_SECS=1800          # an out-of-band 7d reset stays newsworthy this long
+NOTICE_REBASE_DROP_PCT=10        # 7d falling this much inside one window = re-based
+NOTICE_TAIL_SECS=3600            # "this 5h window is closing" horizon
+NOTICE_TAIL_MIN_UNUSED=20        # ...and only with this much of it still unspent
+NOTICE_SCOPE_MIN_PCT=70          # model-scoped weekly this deep is worth steering around
+NOTICE_SCOPE_LEAD_PCT=20         # ...once it leads the account 7d by this much
 ADVISOR_UNDERUSE_MIN_5H=25       # underuse advice only in an engaged session (5h >= this)
 # Cache-badge marker. Triple bar (U+2261 IDENTICAL TO): three stacked
 # horizontal lines read as layered cache tiers. Single-column text glyph, so
@@ -301,6 +310,10 @@ while [[ $# -gt 0 ]]; do
         week_display_mode="$2"
         shift 2
         ;;
+    --notice)
+        notice_display_mode="$2"
+        shift 2
+        ;;
     --deadman)
         deadman_display_mode="$2"
         shift 2
@@ -341,6 +354,7 @@ apply_theme() {
         extra_display_mode="off"
         advisor_display_mode="off"
         week_display_mode="off"
+        notice_display_mode="off"
         ;;
     "compact")
         progress_bar_style="unicode-blocks"
@@ -525,6 +539,8 @@ BOLD_WHITE='\033[1;37m'
 # Reverse video for the quota bump flash — inverts fg/bg at whatever the
 # badge's current color is, so the +N token pops without adding a new hue.
 REVERSE='\033[7m'
+BOLD='\033[1m'
+NO_BOLD='\033[22m'      # clears bold AND faint: re-state the voice colour after it
 NO_REVERSE='\033[27m'
 RESET='\033[0m'
 
@@ -2285,7 +2301,7 @@ run_check() {
     local last_model
     last_model=$(last_logged_model)
     local line plain
-    line=$(build_advisor_line "$(cat "$uc")" auto "$last_model")
+    line=$(notice_long_line "$(notice_collect "$(cat "$uc")" auto "$last_model")")
     if [ -z "$line" ]; then
         echo "calm"
         return 0
@@ -2609,9 +2625,11 @@ five_period_start() {
 # Dim below 1x, pressure-tinted from 1x (status lane), hidden while the
 # window is too young to judge (ADVISOR_PACE_MIN_ELAPSED). Reset is wall
 # clock: `@04:00` inside 24h, `@Wed 09:00` beyond — an axis label for a
-# timeline that ends there, not a badge restated.
+# timeline that ends there. $5 = "hide" drops it: when the badge above
+# already carries that reset, printing it again spends columns to say
+# nothing (one badge per fact, in both directions).
 strip_tail() {
-    local pct="$1" secs_left="$2" length="$3" now="$4"
+    local pct="$1" secs_left="$2" length="$3" now="$4" reset_mode="${5:-show}"
     local out="" elapsed=$(( length - secs_left ))
     if [ "$elapsed" -ge "$ADVISOR_PACE_MIN_ELAPSED" ] && [ "$pct" -gt 0 ] 2>/dev/null; then
         local pace tint band
@@ -2619,6 +2637,10 @@ strip_tail() {
         band=$(awk -v p="$pace" 'BEGIN{ print (p>=1.5?2:(p>=1.0?1:0)) }')
         case "$band" in 2) tint="$RED" ;; 1) tint="$YELLOW" ;; *) tint="$DIM" ;; esac
         out=" ${tint}${pace}x${RESET}"
+    fi
+    if [ "$reset_mode" = "hide" ]; then
+        printf '%s' "$out"
+        return 0
     fi
     local when
     if [ "$secs_left" -lt 86400 ]; then
@@ -2637,7 +2659,7 @@ strip_tail() {
 # points went). Freeze-safe by construction: ▮ moves at cell boundaries,
 # every other cell is history.
 build_week_row() {
-    local usage_data="$1" mode="${2:-auto}"
+    local usage_data="$1" mode="${2:-auto}" five_reset_mode="${3:-show}" seven_reset_mode="${4:-show}"
     [ "$mode" != "off" ] || return 0
     [ -n "$usage_data" ] || return 0
     local five_util five_reset seven_util seven_reset
@@ -2675,13 +2697,13 @@ build_week_row() {
     if [ "$have_five" = 1 ]; then
         local fdry
         fdry=$(five_dry_cell "$five_int" "$five_secs" "$now" "$five_start")
-        parts="${DIM}5h ${RESET}$(build_five_strip "$five_int" "$now" "$five_start" "$fdry" "$five_hist")$(strip_tail "$five_int" "$five_secs" 18000 "$now")"
+        parts="${DIM}5h ${RESET}$(build_five_strip "$five_int" "$now" "$five_start" "$fdry" "$five_hist")$(strip_tail "$five_int" "$five_secs" 18000 "$now" "$five_reset_mode")"
     fi
     if [ "$have_seven" = 1 ]; then
         local dry
         dry=$(week_dry_slot "$seven_int" "$seven_secs" "$now" "$period_start")
         [ -n "$parts" ] && parts="$parts  "
-        parts="${parts}${DIM}7d ${RESET}$(build_week_strip "$seven_int" "$now" "$period_start" "$dry" "$week_hist")$(strip_tail "$seven_int" "$seven_secs" "$SEVEN_DAY_WINDOW_SECS" "$now")"
+        parts="${parts}${DIM}7d ${RESET}$(build_week_strip "$seven_int" "$now" "$period_start" "$dry" "$week_hist")$(strip_tail "$seven_int" "$seven_secs" "$SEVEN_DAY_WINDOW_SECS" "$now" "$seven_reset_mode")"
     fi
     printf '%b' "$parts"
 }
@@ -2734,7 +2756,7 @@ run_week() {
     local last_model
     last_model=$(last_logged_model)
     local advisor
-    advisor=$(build_advisor_line "$usage" always "$last_model")
+    advisor=$(notice_long_line "$(notice_collect "$usage" always "$last_model")")
     [ -n "$advisor" ] && printf '%s%b\n' "$indent" "$advisor"
     return 0
 }
@@ -3233,8 +3255,137 @@ build_advisor_fleet_hint() {
 #                                         watch advisor); in the last
 #                                         window: budget last window ·
 #                                         N% left · heading ~M%
-build_advisor_line() {
+# ---------------------------------------------------------------------------
+# The notice engine. Readers below turn the account's live numbers into
+# NOTICES: one record per thing worth saying, each carrying both a short
+# form (pinned beside the ledgers on row 2) and a long one (row 3, which
+# fades). A record is
+#
+#   rank  voice  scope  key  hl  short  long
+#
+#   rank   value order; the top surviving record owns row 2
+#   voice  !red / !yellow pressure · + opportunity · - budget (dim)
+#   scope  5h / 7d / fb / acct — one voice per scope per frame, so two
+#          clauses about the same window can never disagree
+#   key    identity of the CONDITION, not of the text: row 3 shows a notice
+#          only while its key is new to this session (NOTICE_FLASH_SECS),
+#          so a long explanation arrives once and then gets out of the way
+#   hl     the substring worth bolding — the number the reader acts on
+#
+# Every notice derives from a badge line 1 already shows, and never repeats
+# a number the row it sits on carries (the strips print their own resets).
+# ---------------------------------------------------------------------------
+# Fields are separated by US (0x1f), never by a tab: tab is IFS whitespace,
+# so bash collapses runs of it and ONE empty field silently shifts every
+# field after it (a notice with no highlight token lost its long form).
+NOTICE_FS=$'\037'
+NOTICE_RECS=()
+notice_add() {
+    NOTICE_RECS+=("$1$NOTICE_FS$2$NOTICE_FS$3$NOTICE_FS$4$NOTICE_FS$5$NOTICE_FS$6$NOTICE_FS$7")
+}
+
+notice_voice_color() {
+    case "$1" in
+    '!red') printf '%s' "$RED" ;;
+    '!yellow') printf '%s' "$YELLOW" ;;
+    '+') printf '%s' "$CYAN" ;;
+    *) printf '%s' "$DIM" ;;
+    esac
+}
+
+# Bold the number the reader acts on, then restore the voice colour — \033[22m
+# clears bold AND faint, so the dim budget voice must be re-stated after it.
+notice_highlight() {
+    local text="$1" tok="$2" color="$3"
+    if [ -z "$tok" ] || [[ "$text" != *"$tok"* ]]; then
+        printf '%s' "$text"
+        return 0
+    fi
+    printf '%s%s%s%s%s%s' "${text%%"$tok"*}" "$BOLD" "$tok" "$NO_BOLD" "$color" "${text#*"$tok"}"
+}
+
+notice_render() {
+    local voice="$1" hl="$2" text="$3" color sigil
+    color=$(notice_voice_color "$voice")
+    case "$voice" in '!'*) sigil='!' ;; '+') sigil='+' ;; *) sigil='-' ;; esac
+    printf '%s%s %s%s' "$color" "$sigil" "$(notice_highlight "$text" "$hl" "$color")" "$RESET"
+}
+
+# First time THIS session saw a condition (stamping it if new). Wall-clock
+# epochs, so a frozen frame ages honestly instead of replaying the flash.
+notice_first_seen() {
+    local key="$1" state="$2" now="$3" ts=""
+    if [ -f "$state" ]; then
+        ts=$(awk -F'\t' -v k="$key" '$1 == k { print $2; exit }' "$state" 2>/dev/null)
+    fi
+    if [ -z "$ts" ]; then
+        ts="$now"
+        # the group's exit status is its LAST command: a bare `[ -f ] && tail`
+        # made every first-ever stamp look like a failed write, so nothing was
+        # ever remembered and the flash never faded
+        {
+            printf '%s\t%s\n' "$key" "$now"
+            if [ -f "$state" ]; then tail -12 "$state"; fi
+        } >"${state}.tmp.$$" 2>/dev/null \
+            && mv -f "${state}.tmp.$$" "$state" 2>/dev/null || rm -f "${state}.tmp.$$"
+    fi
+    printf '%s' "$ts"
+}
+
+# Sorted, deduped by scope: the highest-ranked record for each window wins.
+notice_ranked() {
+    [ "${#NOTICE_RECS[@]}" -gt 0 ] || return 0
+    printf '%s\n' "${NOTICE_RECS[@]}" | sort -t"$NOTICE_FS" -k1,1nr | awk -F"$NOTICE_FS" '!seen[$3]++'
+}
+
+# Row 2's pinned voice: the top record's short form. Stays as long as the
+# condition holds — a pin, not a flash.
+notice_pin_line() {
+    local records="$1" rank voice scope key hl short long
+    [ -n "$records" ] || return 0
+    IFS="$NOTICE_FS" read -r rank voice scope key hl short long <<<"$(printf '%s\n' "$records" | sed -n 1p)"
+    [ -n "$short" ] || return 0
+    notice_render "$voice" "$hl" "$short"
+}
+
+# The full sentence. The status row rations columns; a terminal command
+# (`--check`, `--week`) has a line to spend, so it gets the long form.
+notice_long_line() {
+    local records="$1" rank voice scope key hl short long
+    [ -n "$records" ] || return 0
+    IFS="$NOTICE_FS" read -r rank voice scope key hl short long <<<"$(printf '%s\n' "$records" | sed -n 1p)"
+    [ -n "$long" ] || return 0
+    notice_render "$voice" "$hl" "$long"
+}
+
+# Row 3: the same engine's long form, but only while the condition is new to
+# this session. It says the part that does not fit beside the ledgers, then
+# disappears and leaves the pin. Never echoes the pin's own sentence.
+notice_flash_line() {
+    local records="$1" state="$2" now="${3:-$(date +%s)}"
+    [ -n "$records" ] || return 0
+    local pin_key="" first=1
+    while IFS="$NOTICE_FS" read -r rank voice scope key hl short long; do
+        [ -n "$key" ] || continue
+        if [ "$first" = 1 ]; then pin_key="$key"; first=0; fi
+        [ -n "$long" ] || continue
+        local seen age
+        seen=$(notice_first_seen "$key" "$state" "$now")
+        age=$((now - seen))
+        [ "$age" -le "$NOTICE_FLASH_SECS" ] 2>/dev/null || continue
+        notice_render "$voice" "$hl" "$long"
+        return 0
+    done <<<"$records"
+    return 0
+}
+
+# Read the account's live numbers and emit every notice they justify.
+# Order below is the order the old advisor spoke in — pressure first, so the
+# `pressure` gate still mutes the "go heavier" family; rank decides what the
+# reader actually sees.
+notice_collect() {
     local usage_data="$1" mode="${2:-auto}" current_model="${3:-}"
+    NOTICE_RECS=()
     [ "$mode" = "off" ] && return 0
     [ -n "$usage_data" ] || return 0
 
@@ -3247,24 +3398,20 @@ build_advisor_line() {
         @sh "extra_enabled=\(.extra_usage.is_enabled // false)"
     ' 2>/dev/null)"
 
-    local five_int seven_int
+    local five_int seven_int five_secs seven_secs now
     five_int=$(printf '%.0f' "$five_util" 2>/dev/null || echo 0)
     seven_int=$(printf '%.0f' "$seven_util" 2>/dev/null || echo 0)
-    local five_secs seven_secs
     five_secs=$(get_reset_seconds "$five_reset")
     seven_secs=$(get_reset_seconds "$seven_reset")
-    local now
     now=$(date +%s)
+    local surplus=$((100 - seven_int))
 
-    # pressure: any wall-ahead clause fired (drives ! + yellow/red).
-    # seven_spoken: some clause already told the 7d story — the window gets
-    # one voice per render, never two that could disagree.
-    local clauses=() level="yellow" pressure=0 seven_spoken=0
+    local pressure=0 week_slack=0
 
     # Weekly limit scoped to the model THIS session runs (limits[]
-    # kind=weekly_scoped, same substring match as the fb[N%] badge). Other
-    # models' quotas stay out — noise here, and invisible on line 1.
-    local scope_name="" scope_int="" scope_secs=""
+    # kind=weekly_scoped, same substring match as the fb[N%] badge), plus the
+    # roomiest OTHER scoped model — the one worth switching to.
+    local scope_name="" scope_int="" scope_secs="" alt_name="" alt_int=""
     if [ -n "$current_model" ]; then
         local model_lc scoped_tsv
         model_lc=$(printf '%s' "$current_model" | tr '[:upper:]' '[:lower:]')
@@ -3279,130 +3426,109 @@ build_advisor_line() {
             IFS=$'\t' read -r scope_name scope_pct scope_reset <<<"$scoped_tsv"
             scope_int=$(printf '%.0f' "$scope_pct" 2>/dev/null || echo 0)
             scope_secs=$(get_reset_seconds "$scope_reset")
+            local alt_tsv
+            alt_tsv=$(echo "$usage_data" | jq -r --arg m "$scope_name" '
+                [.limits[]? | select(.kind == "weekly_scoped" and (.scope.model.display_name // "") != "")
+                 | {n: (.scope.model.display_name | ascii_downcase), p: (.percent // 0)}]
+                | map(select(.n != $m)) | sort_by(.p) | first // empty
+                | [.n, (.p | floor)] | @tsv' 2>/dev/null)
+            [ -n "$alt_tsv" ] && IFS=$'\t' read -r alt_name alt_int <<<"$alt_tsv"
+        fi
+    fi
+    local scope_ab="" alt_ab=""
+    [ -n "$scope_name" ] && scope_ab=$(model_scope_abbrev "$scope_name")
+    [ -n "$alt_name" ] && alt_ab=$(model_scope_abbrev "$alt_name")
+
+    # An out-of-band 7d move: utilization falling INSIDE one window instance
+    # (same resets_at) is not burn running backwards — it is a plan upgrade
+    # or a support-side reset re-basing the denominator. Worth saying,
+    # because every projection below (and the ledger's history) still
+    # describes the old period. Tracked per account, stamped once, and
+    # newsworthy for NOTICE_REBASE_SECS.
+    local rebase_from="" rebase_to="" rebase_at=""
+    if [ -n "$seven_secs" ] && [ "$seven_secs" -gt 0 ] 2>/dev/null && [ -d "${CLAUDE_ACCOUNT_DIR:-}" ]; then
+        local seen_file="$CLAUDE_ACCOUNT_DIR/seven_seen"
+        local cur_reset=$(( ((now + seven_secs) + 150) / 300 * 300 ))
+        local p_reset="" p_util="" p_at="" p_from="" p_to=""
+        [ -f "$seen_file" ] && IFS=$'\t' read -r p_reset p_util p_at p_from p_to <"$seen_file"
+        if [ "$p_reset" = "$cur_reset" ] && [ -n "$p_util" ] \
+           && [ "$seven_int" -le $((p_util - NOTICE_REBASE_DROP_PCT)) ] 2>/dev/null; then
+            rebase_from="$p_util" rebase_to="$seven_int" rebase_at="$now"
+        elif [ -n "$p_at" ] && [ "$p_reset" = "$cur_reset" ] \
+             && [ $((now - p_at)) -le "$NOTICE_REBASE_SECS" ] 2>/dev/null; then
+            rebase_from="$p_from" rebase_to="$p_to" rebase_at="$p_at"
+        fi
+        if [ "$p_reset" != "$cur_reset" ] || [ "$p_util" != "$seven_int" ]; then
+            printf '%s\t%s\t%s\t%s\t%s\n' "$cur_reset" "$seven_int" "${rebase_at:-}" \
+                "${rebase_from:-}" "${rebase_to:-}" >"$seen_file.tmp.$$" 2>/dev/null \
+                && mv -f "$seen_file.tmp.$$" "$seen_file" 2>/dev/null || rm -f "$seen_file.tmp.$$"
         fi
     fi
 
-    # Scoped limit capped: the model this session runs just became
-    # unavailable — the top story, and the one number that matters is when
-    # it comes back. No recovery suppression: "back ~Thu 07:00" is exactly
-    # what an imminent reset makes MORE useful.
+    # --- pressure: a wall between here and a reset -------------------------
+
+    # The running model's weekly limit is spent: that model is gone until it
+    # comes back, and the one number that matters is when. No recovery
+    # suppression — an imminent return makes the time MORE useful.
     if [ -n "$scope_int" ] && [ "$scope_int" -ge 100 ] 2>/dev/null \
        && [ -n "$scope_secs" ] && [ "$scope_secs" -gt 0 ] 2>/dev/null; then
         local back_str
         back_str=$(_fmt_epoch $((now + scope_secs)) '%a %H:%M')
         if [ -n "$back_str" ]; then
-            clauses+=("$(model_scope_abbrev "$scope_name") capped · back ~${back_str}")
-            pressure=1 level="red"
+            local alt_part=""
+            [ -n "$alt_ab" ] && [ -n "$alt_int" ] && alt_part=" · ${alt_ab} ${alt_int}% still open"
+            notice_add 100 '!red' fb "fb.capped.${scope_ab}" "~${back_str}" \
+                "${scope_ab} capped ~${back_str}" \
+                "${scope_ab} capped · back ~${back_str}${alt_part}"
+            pressure=1
         fi
     fi
 
     # 5h cap projection. Gate = the 5h badge's own pressure gate (>= 80),
-    # recovery-suppressed exactly like its color. At 100% line 1 already
-    # says capped + reset time; projecting is pointless — only the fleet
-    # hint below still helps there.
+    # recovery-suppressed exactly like its colour. At 100% line 1 already
+    # says capped; only the fleet hint still helps there.
     if [ "$five_int" -ge 80 ] && [ "$five_int" -lt 100 ] \
        && [ -n "$five_secs" ] && [ "$five_secs" -gt "$FIVE_HOUR_RECOVERY_SECS" ] 2>/dev/null; then
         local elapsed=$((18000 - five_secs))
         if [ "$elapsed" -ge "$ADVISOR_PACE_MIN_ELAPSED" ]; then
             local cap_secs=$(( (100 - five_int) * elapsed / five_int ))
             if [ "$cap_secs" -lt "$five_secs" ]; then
-                local cap_hhmm gap
+                local cap_hhmm gap voice='!yellow'
                 cap_hhmm=$(_fmt_epoch $((now + cap_secs)) '%H:%M')
                 gap=$(format_duration $(( (five_secs - cap_secs) * 1000 )))
+                [ "$five_int" -ge 90 ] && voice='!red'
                 if [ -n "$cap_hhmm" ]; then
-                    clauses+=("5h caps ~${cap_hhmm}, ${gap} before reset")
+                    notice_add 90 "$voice" 5h "5h.caps.${cap_hhmm}" "~${cap_hhmm}" \
+                        "5h caps ~${cap_hhmm}" \
+                        "5h caps ~${cap_hhmm}, ${gap} before reset"
                     pressure=1
-                    [ "$five_int" -ge 90 ] && level="red"
                 fi
             fi
         fi
     fi
 
-    # Expiring surplus — use it or lose it. Inside the last day of the 7d
-    # window a big green remainder is not headroom, it's forfeiture: at
-    # reset it vanishes whether spent or not. This is the zone where the
-    # pressure clauses go quiet (recovery), and precisely where waste peaks.
-    # The tail is feasibility-checked against the learned pct_per_window
-    # ratio: burning is rate-capped by the 5h mechanism (current headroom
-    # until its reset, full windows after), so "spend it" only appears when
-    # full-tilt burn can actually consume the surplus; past that point the
-    # honest tail is how much expires no matter what. Unlearned ratio = no
-    # tail: never advise what we can't back.
-    if [ "$seven_int" -gt 0 ] && [ -n "$seven_secs" ] && [ "$seven_secs" -gt 0 ] 2>/dev/null \
-       && [ "$seven_secs" -le "$ADVISOR_EXPIRY_HORIZON_SECS" ] 2>/dev/null \
-       && [ $((100 - seven_int)) -ge "$ADVISOR_SURPLUS_MIN_PCT" ]; then
-        local when surplus tail="" ppw reachable=""
-        when=$(format_reset_absolute "$seven_reset")
-        surplus=$((100 - seven_int))
-        ppw=$(forecast_pct_per_window)
-        if [ -n "$ppw" ]; then
-            reachable=$(awk -v ppw="$ppw" -v ss="$seven_secs" -v fs="${five_secs:-0}" -v fu="$five_int" 'BEGIN{
-                cap = ppw * (100 - fu) / 100          # current window headroom
-                if (fs > 0 && fs < ss) {
-                    leg = ppw * fs / 18000            # time-limited until 5h reset
-                    r = (leg < cap ? leg : cap) + ppw * (ss - fs) / 18000
-                } else {
-                    leg = ppw * ss / 18000            # 5h window outlasts 7d reset
-                    r = (leg < cap ? leg : cap)
-                }
-                printf "%d", int(r + 0.5)
-            }')
-        fi
-        if [ -n "$reachable" ]; then
-            if [ "$reachable" -ge "$surplus" ] 2>/dev/null; then
-                tail=" · spend it"
-            else
-                tail=" · ~$((surplus - reachable))% expires even at full burn"
-            fi
-        fi
-        if [ -n "$when" ]; then
-            clauses+=("7d resets @${when}, ${surplus}% unused${tail}")
-            seven_spoken=1
-        fi
-    fi
-
-    # Fleet relief: once this account's 5h is effectively spent, the useful
-    # fact is which sibling isn't. Opportunity, not alarm — line 1 already
-    # screams about the cap.
-    if [ "$five_int" -ge 90 ] && [ -n "${ACCOUNT_TAG:-}" ]; then
-        local hint
-        hint=$(build_advisor_fleet_hint "${STATUSLINE_HOME}/accounts" "$ACCOUNT_TAG")
-        [ -n "$hint" ] && clauses+=("$hint")
-    fi
-
-    # Scoped-limit pace: the running model's weekly quota caps before its
-    # reset. Same linear math and recovery suppression as the 7d aggregate,
-    # same >= 80 gate as its badge color.
+    # Where the running model's weekly quota runs out, if it does before its
+    # own reset. Same linear math and >= 80 gate as its badge colour. Held as
+    # a fact, not a sentence: the steering reader below wants to carry it.
+    local sc_str="" sc_gap="" sc_voice='!yellow'
     if [ -n "$scope_int" ] && [ "$scope_int" -ge 80 ] && [ "$scope_int" -lt 100 ] 2>/dev/null \
        && [ -n "$scope_secs" ] && [ "$scope_secs" -gt "$SEVEN_DAY_RECOVERY_SECS" ] 2>/dev/null; then
         local sc_elapsed=$((SEVEN_DAY_WINDOW_SECS - scope_secs))
-        if [ "$sc_elapsed" -ge "$ADVISOR_PACE_MIN_ELAPSED" ]; then
+        if [ "$sc_elapsed" -gt 0 ]; then
             local sc_cap=$(( (100 - scope_int) * sc_elapsed / scope_int ))
             if [ "$sc_cap" -lt "$scope_secs" ]; then
-                local sc_str sc_gap_secs sc_gap
                 sc_str=$(_fmt_epoch $((now + sc_cap)) '%a %H:%M')
-                sc_gap_secs=$((scope_secs - sc_cap))
-                if [ "$sc_gap_secs" -ge 172800 ]; then
-                    sc_gap="$((sc_gap_secs / 86400))d"
-                else
-                    sc_gap=$(format_duration $((sc_gap_secs * 1000)))
-                fi
-                if [ -n "$sc_str" ]; then
-                    clauses+=("$(model_scope_abbrev "$scope_name") caps ~${sc_str}, ${sc_gap} before reset")
-                    pressure=1
-                    [ "$scope_int" -ge 90 ] && level="red"
-                fi
+                sc_gap=$(format_duration $(( (scope_secs - sc_cap) * 1000 )))
+                [ "$scope_int" -ge 90 ] && sc_voice='!red'
             fi
         fi
     fi
 
-    # 7d dry projection. The learned forecast speaks first (it can warn on a
-    # calm Friday about your heavy Tuesday — and it already escalates line
-    # 1's color, so the gate stays shared). Cold start falls back to linear
-    # pace, but only when seven_day_pace already warns. Recovery (<= 12h to
-    # reset) stays quiet, mirroring the badge — the surplus clause owns that
-    # zone.
-    if [ "$seven_spoken" = 0 ] && [ "$seven_int" -gt 0 ] && [ "$seven_int" -lt 100 ] \
+    # 7d dry projection. The learned weekday forecast speaks first (it can
+    # warn on a calm Friday about your heavy Tuesday); cold start falls back
+    # to linear pace, and only when seven_day_pace already warns. Recovery
+    # (<= 12h out) stays quiet — the surplus notice owns that zone.
+    if [ "$seven_int" -gt 0 ] && [ "$seven_int" -lt 100 ] \
        && [ -n "$seven_secs" ] && [ "$seven_secs" -gt "$SEVEN_DAY_RECOVERY_SECS" ] 2>/dev/null; then
         local dry_epoch="" gap_secs="" sev_verb="dry" sev_level=""
         local fc_level fc_gap
@@ -3426,7 +3552,7 @@ build_advisor_line() {
             fi
         fi
         if [ -n "$dry_epoch" ]; then
-            local dry_str gap_str tail
+            local dry_str gap_str tail voice='!yellow'
             dry_str=$(_fmt_epoch "$dry_epoch" '%a %H:%M')
             if [ "$gap_secs" -ge 172800 ]; then
                 gap_str="$((gap_secs / 86400))d"
@@ -3438,22 +3564,130 @@ build_advisor_line() {
             else
                 tail="then hard stop"
             fi
+            [ "$sev_level" = "red" ] && voice='!red'
             if [ -n "$dry_str" ]; then
-                clauses+=("7d ${sev_verb} ~${dry_str}, ${gap_str} before reset · ${tail}")
-                pressure=1 seven_spoken=1
-                [ "$sev_level" = "red" ] && level="red"
+                notice_add 85 "$voice" 7d "7d.${sev_verb}.${dry_str}" "~${dry_str}" \
+                    "7d ${sev_verb} ~${dry_str} · ${tail#then }" \
+                    "7d ${sev_verb} ~${dry_str}, ${gap_str} before reset · ${tail}"
+                pressure=1
             fi
         fi
     fi
 
-    # Underuse: on pace to strand a large chunk of the week. The learned
-    # walk speaks first — it knows YOUR remaining weekdays, so it can warn
-    # from day two without waiting for linear pace to mean anything; cold
-    # start falls back to linear past half the window. Speaks only in an
-    # engaged, unsqueezed session (5h in [25,80), no pressure clause) — the
-    # statusline renders while you work, so this reaches exactly the person
-    # who can act on it, and never nags an idle or already-constrained one.
-    if [ "$seven_spoken" = 0 ] && [ "$pressure" = 0 ] && [ "$seven_int" -gt 0 ] \
+    # --- the week's mechanism: what the numbers MEAN together --------------
+
+    # The denominator moved under us.
+    if [ -n "$rebase_at" ] && [ -n "$rebase_from" ] && [ -n "$rebase_to" ]; then
+        notice_add 80 '+' 7d "7d.rebase.${rebase_at}" "${rebase_from}%→${rebase_to}%" \
+            "7d rebased ${rebase_from}%→${rebase_to}%" \
+            "7d fell ${rebase_from}%→${rebase_to}% inside one window · plan change or an out-of-band reset; the ledger still draws the old period"
+    fi
+
+    # The model caps before the account does. Line 1 shows both numbers but
+    # not their relation, and the relation is the whole decision: switching
+    # models buys the week's remaining capacity back.
+    local fb_spoken=0
+    if [ -n "$scope_int" ] && [ "$scope_int" -lt 100 ] 2>/dev/null \
+       && [ "$scope_int" -ge "$NOTICE_SCOPE_MIN_PCT" ] \
+       && [ $((scope_int - seven_int)) -ge "$NOTICE_SCOPE_LEAD_PCT" ] 2>/dev/null; then
+        local steer_short steer_long steer_voice='+'
+        steer_short="${scope_ab} ${scope_int}% vs 7d ${seven_int}%"
+        steer_long="${scope_ab} weekly ${scope_int}% against 7d ${seven_int}%"
+        # a projected wall makes this pressure, not an invitation
+        if [ -n "$sc_str" ]; then
+            steer_voice="$sc_voice"
+            steer_long="${steer_long}, dry ~${sc_str}"
+            pressure=1
+        fi
+        steer_long="${steer_long} · the model caps first, not the account"
+        if [ -n "$alt_ab" ] && [ -n "$alt_int" ] && [ "$alt_int" -lt "$scope_int" ] 2>/dev/null; then
+            steer_short="${steer_short} · go ${alt_ab}"
+            steer_long="${steer_long}; ${alt_ab} sits at ${alt_int}%, so run it for the bulk and keep ${scope_ab} for what needs it"
+        else
+            steer_short="${steer_short} · spread the load"
+            steer_long="${steer_long}, so spread the bulk while the week still has room"
+        fi
+        notice_add 78 "$steer_voice" fb "fb.steer.$((scope_int / 5))" "${scope_ab} ${scope_int}%" \
+            "$steer_short" "$steer_long"
+        fb_spoken=1
+    fi
+
+    # No steering to do (the account is just as deep), so the deadline stands
+    # on its own.
+    if [ "$fb_spoken" = 0 ] && [ -n "$sc_str" ]; then
+        notice_add 72 "$sc_voice" fb "fb.caps.${sc_str}" "~${sc_str}" \
+            "${scope_ab} caps ~${sc_str}" \
+            "${scope_ab} caps ~${sc_str}, ${sc_gap} before reset"
+        pressure=1
+    fi
+
+    # Expiring surplus — use it or lose it. Inside the last day of the 7d
+    # window a big green remainder is forfeiture, not headroom. The tail is
+    # feasibility-checked against the learned pct_per_window ratio: burning
+    # is rate-capped by the 5h mechanism, so "spend it" appears only when
+    # full-tilt burn can actually consume the surplus.
+    if [ "$seven_int" -gt 0 ] && [ -n "$seven_secs" ] && [ "$seven_secs" -gt 0 ] 2>/dev/null \
+       && [ "$seven_secs" -le "$ADVISOR_EXPIRY_HORIZON_SECS" ] 2>/dev/null \
+       && [ "$surplus" -ge "$ADVISOR_SURPLUS_MIN_PCT" ]; then
+        local when tail="" ppw reachable=""
+        when=$(format_reset_absolute "$seven_reset")
+        ppw=$(forecast_pct_per_window)
+        if [ -n "$ppw" ]; then
+            reachable=$(awk -v ppw="$ppw" -v ss="$seven_secs" -v fs="${five_secs:-0}" -v fu="$five_int" 'BEGIN{
+                cap = ppw * (100 - fu) / 100          # current window headroom
+                if (fs > 0 && fs < ss) {
+                    leg = ppw * fs / 18000            # time-limited until 5h reset
+                    r = (leg < cap ? leg : cap) + ppw * (ss - fs) / 18000
+                } else {
+                    leg = ppw * ss / 18000            # 5h window outlasts 7d reset
+                    r = (leg < cap ? leg : cap)
+                }
+                printf "%d", int(r + 0.5)
+            }')
+        fi
+        if [ -n "$reachable" ]; then
+            if [ "$reachable" -ge "$surplus" ] 2>/dev/null; then
+                tail=" · spend it"
+            else
+                tail=" · ~$((surplus - reachable))% expires even at full burn"
+            fi
+        fi
+        if [ -n "$when" ]; then
+            week_slack=1
+            # Inside the FINAL 5h window the mechanism itself is the story:
+            # no later window exists to spend the remainder through, so the
+            # feasibility tail lands on a harder fact and outranks the plain
+            # last-day form.
+            if [ "$seven_secs" -le 18000 ] 2>/dev/null; then
+                local left7
+                left7=$(format_duration $((seven_secs * 1000)))
+                notice_add 75 '+' 7d "7d.lastwin.$((surplus / 5))" "${surplus}%" \
+                    "last 5h of the week · ${surplus}% unused${tail}" \
+                    "7d resets in ${left7}: the last 5h window of the period · ${surplus}% of the week is unused and expires with it${tail}"
+            else
+                notice_add 65 '+' 7d "7d.surplus.$((surplus / 5))" "${surplus}%" \
+                    "${surplus}% unused${tail}" \
+                    "7d resets @${when}, ${surplus}% unused${tail}"
+            fi
+        fi
+    fi
+
+    # Fleet relief: once this account's 5h is spent, the useful fact is which
+    # sibling isn't.
+    if [ "$five_int" -ge 90 ] && [ -n "${ACCOUNT_TAG:-}" ]; then
+        local hint
+        hint=$(build_advisor_fleet_hint "${STATUSLINE_HOME}/accounts" "$ACCOUNT_TAG")
+        if [ -n "$hint" ]; then
+            notice_add 60 '+' acct "acct.fleet.${hint%% *}" "${hint%% *}" \
+                "$hint" "this account's 5h is spent · ${hint}"
+        fi
+    fi
+
+    # Underuse: on pace to strand a large chunk of the subscription. Speaks
+    # only in an engaged, unsqueezed session — it reaches exactly the person
+    # who can act on it and never nags an idle one. Muted right after a
+    # rebase: the learned walk still describes the old denominator.
+    if [ "$pressure" = 0 ] && [ -z "$rebase_at" ] && [ "$seven_int" -gt 0 ] \
        && [ "$five_int" -ge "$ADVISOR_UNDERUSE_MIN_5H" ] && [ "$five_int" -lt 80 ] 2>/dev/null \
        && [ -n "$seven_secs" ] && [ "$seven_secs" -gt "$ADVISOR_EXPIRY_HORIZON_SECS" ] 2>/dev/null; then
         local elapsed7=$((SEVEN_DAY_WINDOW_SECS - seven_secs))
@@ -3465,30 +3699,34 @@ build_advisor_line() {
             heading=$((seven_int * SEVEN_DAY_WINDOW_SECS / elapsed7))
         fi
         if [ -n "$heading" ] && [ "$heading" -le "$ADVISOR_UNDERUSE_END_PCT" ] 2>/dev/null; then
-            clauses+=("7d on pace to leave ~$((100 - heading))% unused · go heavier")
+            local waste=$((100 - heading))
+            week_slack=1
+            notice_add 50 '+' 7d "7d.underuse.$((waste / 5))" "~${waste}%" \
+                "~${waste}% will expire · go heavier" \
+                "7d on pace to leave ~${waste}% unused · go heavier"
         fi
     fi
 
-    if [ "${#clauses[@]}" -gt 0 ]; then
-        local text="${clauses[0]}"
-        [ "${#clauses[@]}" -ge 2 ] && text="${text}; ${clauses[1]}"
-        if [ "$pressure" = 1 ]; then
-            local color="$YELLOW"
-            [ "$level" = "red" ] && color="$RED"
-            echo "${color}! ${text}${RESET}"
-        else
-            echo "${CYAN}+ ${text}${RESET}"
-        fi
-        return 0
+    # This 5h window is closing with room still on it. On its own that is
+    # not waste — the 5h window is a rate limit, not a budget, and unused
+    # room costs nothing. It matters only when the WEEK is heading to strand
+    # capacity: the weekly pool can only be spent through 5h windows, so a
+    # half-used window is throughput you cannot get back. Hence the gate on
+    # week_slack, set by the surplus / last-window / underuse readers above.
+    if [ "$week_slack" = 1 ] && [ "$pressure" = 0 ] \
+       && [ -n "$five_secs" ] && [ "$five_secs" -gt 0 ] 2>/dev/null \
+       && [ "$five_secs" -le "$NOTICE_TAIL_SECS" ] 2>/dev/null \
+       && [ "$five_int" -gt 0 ] && [ $((100 - five_int)) -ge "$NOTICE_TAIL_MIN_UNUSED" ]; then
+        local left5 next5
+        left5=$(format_duration $((five_secs * 1000)))
+        next5=$(_fmt_epoch $((now + five_secs)) '%H:%M')
+        notice_add 55 '+' 5h "5h.tail.$((five_secs / 600))" "~${left5}" \
+            "5h ~${left5} left · $((100 - five_int))% unused" \
+            "this 5h window closes in ${left5} with $((100 - five_int))% unused · the week's surplus can only be spent through windows like it"
     fi
 
-    # Calm + always: the weekly budget in one breath, in the shared budget
-    # frame (claude.py's watch advisor speaks the same sentence family):
-    # runway -> what even looks like -> where you land. Ceil'd window count
-    # so a partial window still counts as spendable; "heading ~N%" is the
-    # learned end-of-week projection when trained, linear once the window is
-    # at least a day old. In the last window per-window math degenerates to
-    # the headroom itself, so it degrades to plain "N% left".
+    # Calm budget: the week in one breath — runway, what even looks like,
+    # where you land. Shared frame with ccpace's watch advisor.
     if [ "$mode" = "always" ] && [ "$seven_int" -gt 0 ] && [ "$seven_int" -lt 100 ] \
        && [ -n "$seven_secs" ] && [ "$seven_secs" -gt 0 ] 2>/dev/null; then
         local windows=$(( (seven_secs + 17999) / 18000 ))
@@ -3504,15 +3742,27 @@ build_advisor_line() {
             fi
             [ -n "$heading" ] && heading_part=" · heading ~${heading}%"
             if [ "$windows" -le 1 ]; then
-                echo "${DIM}- budget last window · $((100 - seven_int))% left${heading_part}${RESET}"
+                notice_add 10 '-' acct "acct.budget.last" "${surplus}%" \
+                    "last window · ${surplus}% left" \
+                    "budget last window · ${surplus}% left${heading_part}"
             else
                 local even
-                even=$(awk -v h=$((100 - seven_int)) -v w="$windows" 'BEGIN{printf "%.1f", h/w}')
-                echo "${DIM}- budget ~${windows}x5h left · even ${even}%/win${heading_part}${RESET}"
+                even=$(awk -v h="$surplus" -v w="$windows" 'BEGIN{printf "%.1f", h/w}')
+                notice_add 10 '-' acct "acct.budget.${windows}" "${windows}x5h" \
+                    "${windows}x5h left · ${even}%/win" \
+                    "budget ~${windows}x5h left · even ${even}%/win${heading_part}"
             fi
         fi
     fi
-    return 0
+
+    notice_ranked
+}
+
+# The pinned row-2 voice. Kept as the advisor's public name: same signature,
+# same "echo a line or nothing" contract, now backed by the notice engine.
+build_advisor_line() {
+    local usage_data="$1" mode="${2:-auto}" current_model="${3:-}"
+    notice_pin_line "$(notice_collect "$usage_data" "$mode" "$current_model")"
 }
 
 get_user_tier() {
@@ -4447,24 +4697,34 @@ format_output
 # rows sat flush-left for a while. A zero-width SGR reset ahead of the
 # padding is not whitespace, so the padding survives the trim and the
 # renderer (Ink, wrap=truncate) keeps it. Nerd-hacky, verified live.
-# Shorten an advisor sentence to fit `avail` columns by dropping its LAST
-# segment at the weakest joint first: `; ` (the second voice), then ` · `
-# (the tail clause), then `, ` (a sub-fact). The leading fact survives:
+# Shorten a sentence to fit `avail` columns by dropping its LAST segment,
+# cutting at the RIGHTMOST joint of any weight — `; ` (a second voice),
+# ` · ` (a tail clause), `, ` (a sub-fact) — so each pass gives up as little
+# as possible and the leading fact is the last thing to go:
 # "! 5h caps ~05:18, 52m before reset; 7d dry ~Thu 09:00 · then hard stop"
-# -> "! 5h caps ~05:18, 52m before reset" -> "! 5h caps ~05:18". A hard cut
-# with `…` only when no joint is left; fails (rc 1) under 16 columns, where
-# nothing honest fits.
+# -> "... 7d dry ~Thu 09:00" -> "... 52m before reset" -> "! 5h caps ~05:18".
+# Width is what the terminal SHOWS: cutting a rendered sentence at a joint
+# keeps its colour runs (and the bolded number) intact, and a joint never
+# occurs inside an escape sequence. A hard cut with `…` only when no joint
+# is left; fails (rc 1) under 16 columns, where nothing honest fits.
 ADVISOR_MERGE_MIN_COLS=16
 compact_text() {
-    local text="$1" avail="$2" sep
+    local text="$1" avail="$2" sep vis head best
     [ "$avail" -ge "$ADVISOR_MERGE_MIN_COLS" ] 2>/dev/null || return 1
-    for sep in '; ' ' · ' ', '; do
-        while [ "${#text}" -gt "$avail" ] && [[ "$text" == *"$sep"* ]]; do
-            text="${text%"$sep"*}"
+    vis=$(plain_text "$text")
+    while [ "${#vis}" -gt "$avail" ]; do
+        best=""
+        for sep in '; ' ' · ' ', '; do
+            [[ "$text" == *"$sep"* ]] || continue
+            head="${text%"$sep"*}"
+            [ "${#head}" -gt "${#best}" ] && best="$head"
         done
+        [ -n "$best" ] || break
+        text="$best"
+        vis=$(plain_text "$text")
     done
-    if [ "${#text}" -gt "$avail" ]; then
-        text="${text:0:$((avail - 1))}…"
+    if [ "${#vis}" -gt "$avail" ]; then
+        text="${vis:0:$((avail - 1))}…"
     fi
     printf '%s' "$text"
 }
@@ -4511,30 +4771,46 @@ print_row_block() {
 }
 
 # Row order under the badges: evidence, then interpretation. The week row
-# is where the 7d points went (one cell per 5h window); the advisor row is
-# what to do about it. Reading down one column: 7d[44%@2d] -> the strip
+# is where the 7d points went (one cell per 5h window); the notice engine
+# says what to do about it. Reading down one column: 7d[44%@2d] -> the strip
 # that spent those 44% -> the clause that projects the rest.
+#
+# A number line 1 already prints is not printed again below: the 5h badge
+# always carries its reset while a window is live, the 7d badge carries one
+# under pressure — so the matching strip drops its own `@HH:MM` and spends
+# those columns on the message instead. The evidence is what line 1 actually
+# rendered, not a re-derivation of the badges' own gates.
 week_row=""
 if [ "$week_display_mode" != "off" ] && [ -n "${usage_data:-}" ]; then
-    week_row=$(build_week_row "$usage_data" "$week_display_mode")
+    line1_plain=$(plain_text "$right_parts")
+    five_reset_mode="show" seven_reset_mode="show"
+    [[ "$line1_plain" =~ 5h\[[0-9]+%@ ]] && five_reset_mode="hide"
+    [[ "$line1_plain" =~ 7d\[[0-9]+%@ ]] && seven_reset_mode="hide"
+    week_row=$(build_week_row "$usage_data" "$week_display_mode" "$five_reset_mode" "$seven_reset_mode")
     queue_row "$week_row" "WEEK"
 fi
 
-# The advisor speaks under pressure or surplus in auto mode; when the week
-# row is showing, its calm budget line shows too — the strips and the
-# numbers derived from them (windows left, even, heading) are one unit.
+# The notice engine speaks under pressure or opportunity in auto mode; when
+# the week row is showing, the calm budget voice joins it — the strips and
+# the numbers derived from them are one unit. Collected once: the pin (row 2)
+# and the flash (row 3) are two views of the same records.
+advisor_line=""
+notice_flash=""
 if [ "$advisor_display_mode" != "off" ] && [ -n "${usage_data:-}" ]; then
     advisor_mode_now="$advisor_display_mode"
     [ "$advisor_mode_now" = "auto" ] && [ -n "$week_row" ] && advisor_mode_now="always"
-    advisor_line=$(build_advisor_line "$usage_data" "$advisor_mode_now" "${model_id:-$model_display}")
+    notice_records=$(notice_collect "$usage_data" "$advisor_mode_now" "${model_id:-$model_display}")
+    advisor_line=$(notice_pin_line "$notice_records")
+    [ "$notice_display_mode" != "off" ] && notice_flash=$(notice_flash_line "$notice_records" \
+        "$CLAUDE_CACHE_DIR/${stdin_session_id:-global}_notice_seen")
 fi
 
 # Row 2 mirrors line 1 when it can: advice on the left, evidence on the
 # right, the gap between them absorbing the width (exactly line 1's
-# path/stats shape). The advisor sentence is compacted to the room line 1
-# leaves beside the ledgers — weakest joint first, leading fact last — so
-# a calm frame is two rows, not three. No honest room (< 16 cols, narrow
-# terminals) keeps the block: ledgers, then the full sentence beneath.
+# path/stats shape). The pinned sentence is compacted to the room line 1
+# leaves beside the ledgers — rightmost joint first — so a calm frame is two
+# rows, not three. No honest room (< 16 cols, narrow terminals) keeps the
+# block: ledgers, then the full sentence beneath.
 if [ -n "$advisor_line" ]; then
     merged=""
     if [ -n "$week_row" ]; then
@@ -4543,19 +4819,34 @@ if [ -n "$advisor_line" ]; then
             week_anchor=$((term_width - LINE1_MARGIN))
         fi
         week_plain=$(plain_text "$week_row")
-        advisor_plain=$(plain_text "$advisor_line")
         avail=$((week_anchor - ${#week_plain} - 2))
         if [ "$alignment" != "right-left" ] \
-           && advisor_short=$(compact_text "$advisor_plain" "$avail"); then
-            advisor_color=$(printf '%s' "$advisor_line" | grep -o '^\\033\[[0-9;]*m' | head -1)
-            merged="${advisor_color}${advisor_short}${RESET}"
-            merged+=$(printf '%*s' $((week_anchor - ${#week_plain} - ${#advisor_short})) "")
+           && advisor_short=$(compact_text "$advisor_line" "$avail"); then
+            advisor_short_plain=$(plain_text "$advisor_short")
+            merged="${advisor_short}${RESET}"
+            merged+=$(printf '%*s' $((week_anchor - ${#week_plain} - ${#advisor_short_plain})) "")
             merged+="$week_row"
             extra_rows[0]="$merged"
-            debug_log "ADVISOR (merged): $advisor_short"
+            debug_log "PIN (merged): $advisor_short_plain"
         fi
     fi
-    [ -z "$merged" ] && queue_row "$advisor_line" "ADVISOR"
+    [ -z "$merged" ] && queue_row "$advisor_line" "PIN"
+fi
+
+# Row 3: the long form of whatever just became true, and only while it is
+# new to this session (NOTICE_FLASH_SECS). It says the part that does not
+# fit beside the ledgers, then gets out of the way — the pin above stays.
+if [ -n "$notice_flash" ]; then
+    flash_anchor=$((line1_cols > 0 ? line1_cols : term_width - LINE1_MARGIN))
+    [ "$flash_anchor" -gt "$term_width" ] 2>/dev/null && flash_anchor=$term_width
+    notice_flash=$(compact_text "$notice_flash" $((flash_anchor - 1)) || printf '%s' "$notice_flash")
+    flash_plain=$(plain_text "$notice_flash")
+    pin_plain=$(plain_text "${advisor_short:-$advisor_line}")
+    # once truncation has eaten the explanation, row 3 is only the pin again:
+    # cheaper to say nothing than to spend a row restating it
+    if [ $(( ${#flash_plain} - ${#pin_plain} )) -ge "$NOTICE_FLASH_MIN_GAIN" ]; then
+        queue_row "${notice_flash}${RESET}" "FLASH"
+    fi
 fi
 print_row_block
 

@@ -6,16 +6,17 @@ change breaks a rule, the rule wins or the rule changes here first.
 ## Rows
 
 ```
-line 1   where · what · how much is left             (always)
-row 2    what to do about it  |  where it went        (advisor left, 5h + 7d ledgers right)
-row 3    the advisor, full, when row 2 has no room   (narrow terminals only)
+line 1   where · what · how much is left           (always)
+row 2    the pin  |  where it went                 (top notice left, ledgers right)
+row 3    the flash: that notice in full, fading    (~90 s after it first appears)
 ```
 
 Row 2 mirrors line 1: advice left, evidence right, the gap absorbs the
-width, the right edge is line 1's edge (never `COLUMNS`). The advisor
-sentence compacts to the room the ledgers leave — weakest joint first
-(`;` voice, `·` clause, `,` sub-fact), leading fact last; under 16
-columns it drops to row 3 instead, and the rows hang as a block: the
+width, the right edge is line 1's edge (never `COLUMNS`). The pinned
+sentence compacts to the room the ledgers leave, cutting at the
+rightmost joint (`;` a voice, `·` a clause, `,` a sub-fact) so it gives
+up as little as possible; under 16 columns it drops to its own row and
+the rows hang as a block: the
 widest meets line 1's edge, the rest share its left edge. A lone row is
 the block. Line 1 must fit: Claude Code truncates or wraps a wider row
 and every anchor beneath it goes wrong. Degrade in value order before
@@ -25,6 +26,13 @@ gap → 1. Quiet is a row that does not exist.
 Claude Code trims each row it renders (`.trim()` per line, 2.1.234), so
 a block's padding rides behind a zero-width `\e[0m`: not whitespace, so
 it survives; not ink, so it costs nothing.
+
+**A number line 1 prints is not printed again below.** The 5h badge
+always carries its reset while the window is live, so the 5h strip drops
+its `@HH:MM` and spends those columns on the message; the 7d badge
+carries one only under pressure, so the 7d strip labels its own end
+until it does. The test is what line 1 actually rendered, not a
+re-derivation of its gates.
 
 ## Line 1, left → right
 
@@ -97,14 +105,48 @@ colored. `▮` moves at cell boundaries; every other cell is history — the
 row is freeze-safe by construction. Same glyphs, same math as
 [ccpace](https://github.com/thevibeworks/ccpace)'s ledger.
 
-## Advisor (row 2 left, or row 3)
+## The notice engine (row 2 left, row 3)
 
-Speaks when line 1's numbers don't mean what they look like, and — while
-the ledgers are showing — says the calm numbers they imply, on their
-left. Three voices,
-one hue each: `!` pressure (yellow/red), `+` opportunity (cyan), `-`
-budget (dim: windows left · even · heading). Every clause derives from a badge
-already shown; max two clauses; the 7d window gets one voice per frame.
+Readers turn the live numbers into **notices**. One record per thing
+worth saying:
+
+```
+rank  voice  scope  key  hl  short  long
+```
+
+- **rank** — value order. The top record is the pin.
+- **voice** — `!` pressure (yellow/red) · `+` opportunity (cyan) · `-`
+  budget (dim). Cyan can never mean pressure, so colour alone carries
+  the stance.
+- **scope** — `5h` / `7d` / `fb` / `acct`. One voice per scope per
+  frame: two clauses about one window can never disagree.
+- **key** — identity of the *condition*, not of the text. Row 3 shows a
+  notice only while its key is new to this session (~90 s), so a long
+  explanation arrives once and then gets out of the way.
+- **hl** — the number the reader acts on: bold, then back to the voice.
+- **short / long** — the pin, and the sentence for a surface with a
+  whole line (row 3, `--check`, `--week`).
+
+The pin stays while its condition holds. The flash fades. `--notice off`
+keeps row 3 quiet; `--advisor off` silences both.
+
+What the readers know, beyond the badges:
+
+```
+fb capped ~Thu 07:00     the running model is gone until then
+5h caps ~05:18           this sitting hits the wall before its reset
+7d dry ~Thu 09:00        the learned weekday forecast, not a straight line
+7d rebased 53%→12%       utilization fell INSIDE one window: a plan change or
+                         an out-of-band reset moved the denominator, and the
+                         ledger below still draws the old period
+last 5h of the week      no later window exists to spend the remainder through
+fb 91% vs 7d 55%         the MODEL caps first, not the account: switch, and the
+                         week's remaining capacity comes back
+5h ~40m left             throughput you cannot bank — said only while the week
+                         has slack, since an unspent 5h window is otherwise
+                         headroom, not waste
+~62% will expire         on pace to strand a large chunk of the subscription
+```
 
 ## Requests
 
@@ -127,7 +169,7 @@ The API is asked for what the protocol does not hand us, and no more.
 ## Words
 
 Lowercase, terse, plain: `caps`, `dry`, `unused`, `expires`, `spend it`,
-`go heavier`. No exclamation marks except the pressure sigil. Numbers
+`go heavier`, `go op`. No exclamation marks except the pressure sigil. Numbers
 first, verbs second, adjectives never. `,` joins facts, `·` joins
 clauses, `;` joins voices. No em dash on the line: a cell wide, it reads
 as a minus beside `-`/`+` and says less than `·`.
