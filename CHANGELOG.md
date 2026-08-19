@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.24.0 — 2026-08-19 — the week row, and a line 1 that fits
+
 **New: week row — this sitting and the week as ledgers, under the badges.**
 `5h ▂▅█▃▮▯▯▯▯▯  7d ▅▁▂ ▃▅ˍ▃▅ ▃▃▁▂▁ ▅ˍ▂▁▁ ··ˍ▃▅ ··ˍ▅ ▆▆ˍ▂▮ ▯▯`: one grammar
 at two scales. The 5h strip is the current window as ten half hours,
