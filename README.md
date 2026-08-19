@@ -81,7 +81,7 @@ Every component earns its place:
 | Signal | Why it matters |
 |--------|----------------|
 | Path and branch | Know where Claude Code is writing. Neutral grey; a dirty branch brightens to white with a `*`. |
-| Trace chip | `[https://cctrace.localhost/s/c3a6e0f3]` when the session's wire is being captured by [cctrace](https://github.com/thevibeworks/cctrace) (`deva --trace`, or `cctrace` directly) — a full URL so terminals linkify it, deep-linking `/s/<sid8>` (cctrace >= 0.40) straight to *this* session's conversation scrolled to the newest turn; without a session id the link falls back to the `/trace` live page. `DEVA_TRACE_UI_URL` (exported by deva on traced create/reattach) outranks the container-side port, since only the host side knows the published port or the portless route. Session identity, so it sits on the left with path and branch, dim (red stays reserved for pressure). Detected from the trace env cctrace exports into the traced process (`CCTRACE_SERVER_PORT`), from the capture's CA plumbing (`NODE_EXTRA_CA_CERTS` under a cctrace dir), or from `DEVA_TRACE=1`; when only the plumbing is visible (older cctrace) the port resolves through cctrace's live-instance registry, matched by session id (sid8 prefix — the registry stores ids redacted), then project path, then by being the only live capture, with the fallbacks trusting heartbeat-fresh entries only. A traced session with no resolvable port still shows a bare `[cctrace]` — "recorded" matters even portless. |
+| Trace chip | `[http://localhost:9317/s/c3a6e0f3]` when the session's wire is being captured by [cctrace](https://github.com/thevibeworks/cctrace) (`deva --trace`, or `cctrace` directly) — a full URL so terminals linkify it, deep-linking `/s/<sid8>` (cctrace >= 0.40) straight to *this* session's conversation scrolled to the newest turn; without a session id the link falls back to the `/trace` live page. `DEVA_TRACE_UI_URL` (exported by deva on traced create/reattach) outranks the container-side port, since only the host side knows the published port. **Line 1 must fit the terminal** (Claude Code hands the script `COLUMNS` and truncates or wraps anything wider, which throws every anchored row beneath the wrong edge), so when the full URL would not fit, the chip collapses to `[cctrace]` carrying the same target as an OSC 8 hyperlink — 9 columns, still one click on iTerm2/kitty/WezTerm — before the path/stats gap gives. Session identity, so it sits on the left with path and branch, dim (red stays reserved for pressure). Detected from the trace env cctrace exports into the traced process (`CCTRACE_SERVER_PORT`), from the capture's CA plumbing (`NODE_EXTRA_CA_CERTS` under a cctrace dir), or from `DEVA_TRACE=1`; when only the plumbing is visible (older cctrace) the port resolves through cctrace's live-instance registry, matched by session id (sid8 prefix — the registry stores ids redacted), then project path, then by being the only live capture, with the fallbacks trusting heartbeat-fresh entries only. A traced session with no resolvable port still shows a bare `[cctrace]` — "recorded" matters even portless. |
 | Activity | Session diff without opening git. |
 | Time and cost | Track long sessions. Hours format above 60m (`1h30m`). |
 | Model | Abbreviated: `claude-opus-4-8` becomes `opus4.8`, `claude-fable-5` becomes `fabl5`, `claude-sonnet-5` becomes `sonnet5`. The `[1m]` tag marks a 1M-context session, detected from the window the CLI reports (`context_window_size`) — not the name — so it shows even when Claude Code strips the `[1m]` suffix (which it does since 2.1.173 whenever 1M is the default; Sonnet 5 joined Fable 5 on that path in 2.1.197). |
@@ -90,6 +90,7 @@ Every component earns its place:
 | User tier | Neutral white-weight (MAX bold, PRO normal, dim otherwise) — identity, never a status color. Truncated display name. |
 | Quota | Integer percentages. The 5h badge always carries its reset time while a window is live — `5h[42%@14:30]` reads "42% used, resets at 14:30" — because on a 5h horizon the reset is the number you plan the current sitting around. Wall-clock, not a countdown, on purpose: Claude Code only re-renders the statusline on activity, so a relative "@1h38m" silently decays into a lie during idle gaps, while "@14:30" stays true in a frozen frame. (The 7d badge is hybrid: day-relative `@5d` while the reset is >= 24h out — decays one day per day, mild and narrow — switching to the same wall-clock `@04:00` inside the last day, where an `@6h`/`@<1h` countdown decayed by the hour exactly when pressure keeps the suffix visible.) When a window's utilization climbs between renders, a reverse-video `+N` token appears right after the badge for ~60s: `5h[44%@14:32]+2` means "you just burned 2%". A drop (window reset) stays quiet — the fresh low number is its own signal. **7d is forecast, not leveled**: a learned per-weekday burn profile (EWMA over your own usage history) plus your recent 24h burn project whether the quota outlasts the window — your heavy Tuesday counts more than a generic average. The verdict is color alone; under pressure the badge shows when relief arrives: `7d[44%@5d]` red means "at your pace, dry days before the reset 5 days from now"; inside the last day it reads `7d[92%@04:00]` — resets at 04:00. Cold start (<14 days history) falls back to window-average pacing. Recovery color when reset is imminent. **Model-scoped weekly quota**: when the usage API carries a per-model weekly limit (`limits[]`, `kind=weekly_scoped`) for the model your session is running, it renders right after the model+context block — `fabl5[1m][12%] fb[67%]` on a Fable 5 session, `op[33%]` on Opus — because the quota is a property of the model you're running, not of the account-wide 5h/7d cluster. It's a weekly number (same reset as the 7d badge), scoped to one model. Other models' scoped quotas stay hidden: only the limit constraining *this* session is signal. Supersedes the legacy `seven_day_opus`/`seven_day_sonnet` fields, which the API now sends as null. |
 | Extra usage | Monthly spend, limit, prepaid balance. `--extra auto` shows when quota runs out. |
+| Week row | **A row of its own, under the badges**: `5h ▂▅█▃▮▯▯▯▯▯  7d ▅▁▂ ▃▅ˍ▃▅ …▮ ▯▯` — this sitting as ten half hours, the week as its 5h windows (day-gapped), height = what each cell burned, `▮` now, `×` where the pool runs dry. Reconstructed from your own usage log; `auto` shows it once there is history to show. See [Week row](#week-row). |
 | Deadman | **Invisible until a switch is armed.** Surfaces [deadman](https://github.com/thevibeworks/deadman) — a dead man's switch that hands the session off when you stop responding. `[☠ armed 42m]` (dim) counts down to the auto-handoff; `[☠ warned 3m]` (yellow) means the phone warning went out; `[☠ due]` means the handoff fires imminently. Sits on the left lane next to the path — it describes this session's lifecycle, not a quota. One `command -v` when the tool is absent, one fast file read when present; nothing armed renders nothing. `--deadman off` disables it. |
 | Cache health | **Quiet until it bites.** Claude Code never re-renders an idle session, and while you work the prompt cache is always freshly ~1 TTL from expiry — so a proactive "expiring soon" isn't honestly observable, and `auto` spends no width on it. It speaks only when a rewrite actually happens: `≡!419k` the instant you resume onto a dead cache (idle longer than the TTL) or a mid-session prefix collapse — a 419k-token re-cache at ~20x the read rate (and the same burn on your 5h/7d quota on subscriptions). **Bold red past 200k** — the premium-band miss. `≡~` while a large prefix rebuilds. `--cache always` additionally keeps the freeze-safe deadline `≡@15:20` (last request + TTL; a past time in a frozen frame reads "expired at 15:20"). TTL defaults to 1h (claude.ai subscriber sessions) or 5m (API-key auth); an observed usage breakdown overrides it. The `≡` glyph (U+2261) reads as stacked cache layers — one terminal column, quiet and distinct. |
 
@@ -116,8 +117,9 @@ red, matching its Claude Code TUI color) = model family; everything else is
 | OAuth + macOS Keychain | -- | Yes |
 | Change flash on every refresh (`+.37` cost, `+9`/`-27` context, `+N` quota) | -- | Yes |
 | Model-scoped weekly quota (`fb`/`op`/`sn`) | -- | Yes |
+| Week row: the 5h window as half hours, the 7d period as 5h windows, what each cost | -- | Yes |
 | Works behind trusted mitm proxies (NODE_EXTRA_CA_CERTS) | -- | Yes |
-| 331 bats tests + CI | -- | Yes |
+| 379 bats tests + CI | -- | Yes |
 
 ## Configuration
 
@@ -136,7 +138,8 @@ Flags go in the command string in `~/.claude/settings.json`:
 | `--alignment` | `left-right`, `right-left`, `center` | `left-right` |
 | `--extra` | `auto`, `always`, `on-limit`, `off` | `auto` |
 | `--cache` | `auto`, `always`, `off` | `auto` |
-| `--advisor` | `auto`, `always`, `off` — second-row projection line, see [Advisor line](#advisor-line) | `auto` |
+| `--advisor` | `auto`, `always`, `off` — projection row, see [Advisor line](#advisor-line) | `auto` |
+| `--week` | `auto`, `always`, `off` — the 7d window ledger row, see [Week row](#week-row) | `auto` |
 | `--deadman` | `auto`, `off` — [deadman](https://github.com/thevibeworks/deadman) switch chip | `auto` |
 | `--debug` | Write logs to `~/.claude/statusline/logs/statusline.log` | off |
 | `--test [json]` | Render with mock data | off |
@@ -217,6 +220,14 @@ here — the `≡!Nk` badge still reports the miss after the fact.
 | 50 -- 79% | 1 min |
 | >= 80% | 30 sec |
 
+Those intervals govern the API fetch. Claude Code itself hands the
+statusline the 5h/7d numbers (`rate_limits`) on every render, and they are
+merged into the badges immediately — so while stdin carries them the fetch
+only serves what stdin lacks (the model-scoped weekly limit, extra usage)
+and its interval floors at 2 min whatever the 5h heat. Every stdin pair
+that changes is also logged as a `source:"stdin"` sample (>= 60 s apart):
+free history for the ledgers and the forecast, no request behind it.
+
 Error cooldown escalates with consecutive failures — 2 min, 4 min, 8 min, 10 min
 cap — and a server `Retry-After` (429s carry one) extends it further. The
 cooldown resets on the next successful fetch. Cache writes: atomic `mv`.
@@ -231,6 +242,52 @@ error, `!net` connection failed.
 echo '{"model":{"id":"claude-opus-4-8[1m]","display_name":"Opus"},"cwd":"/tmp/project","workspace":{"current_dir":"/tmp/project"},"cost":{"total_cost_usd":6.72,"total_lines_added":84,"total_lines_removed":14,"total_api_duration_ms":5400000},"version":"2.1.139"}' \
   | bash statusline.sh --test
 ```
+
+## Week row
+
+Line 1 says how much of each window is left; the week row says where it
+went — one grammar at two scales, directly under the badges, right-aligned
+to the same anchor the stats cluster ends at:
+
+```text
+proj (main*)   fabl5[1m][██░░42%] fb[66%] [MAX|@work] 5h[38%@23:00] 7d[39%]
+                       5h ▂▅█▃▮▯▯▯▯▯  7d ▅▁▂ ▃▅ˍ▃▅ ▃▃▁▂▁ ▅ˍ▂▁▁ ··ˍ▃▅ ··ˍ▅ ▆▆ˍ▂▮ ▯▯
+                                     + 7d resets @09:00, 61% unused — ~38% expires even at full burn
+```
+
+- **`5h`** — this sitting: the current 5h window as 10 half-hour cells,
+  height = the 5h points that half hour added (each positive step between
+  consecutive samples credited to the half hour the later sample fell in).
+- **`7d`** — the week: the 7d period as its 5h windows (34 cells, oldest
+  left, the last a 3h stub), height = the 7d points that window burned,
+  with a thin gap at each local midnight so days read as clusters — and a
+  day that held five windows shows it — without a ruler.
+
+| Cell | Meaning |
+|------|---------|
+| `▁▂▃▄▅▆▇█` | a cell that ran; height is the points it burned (`▁` <= 2, `▅` <= 11, `█` > 20) — the same scale in both strips, so a full window and a full week read the same height |
+| `ˍ` | ran, cost under a point — or ran idle inside the log's coverage; a bar of height zero, on the baseline |
+| `░` | unknown: the log has no sample for that cell (never drawn as idle — a gap in the record is not a quiet session) |
+| `▮` | the cell you are in now |
+| `▯` | a cell still ahead of you — the hollow of `▮`, an empty slot waiting |
+| `×` | a cell the pool will not cover at the current pace (7d: the learned forecast's dry point, linear when untrained; 5h: linear, the same projection as the badge) |
+
+Burn cells take their badge's pressure color; everything else is neutral,
+so the row never adds an alarm channel of its own. Both strips are
+reconstructed from `usage.jsonl` — the samples every render has been
+logging — keyed by each 5h window's `resets_at`. Reading down the column:
+`7d[39%]` -> the strip that spent those 39% -> the advisor clause that
+projects the rest. Freeze-safe by construction: `▮` moves at cell
+boundaries and every other cell is history.
+
+`--week auto` (default) draws the row only once the log holds a sample
+for either period — a fresh install gets no `░░░▮▯▯` row that says nothing
+the badges don't. `--week always` draws it whenever a window is live;
+`--week off` never. The 7d strip is the same one `statusline.sh week`
+prints; both are cached in `week.cache` and rebuilt only when the log
+grows, so a render never pays for the scan. Interoperates with
+[ccpace](https://github.com/thevibeworks/ccpace), which draws the same
+week ledger from the same log.
 
 ## Advisor line
 
@@ -248,7 +305,8 @@ ways, with a voice per direction:
 
 Quiet means no row at all: a healthy session stays one line. The row is
 right-aligned to the same anchor the stats cluster ends at, so the advice
-sits directly beneath the badges it interprets.
+sits directly beneath the badges it interprets (and beneath the
+[week row](#week-row) when that is showing: evidence, then interpretation).
 
 ```text
 proj (main*)   fabl5[1m][██░░42%] fb[86%] [MAX|@work] 5h[95%@06:00] 7d[44%@07:00]
@@ -426,13 +484,15 @@ run. Setting only `CLAUDE_CACHE_DIR` keeps the legacy single-dir behavior.
 npm exec --yes bats -- t/
 ```
 
-334 tests across `t/statusline.bats` (322 statusline + integration) and
+379 tests across `t/statusline.bats` (367 statusline + integration) and
 `t/install.bats` (12 installer). CI runs on push and PR to `main`.
 
 ## Project Structure
 
 ```text
-statusline.sh                Main script (one file, ~3400 lines)
+statusline.sh                Main script (one file, ~4400 lines)
+DESIGN.md                    The language: rows, color lanes, glyphs, time, requests
+llms.txt                     Agent-facing map of the repo
 install.sh                   One-line installer
 t/statusline.bats            Unit and integration tests
 t/install.bats               Installer tests (mock curl, isolated $HOME)
@@ -442,7 +502,13 @@ CHANGELOG.md                 Release notes
 CONTRIBUTING.md              Contribution guide
 docs/devlog/                 Implementation history
 docs/api/oauth-usage.md      Observed /api/oauth/usage contract (synced: CLI v2.1.201)
+docs/api/state-dir.md        On-disk state contract for external readers (ccpace, agents)
 ```
+
+## Design language
+
+[DESIGN.md](DESIGN.md): rows, lanes, glyphs, time, requests — the rules
+every badge follows, in one page.
 
 ## Contributing
 

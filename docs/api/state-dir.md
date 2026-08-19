@@ -48,6 +48,8 @@ a writer that cannot honor all of them must use its own dir instead:
   profile.cache                           last /api/oauth/profile response (24h TTL)
   prepaid_credits.cache                   prepaid balance + fetched_at (5m TTL)
   forecast.cache                          learned weekday burn profile (hourly rebuild)
+  week.cache                              week-row cells: 7d per-window + 5h per-half-hour burn (rebuilt when usage.jsonl grows)
+  stdin_seen                              last stdin rate_limits pair logged (`5h|7d epoch`) — dedupe for source:stdin samples
   usage.jsonl                             append-only usage/session event log
   usage.jsonl.1                           single rotation backup (32 MiB cap)
   logs/statusline.log                     debug log (only with --debug; 1 MiB cap)
@@ -114,13 +116,36 @@ inside the same 5h window; `-1` until enough paired burn has been
 observed (>= half a window). Snapshots are partitioned by `account.uuid`
 before aggregation.
 
+### week.cache
+
+The week row's history, so a render never scans the log:
+
+```json
+{"period_start": 1786550400, "five_start": 1787119200,
+ "log_sig": "1787118061:4844903", "at": 1787118354,
+ "week": "1786552591 1787118061 0:11,1:2,2:4,4:10",
+ "five": "1787119260 1787120100 0:5,1:10,3:25"}
+```
+
+`period_start` / `five_start` are the 7d period start and the current 5h
+window start, both snapped to the 5-min grid the window keys use;
+`log_sig` is usage.jsonl's `mtime:size`; `week` and `five` are
+`span_lo span_hi cell:cost,...` — the log's coverage span (epoch) and, per
+cell, the points observed in it. `week`: per 5h slot of the period, the
+7d points that window burned (max - min of `seven_day.utilization`,
+samples keyed by `five_hour.resets_at` rounded to 5 min). `five`: per
+half hour of the current 5h window, the 5h points added (each positive
+step between consecutive samples credited to the later sample's cell).
+Rebuilt when either period, the signature, or a 5-min TTL disagrees;
+safe to delete.
+
 ### usage.jsonl
 
 Append-only, one JSON object per line, three event types:
 
 | `type` | Emitted | Payload |
 |--------|---------|---------|
-| `usage` | every successful usage fetch | `session_id`, `timestamp`, `user{email,name,uuid,…}`, `organization{…}`, `five_hour`, `seven_day`, `seven_day_opus`, `extra_usage`, `limits[]`, `model`, `predicted_end` |
+| `usage` | every successful usage fetch; and (`source:"stdin"`) every changed 5h/7d pair Claude Code hands the statusline on stdin, >= 60 s apart — same window keys, `user.uuid` from profile.cache, no `organization`/`extra_usage`/`limits` | `session_id`, `timestamp`, `user{email,name,uuid,…}`, `organization{…}`, `five_hour`, `seven_day`, `seven_day_opus`, `extra_usage`, `limits[]`, `model`, `predicted_end` |
 | `session_start` | first fetch of a new 5h window | `session_id`, `timestamp`, `five_hour_window_end`, `seven_day_window_end` |
 | `session_end` | 5h window rolled while a different session was last | `session_id`, `timestamp` |
 
