@@ -2,9 +2,58 @@
 
 ## Unreleased
 
+**New: week row — this sitting and the week as ledgers, under the badges.**
+`5h ▂▅█▃▮▯▯▯▯▯  7d ▅▁▂ ▃▅ˍ▃▅ ▃▃▁▂▁ ▅ˍ▂▁▁ ··ˍ▃▅ ··ˍ▅ ▆▆ˍ▂▮ ▯▯`: one grammar
+at two scales. The 5h strip is the current window as ten half hours,
+height = the 5h points each added; the 7d strip is the period as its 5h
+windows (34, oldest left), height = the 7d points each burned, with a
+thin gap at each local midnight so days read as clusters without a
+ruler. `ˍ` idle, `░` unknown (no sample — never drawn as idle), `▮` now,
+`▯` ahead, `×` where the pool runs dry at your pace. Placed where it
+reads: right-aligned to line 1's edge like the advisor, and *above* the
+advisor — evidence, then interpretation, one column down from the
+badges. Day gaps live in history only; the run from `▮` on is contiguous. `--week auto|always|off`; `auto` (default) draws it only once
+the log holds a sample for either period, so a fresh install stays one
+line. History comes from `usage.jsonl` via a new `week.cache` (one jq
+pass for both strips, keyed by the periods + the log's mtime:size), so a
+render never pays for the scan; the 7d strip builder is shared with the
+`week` subcommand, so the two cannot disagree. Bug fixed on the way: the
+period start is now snapped to the same 5-min grid the window keys use —
+the API jitters `resets_at` by sub-seconds, and a raw `reset - 7d` could
+push slot 0 to slot -1 and lose the first cell of the week. `--theme
+minimal` turns the row off.
+
+**Fewer requests: the protocol's own numbers count.** Claude Code passes
+`rate_limits` (5h/7d) on every render. Beyond merging them into the
+badges (already the case), the statusline now (1) floors the API fetch
+interval at 2 min while stdin carries them — the fetch only serves the
+model-scoped weekly limit and extra usage, which move at the week's
+pace, so the 30 s hot-window cadence was pure load; and (2) logs each
+changed pair as a `source:"stdin"` usage sample (>= 60 s apart, account
+uuid from profile.cache) — free history for the ledgers, the forecast
+and ccpace, zero requests. `--week auto` gates on a *past* cell now, so
+the free samples do not switch the row on for a first-ever render.
+
+**Line 1 fits the terminal; every row meets its edge.** Claude Code
+hands the script `COLUMNS` and truncates or wraps anything wider — and a
+wrapped line 1 put every anchored row (advisor, week) beneath the wrong
+edge. Three fixes: widths are counted in characters whatever the
+ambient locale (a C/POSIX locale made bash count `█░░░░░` as 18 columns
+and pad line 1 short); when line 1 would not fit, the trace chip's URL
+text collapses to `[cctrace]` carrying the same target as an OSC 8
+hyperlink (9 columns for ~35) before the path/stats gap drops to 1; and
+when the width is *known* (tty or `COLUMNS`) the extra rows anchor at
+the visible edge rather than at overflowing content — a guessed width
+(a pipe's flat 80) still never clamps, as before.
+
+**Trace chip: `http://localhost:<port>`.** cctrace dropped its portless
+route (`https://cctrace.localhost`); the chip's URL is the loopback port
+form everywhere now, and deva exports the same shape in
+`DEVA_TRACE_UI_URL`.
+
 **Trace chip deep-links the current session.** The cctrace link now
 jumps straight to *this* session's conversation, scrolled to the newest
-turn: `[https://cctrace.localhost/s/c3a6e0f3]` instead of the generic
+turn: `[http://localhost:9317/s/c3a6e0f3]` instead of the generic
 `/trace` landing page. `/s/<sid8>` is cctrace's (>= 0.40) short session
 jump — a redirect to `/trace#/session/<sid8>` — and the sid8 prefix is
 the same join key the chip's registry match already uses, so the link
@@ -45,7 +94,7 @@ port or the portless `https://cctrace.localhost` route.
 **New: `week` subcommand.** The 7d period drawn as its own 5h windows,
 one cell each (34 per period): `▁▂▃▄▅▆▇█` a window that ran, height =
 the 7d points it burned; `·` ran but burned under 1%; `░` unknown, no
-samples on record; `▮` the window you're in now; `▫` a window still
+samples on record; `▮` the window you're in now; `▯` a window still
 ahead; `×` a window the pool won't cover at the current pace. Count
 `▮` and what follows for the budget line's own `~Nx5h left`, so the
 picture and the sentence under it are the same number.

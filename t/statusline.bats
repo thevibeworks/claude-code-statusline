@@ -828,12 +828,12 @@ _write_ledger_fixture() { # dir
     [ "$status" -eq 0 ]
     plain=$(strip_ansi "$output")
     [[ "$plain" == "7d  20% "* ]]
-    bar=$(echo "$plain" | head -1 | sed 's/^7d  20% //; s/ .*$//')
+    bar=$(echo "$plain" | head -1 | sed 's/^7d  20% //; s/  .*$//' | tr -d ' ')
     [ "$(echo "$bar" | grep -o . | wc -l)" -eq 34 ]
     # no store: the past is honestly unknown, never drawn as idle
-    [[ "$bar" =~ ^░+▮▫+$ ]]
+    [[ "$bar" =~ ^░+▮▯+$ ]]
     # the row carries its own remaining/reset; no ruler, no day labels
-    [[ "$plain" =~ ▫+\ +[0-9]+[dhm].*@[A-Z][a-z][a-z]\ [0-9]{2}:[0-9]{2} ]]
+    [[ "$plain" =~ ▯+\ +[0-9]+[dhm].*@[A-Z][a-z][a-z]\ [0-9]{2}:[0-9]{2} ]]
     [[ "$plain" != *"'-------'"* ]]
     [[ "$plain" == *"budget ~24x5h left"* ]]
     [[ "$plain" != *"stale"* ]]
@@ -850,7 +850,7 @@ _write_ledger_fixture() { # dir
     run run_week
     [ "$status" -eq 0 ]
     plain=$(strip_ansi "$output")
-    bar=$(echo "$plain" | head -1 | sed 's/^7d  55% //; s/ .*$//')
+    bar=$(echo "$plain" | head -1 | sed 's/^7d  55% //; s/  .*$//' | tr -d ' ')
     stated=$(echo "$plain" | sed -n 's/.*budget ~\([0-9]*\)x5h left.*/\1/p')
     counted=$(echo "$bar" | grep -o '▮.*' | grep -o . | wc -l)
     [ "$counted" -eq "$stated" ]
@@ -880,13 +880,180 @@ _write_ledger_fixture() { # dir
     run run_week
     [ "$status" -eq 0 ]
     plain=$(strip_ansi "$output")
-    bar=$(echo "$plain" | head -1 | sed 's/^7d  55% //; s/ .*$//')
+    bar=$(echo "$plain" | head -1 | sed 's/^7d  55% //; s/  .*$//' | tr -d ' ')
     [ "$(echo "$bar" | grep -o . | wc -l)" -eq 34 ]
     # burn heights appear, slots before coverage stay unknown
     [[ "$bar" == ░* ]]
     [[ "$bar" =~ [▁▂▃▄▅▆▇█] ]]
     # the zero-burn sampled window reads idle, not unknown
-    [[ "$bar" =~ [▁▂▃▄▅▆▇█]·[▁▂▃▄▅▆▇█] ]]
+    [[ "$bar" =~ [▁▂▃▄▅▆▇█]ˍ[▁▂▃▄▅▆▇█] ]]
+    rm -rf "$tmpdir"
+}
+
+# --- week row (the live 7d ledger under the badges) ---------------------------
+
+# usage.cache + a usage.jsonl with slots 3..5 sampled, reset 31h out.
+_seed_week_store() {
+    local dir="$1" now reset_7d_epoch reset_7d ps spec w_end u
+    now=$(date +%s)
+    reset_7d_epoch=$((now + 31 * 3600))
+    reset_7d=$(date -u -d "@$reset_7d_epoch" '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"fetched_at":%s,"five_hour":{"utilization":9},"seven_day":{"utilization":55,"resets_at":"%s"}}' \
+        "$now" "$reset_7d" > "$dir/usage.cache"
+    ps=$((reset_7d_epoch - 604800))
+    : > "$dir/usage.jsonl"
+    for spec in "3 10 18" "4 18 18" "5 18 25"; do
+        set -- $spec
+        w_end=$((ps + $1 * 18000 + 18000))
+        for u in "$2" "$3"; do
+            printf '{"timestamp":%s,"five_hour":{"resets_at":"%s"},"seven_day":{"utilization":%s}}\n' \
+                "$((w_end - 18000))" "$(date -u -d "@$w_end" '+%Y-%m-%dT%H:%M:%SZ')" "$u" \
+                >> "$dir/usage.jsonl"
+        done
+    done
+}
+
+@test "build_week_row: the strip under the badges, labelled 7d, 34 cells" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    _seed_week_store "$tmpdir"
+    row=$(build_week_row "$(cat "$tmpdir/usage.cache")" auto)
+    plain=$(strip_ansi "$row")
+    # no live 5h window in the fixture: the 7d strip alone
+    [[ "$plain" == "7d "* ]]
+    bar=$(printf '%s' "${plain#7d }" | tr -d ' ')
+    [ "$(echo "$bar" | grep -o . | wc -l)" -eq 34 ]
+    [[ "$bar" =~ [▁▂▃▄▅▆▇█]ˍ[▁▂▃▄▅▆▇█] ]]
+    [[ "$bar" == *▮* ]]
+    # day gaps: single spaces inside the strip, several of them across a week
+    [ "$(printf '%s' "${plain#7d }" | tr -cd ' ' | wc -c)" -ge 5 ]
+    rm -rf "$tmpdir"
+}
+
+@test "log_stdin_snapshot: stdin rate_limits become usage samples, deduped by pair and time" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    printf '{"account":{"uuid":"u-1","email":"e@x"}}' > "$tmpdir/profile.cache"
+    log_stdin_snapshot sid1 12 1787119200 39 1787155200
+    log_stdin_snapshot sid1 12 1787119200 39 1787155200   # same pair: no row
+    log_stdin_snapshot sid2 13 1787119200 39 1787155200   # changed, but < 60s: no row
+    [ "$(wc -l < "$tmpdir/usage.jsonl")" -eq 1 ]
+    row=$(cat "$tmpdir/usage.jsonl")
+    [ "$(echo "$row" | jq -r .source)" = "stdin" ]
+    [ "$(echo "$row" | jq -r .user.uuid)" = "u-1" ]
+    [ "$(echo "$row" | jq -r .five_hour.resets_at)" = "2026-08-19T06:00:00Z" ]
+    [ "$(echo "$row" | jq -r .seven_day.utilization)" = "39" ]
+    # older than the floor: the changed pair lands
+    printf '12|39 %s\n' "$(( $(date +%s) - 120 ))" > "$tmpdir/stdin_seen"
+    log_stdin_snapshot sid2 13 1787119200 39 1787155200
+    [ "$(wc -l < "$tmpdir/usage.jsonl")" -eq 2 ]
+    # the week strip reads them like fetched samples (same window key)
+    rm -rf "$tmpdir"
+}
+
+@test "week strip: day gaps live in history only — never right after ▮" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
+    usage=$(printf '{"fetched_at":%s,"five_hour":{"utilization":9},"seven_day":{"utilization":20,"resets_at":"%s"}}' "$(date +%s)" "$reset_7d")
+    plain=$(strip_ansi "$(build_week_row "$usage" always)")
+    # everything from ▮ to the end is one contiguous run
+    [[ "${plain#*▮}" =~ ^▯+$ ]]
+    rm -rf "$tmpdir"
+}
+
+@test "build_week_row: the 5h strip credits each half hour with the points it added" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    now=$(date +%s)
+    reset_5h=$((now + 3 * 3600 - 400))    # window started 2h+ ago: we sit in cell 4
+    fs=$(( ( (reset_5h - 18000 + 150) / 300 ) * 300 ))
+    reset_5h_iso=$(date -u -d "@$reset_5h" '+%Y-%m-%dT%H:%M:%SZ')
+    reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
+    usage=$(printf '{"fetched_at":%s,"five_hour":{"utilization":30,"resets_at":"%s"},"seven_day":{"utilization":20,"resets_at":"%s"}}' "$now" "$reset_5h_iso" "$reset_7d")
+    : > "$tmpdir/usage.jsonl"
+    # +10m 5%, +40m 15%, +70m 15% (idle), +100m 40%: cells 0:5 1:10 2:0 3:25
+    for spec in "600 5" "2400 15" "4200 15" "6000 40"; do
+        set -- $spec
+        printf '{"timestamp":%s,"five_hour":{"utilization":%s,"resets_at":"%s"},"seven_day":{"utilization":20}}\n' \
+            "$((fs + $1))" "$2" "$reset_5h_iso" >> "$tmpdir/usage.jsonl"
+    done
+    plain=$(strip_ansi "$(build_week_row "$usage" auto)")
+    [[ "$plain" == "5h "* ]]
+    five="${plain#5h }"; five="${five%%  7d*}"
+    [ "$five" = "▃▅ˍ█▮▯▯▯▯▯" ]
+    # 30% in 2h -> dry past the reset: holds, so no × in this window
+    [[ "$five" != *×* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "build_week_row: auto is silent without history; always draws the unknown week; off never" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
+    usage=$(printf '{"fetched_at":%s,"five_hour":{"utilization":9},"seven_day":{"utilization":20,"resets_at":"%s"}}' "$(date +%s)" "$reset_7d")
+    [ -z "$(build_week_row "$usage" auto)" ]
+    plain=$(strip_ansi "$(build_week_row "$usage" always)" | tr -d ' ')
+    [[ "$plain" =~ ^7d░+▮▯+$ ]]
+    [ -z "$(build_week_row "$usage" off)" ]
+    # no live 7d window: nothing, even in always mode
+    [ -z "$(build_week_row '{"seven_day":{"utilization":20}}' always)" ]
+    rm -rf "$tmpdir"
+}
+
+@test "week_history_cells: cached per period + log signature; a new sample invalidates" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    _seed_week_store "$tmpdir"
+    now=$(date +%s)
+    ps=$(( ( (now + 31 * 3600 - 604800 + 150) / 300 ) * 300 ))
+    first=$(week_history_cells "$ps")
+    [[ "$first" == *"3:8"* ]]
+    [ -f "$tmpdir/week.cache" ]
+    [ "$(jq -r .period_start "$tmpdir/week.cache")" = "$ps" ]
+    # served from cache: doctor the cache, the doctored value comes back
+    jq -c '.week="1 2 3:99"' "$tmpdir/week.cache" > "$tmpdir/wc" && mv "$tmpdir/wc" "$tmpdir/week.cache"
+    [ "$(week_history_cells "$ps")" = "1 2 3:99" ]
+    # a new sample changes the log signature: real cells again
+    sleep 1
+    printf '{"timestamp":%s,"five_hour":{"resets_at":"%s"},"seven_day":{"utilization":30}}\n' \
+        "$((ps + 5 * 18000))" "$(date -u -d "@$((ps + 6 * 18000))" '+%Y-%m-%dT%H:%M:%SZ')" >> "$tmpdir/usage.jsonl"
+    again=$(week_history_cells "$ps")
+    [[ "$again" == *"5:12"* ]]
+    # a different period never reads a stale cache
+    [[ "$(week_history_cells $((ps - 604800)))" != *"3:8"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "week_period_start: snaps to the 5-min grid so slot 0 is never lost to jitter" {
+    # a reset that truncates to a second past the grid still starts the week ON it
+    now=1786550400
+    [ "$(week_period_start "$now" $((604800 + 1)))" = "1786550400" ]
+    [ "$(week_period_start "$now" $((604800 - 1)))" = "1786550400" ]
+    [ "$(week_period_start "$now" $((604800 + 149)))" = "1786550400" ]
+    [ "$(week_period_start "$now" $((604800 + 150)))" = "1786550700" ]
+}
+
+@test "integration: week row sits between the badges and the advisor, anchored to line 1" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude/statusline"
+    printf '{"claudeAiOauth":{"accessToken":"tok"}}' > "$tmpdir/.claude/.credentials.json"
+    _seed_week_store "$tmpdir/.claude/statusline"
+    reset_5h=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_7d=$(jq -r .seven_day.resets_at "$tmpdir/.claude/statusline/usage.cache")
+    input=$(printf '{"session_id":"wk","model":{"id":"claude-opus-4-8","display_name":"Opus"},"cwd":"/t","workspace":{"current_dir":"/t"},"cost":{"total_cost_usd":0},"context_window":{"used_percentage":10,"context_window_size":200000},"rate_limits":{"five_hour":{"used_percentage":85,"resets_at":"%s"},"seven_day":{"used_percentage":55,"resets_at":"%s"}}}' "$reset_5h" "$reset_7d")
+    out=$(printf '%s' "$input" | HOME="$tmpdir" COLUMNS=140 bash "$SCRIPT_DIR/statusline.sh")
+    [ "$(printf '%s\n' "$out" | wc -l)" -eq 3 ]
+    l1=$(printf '%s\n' "$out" | sed -n 1p | sed "s/\x1b\[[0-9;]*m//g")
+    l2=$(printf '%s\n' "$out" | sed -n 2p | sed "s/\x1b\[[0-9;]*m//g")
+    l3=$(printf '%s\n' "$out" | sed -n 3p | sed "s/\x1b\[[0-9;]*m//g")
+    [[ "$l2" =~ ^\ *5h\ .*▮.*7d\ .*▮ ]]
+    [[ "$l3" == *"5h caps ~"* ]]
+    # evidence row ends where line 1 ends: same right anchor as the advisor
+    [ "${#l2}" -eq "${#l1}" ]
+    [ "${#l3}" -eq "${#l1}" ]
+    off=$(printf '%s' "$input" | HOME="$tmpdir" COLUMNS=140 bash "$SCRIPT_DIR/statusline.sh" --week off)
+    [ "$(printf '%s\n' "$off" | wc -l)" -eq 2 ]
     rm -rf "$tmpdir"
 }
 
@@ -900,9 +1067,9 @@ _write_ledger_fixture() { # dir
     run run_week
     [ "$status" -eq 0 ]
     plain=$(strip_ansi "$output")
-    bar=$(echo "$plain" | head -1 | sed 's/^7d  80% //; s/ .*$//')
-    # affordable windows first, then the wall — never × before ▫
-    [[ "$bar" =~ ▮▫*×+$ ]]
+    bar=$(echo "$plain" | head -1 | sed 's/^7d  80% //; s/  .*$//' | tr -d ' ')
+    # affordable windows first, then the wall — never × before ▯
+    [[ "$bar" =~ ▮▯*×+$ ]]
     rm -rf "$tmpdir"
 }
 
@@ -3189,18 +3356,18 @@ make_deadman_shim() { # $1=tmpdir $2=chip output
 }
 
 @test "build_trace_component: DEVA_TRACE_UI_URL outranks the container-side port" {
-    result=$( (DEVA_TRACE_UI_URL="https://cctrace.localhost:1355" CCTRACE_SERVER_PORT=9317; build_trace_component) )
+    result=$( (DEVA_TRACE_UI_URL="http://localhost:1355" CCTRACE_SERVER_PORT=9317; build_trace_component) )
     plain=$(strip_ansi "$result")
-    [ "$plain" = " [https://cctrace.localhost:1355/trace]" ]
+    [ "$plain" = " [http://localhost:1355/trace]" ]
 }
 
 @test "build_trace_component: a known session id deep-links /s/<sid8>, not /trace" {
     # cctrace >= 0.40 serves /s/<sid8> — a rewrite to /trace#/session/<sid8>,
     # landing on THIS session's conversation scrolled to the newest turn.
-    result=$( (DEVA_TRACE_UI_URL="https://cctrace.localhost" CCTRACE_SERVER_PORT=9317 \
+    result=$( (DEVA_TRACE_UI_URL="http://localhost:1355" CCTRACE_SERVER_PORT=9317 \
         stdin_session_id="c3a6e0f3-871b-4047-a282-60ca3d2244e6"; build_trace_component) )
     plain=$(strip_ansi "$result")
-    [ "$plain" = " [https://cctrace.localhost/s/c3a6e0f3]" ]
+    [ "$plain" = " [http://localhost:1355/s/c3a6e0f3]" ]
 }
 
 @test "build_trace_component: registry stores the sid REDACTED — sid8 prefix still matches" {
@@ -3351,14 +3518,35 @@ make_deadman_shim() { # $1=tmpdir $2=chip output
     reset_5h=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
     printf '{"five_hour":{"utilization":85,"resets_at":"%s"},"seven_day":{"utilization":10},"fetched_at":%s}' \
         "$reset_5h" "$(date +%s)" > "$tmpdir/.claude/statusline/usage.cache"
-    # A phantom 40-col terminal: line 1 overflows it (padding clamps to 6);
-    # the advisor must anchor on line 1's real edge, not the phantom one.
+    # No tty, no COLUMNS: the width is tput's guess (TERM=dumb -> 80). Line 1
+    # overflows the guess; the advisor must anchor on line 1's real edge, not
+    # the guessed one — a pipe's 80 says nothing about the real terminal.
     out=$(echo '{"session_id":"align-low","model":{"id":"claude-opus-4-6","display_name":"Opus"},"cwd":"/t/proj","workspace":{"current_dir":"/t/proj"},"version":"2.1.174","cost":{"total_cost_usd":0}}' \
-        | HOME="$tmpdir" COLUMNS=40 bash "$SCRIPT_DIR/statusline.sh" --test)
+        | env -u COLUMNS TERM=dumb HOME="$tmpdir" setsid -w bash "$SCRIPT_DIR/statusline.sh" --test --path-display full --order activity,time,cost,model,user,quota,extra)
     line1=$(strip_ansi "$(printf '%s\n' "$out" | sed -n 1p)")
     line2=$(strip_ansi "$(printf '%s\n' "$out" | sed -n 2p)")
     [ -n "$line2" ]
     [ "${#line1}" -eq "${#line2}" ]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: a KNOWN narrow width (COLUMNS) clamps every row to the visible edge" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude/statusline"
+    printf '{"claudeAiOauth":{"accessToken":"tok"}}' > "$tmpdir/.claude/.credentials.json"
+    reset_5h=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"five_hour":{"utilization":85,"resets_at":"%s"},"seven_day":{"utilization":10},"fetched_at":%s}' \
+        "$reset_5h" "$(date +%s)" > "$tmpdir/.claude/statusline/usage.cache"
+    # Claude Code hands COLUMNS to the script (>= 2.1.153): a 60-col terminal
+    # cuts line 1 at its edge, so the advisor meets that edge, not the
+    # overflowing content's.
+    out=$(echo '{"session_id":"align-known","model":{"id":"claude-opus-4-6","display_name":"Opus"},"cwd":"/t/a/very/long/project/path/that/keeps/going/and/going/on","workspace":{"current_dir":"/t/a/very/long/project/path/that/keeps/going/and/going/on"},"version":"2.1.174","cost":{"total_cost_usd":0}}' \
+        | COLUMNS=60 HOME="$tmpdir" setsid -w bash "$SCRIPT_DIR/statusline.sh" --test --path-display full)
+    line1=$(strip_ansi "$(printf '%s\n' "$out" | sed -n 1p)")
+    line2=$(strip_ansi "$(printf '%s\n' "$out" | sed -n 2p)")
+    [ -n "$line2" ]
+    [ "${#line1}" -gt 55 ]
+    [ "${#line2}" -eq 55 ]
     rm -rf "$tmpdir"
 }
 
