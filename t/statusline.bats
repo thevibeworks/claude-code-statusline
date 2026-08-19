@@ -1117,9 +1117,17 @@ _seed_week_store() {
     l3=$(printf '%s\n' "$out" | sed -n 3p | sed "s/\x1b\[[0-9;]*m//g")
     [[ "$l2" =~ ^\ *5h\ .*▮.*7d\ .*▮ ]]
     [[ "$l3" == *"5h caps ~"* ]]
-    # evidence row ends where line 1 ends: same right anchor as the advisor
+    # the rows hang as one block: the widest (the week row) ends where line 1
+    # ends, and the advisor shares its LEFT edge rather than the right one
     [ "${#l2}" -eq "${#l1}" ]
-    [ "${#l3}" -eq "${#l1}" ]
+    l2_left=$(printf '%s' "$l2" | sed 's/[^ ].*//' | wc -c)
+    l3_left=$(printf '%s' "$l3" | sed 's/[^ ].*//' | wc -c)
+    [ "$l2_left" -eq "$l3_left" ]
+    [ "${#l3}" -lt "${#l1}" ]
+    # leading padding rides behind a zero-width reset: Claude Code trims each
+    # row before rendering, a bare-space row would land flush-left
+    raw2=$(printf '%s\n' "$out" | sed -n 2p)
+    [[ "$raw2" == $'\e[0m '* ]]
     off=$(printf '%s' "$input" | HOME="$tmpdir" COLUMNS=140 bash "$SCRIPT_DIR/statusline.sh" --week off)
     [ "$(printf '%s\n' "$off" | wc -l)" -eq 2 ]
     rm -rf "$tmpdir"
@@ -3118,7 +3126,7 @@ _write_ppw_fixture() { # dir ppw
     reset_7d=$(date -u -d '+20 hours' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":10,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":65,\"resets_at\":\"$reset_7d\"}}"
     plain=$(CLAUDE_ACCOUNT_DIR="$tmpdir" strip_ansi "$(CLAUDE_ACCOUNT_DIR="$tmpdir" build_advisor_line "$usage" auto)")
-    [[ "$plain" =~ ^\+\ 7d\ resets\ @[0-9]{2}:[0-9]{2},\ 35%\ unused\ —\ spend\ it$ ]]
+    [[ "$plain" =~ ^\+\ 7d\ resets\ @[0-9]{2}:[0-9]{2},\ 35%\ unused\ ·\ spend\ it$ ]]
     rm -rf "$tmpdir"
 }
 
@@ -3133,7 +3141,7 @@ _write_ppw_fixture() { # dir ppw
     usage="{\"five_hour\":{\"utilization\":95,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":44,\"resets_at\":\"$reset_7d\"}}"
     result=$(CLAUDE_ACCOUNT_DIR="$tmpdir" build_advisor_line "$usage" auto)
     plain=$(strip_ansi "$result")
-    [[ "$plain" =~ 7d\ resets\ @[0-9]{2}:[0-9]{2},\ 56%\ unused\ —\ ~53%\ expires\ even\ at\ full\ burn ]]
+    [[ "$plain" =~ 7d\ resets\ @[0-9]{2}:[0-9]{2},\ 56%\ unused\ ·\ ~53%\ expires\ even\ at\ full\ burn ]]
     [[ "$plain" != *"spend it"* ]]
     rm -rf "$tmpdir"
 }
@@ -3162,7 +3170,7 @@ _write_ppw_fixture() { # dir ppw
     usage="{\"five_hour\":{\"utilization\":40},\"seven_day\":{\"utilization\":25,\"resets_at\":\"$reset_7d\"}}"
     result=$(build_advisor_line "$usage" auto)
     plain=$(strip_ansi "$result")
-    [[ "$plain" =~ ^\+\ 7d\ on\ pace\ to\ leave\ ~62%\ unused\ —\ go\ heavier$ ]]
+    [[ "$plain" =~ ^\+\ 7d\ on\ pace\ to\ leave\ ~62%\ unused\ ·\ go\ heavier$ ]]
     [[ "$result" == *'\033[0;36m'* ]]
 }
 
@@ -3187,7 +3195,7 @@ _write_ppw_fixture() { # dir ppw
     reset_7d=$(date -u -d '+4 days 12 hours' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":40},\"seven_day\":{\"utilization\":20,\"resets_at\":\"$reset_7d\"}}"
     plain=$(CLAUDE_ACCOUNT_DIR="$tmpdir" strip_ansi "$(CLAUDE_ACCOUNT_DIR="$tmpdir" build_advisor_line "$usage" auto)")
-    [[ "$plain" =~ ^\+\ 7d\ on\ pace\ to\ leave\ ~7[01]%\ unused\ —\ go\ heavier$ ]]
+    [[ "$plain" =~ ^\+\ 7d\ on\ pace\ to\ leave\ ~7[01]%\ unused\ ·\ go\ heavier$ ]]
     rm -rf "$tmpdir"
 }
 
@@ -3197,7 +3205,7 @@ _write_ppw_fixture() { # dir ppw
     usage="{\"five_hour\":{\"utilization\":20},\"seven_day\":{\"utilization\":20,\"resets_at\":\"$reset_7d\"},\"limits\":[{\"kind\":\"weekly_scoped\",\"percent\":100,\"resets_at\":\"$reset_sc\",\"scope\":{\"model\":{\"display_name\":\"Fable\"}}}]}"
     result=$(build_advisor_line "$usage" auto "claude-fable-5")
     plain=$(strip_ansi "$result")
-    [[ "$plain" =~ ^!\ fb\ capped\ —\ back\ ~[A-Z][a-z]{2}\ [0-9]{2}:[0-9]{2}$ ]]
+    [[ "$plain" =~ ^!\ fb\ capped\ ·\ back\ ~[A-Z][a-z]{2}\ [0-9]{2}:[0-9]{2}$ ]]
     [[ "$result" == *'\033[0;31m'* ]]
 }
 

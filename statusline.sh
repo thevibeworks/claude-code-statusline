@@ -3202,7 +3202,7 @@ build_advisor_fleet_hint() {
 #   always: additionally show the weekly budget when calm
 #   off:    nothing
 # Clauses in value order (max two survive, joined "; "):
-#   fb capped — back ~Thu 07:00           running model's weekly_scoped limit
+#   fb capped · back ~Thu 07:00           running model's weekly_scoped limit
 #                                         hit 100: the model just went away,
 #                                         the useful fact is when it returns
 #   5h caps ~14:20, 52m before reset      linear projection, only while the
@@ -3223,7 +3223,7 @@ build_advisor_fleet_hint() {
 #                                         learned forecast when trained, else
 #                                         linear pace when seven_day_pace
 #                                         already warns
-#   7d on pace to leave ~62% unused — go heavier
+#   7d on pace to leave ~62% unused · go heavier
 #                                         mid-week underuse, engaged sessions
 #                                         only — reaches exactly the users
 #                                         who can act on it
@@ -3291,7 +3291,7 @@ build_advisor_line() {
         local back_str
         back_str=$(_fmt_epoch $((now + scope_secs)) '%a %H:%M')
         if [ -n "$back_str" ]; then
-            clauses+=("$(model_scope_abbrev "$scope_name") capped — back ~${back_str}")
+            clauses+=("$(model_scope_abbrev "$scope_name") capped · back ~${back_str}")
             pressure=1 level="red"
         fi
     fi
@@ -3350,9 +3350,9 @@ build_advisor_line() {
         fi
         if [ -n "$reachable" ]; then
             if [ "$reachable" -ge "$surplus" ] 2>/dev/null; then
-                tail=" — spend it"
+                tail=" · spend it"
             else
-                tail=" — ~$((surplus - reachable))% expires even at full burn"
+                tail=" · ~$((surplus - reachable))% expires even at full burn"
             fi
         fi
         if [ -n "$when" ]; then
@@ -3439,7 +3439,7 @@ build_advisor_line() {
                 tail="then hard stop"
             fi
             if [ -n "$dry_str" ]; then
-                clauses+=("7d ${sev_verb} ~${dry_str}, ${gap_str} before reset — ${tail}")
+                clauses+=("7d ${sev_verb} ~${dry_str}, ${gap_str} before reset · ${tail}")
                 pressure=1 seven_spoken=1
                 [ "$sev_level" = "red" ] && level="red"
             fi
@@ -3465,7 +3465,7 @@ build_advisor_line() {
             heading=$((seven_int * SEVEN_DAY_WINDOW_SECS / elapsed7))
         fi
         if [ -n "$heading" ] && [ "$heading" -le "$ADVISOR_UNDERUSE_END_PCT" ] 2>/dev/null; then
-            clauses+=("7d on pace to leave ~$((100 - heading))% unused — go heavier")
+            clauses+=("7d on pace to leave ~$((100 - heading))% unused · go heavier")
         fi
     fi
 
@@ -4410,7 +4410,9 @@ format_output() {
             local right_padding=$((term_width - left_padding - ${#path_plain} - ${#stats_plain}))
             [ $right_padding -lt 2 ] && right_padding=2
             line1_cols=$((left_padding + ${#path_plain} + right_padding + ${#stats_plain}))
-            printf "%*s%b%*s%b\n" $left_padding "" "$path_part" $right_padding "" "$stats_part"
+            # leading pad survives Claude Code's per-row trim only behind a
+            # zero-width code (see print_row_block)
+            printf "%b%*s%b%*s%b\n" "$RESET" $left_padding "" "$path_part" $right_padding "" "$stats_part"
         else
             local padding=$((term_width - ${#path_plain} - ${#stats_plain} - LINE1_MARGIN))
             [ $padding -lt 1 ] && padding=1
@@ -4431,17 +4433,30 @@ format_output
 
 # Extra rows: each further stdout line renders as its own row in Claude
 # Code's status area, and printing nothing produces no row — so a quiet row
-# costs zero height. Right-aligned to line 1's ACTUAL rendered edge
-# (line1_cols, recorded by format_output) — not to term_width, which lies
-# under a pipe (tput says 80, line 1 overflows it, and a term_width anchor
-# left the row dangling mid-line). Anchoring on the row above keeps each row
-# directly beneath the usage badges it belongs to, whatever the width guess
-# was; when the stats sit left (right-left alignment) the rows stay left
-# with them. Single-hue-per-row truncation keeps the tail honest.
-print_anchored_row() {
+# costs zero height. The rows hang as ONE block under the badges: the block's
+# right edge meets line 1's ACTUAL rendered edge (line1_cols, recorded by
+# format_output — not term_width, which lies under a pipe), and every row in
+# the block shares one left edge, so the widest row touches the badges and
+# the others read flush-left beside it (ragged right, the way text reads;
+# a ragged LEFT edge under a fixed right one is a staircase). A lone row is
+# the block, so it right-anchors as before. When the stats sit left
+# (right-left alignment) the block stays left with them.
+#
+# Claude Code trims each stdout line before rendering (`.trim()` per row,
+# 2.1.234) — bare leading spaces never reach the screen, which is why the
+# rows sat flush-left for a while. A zero-width SGR reset ahead of the
+# padding is not whitespace, so the padding survives the trim and the
+# renderer (Ink, wrap=truncate) keeps it. Nerd-hacky, verified live.
+extra_rows=()
+queue_row() {
     local row="$1" tag="$2"
-    local plain anchor max color pad
-    plain=$(plain_text "$row")
+    [ -n "$row" ] || return 0
+    debug_log "$tag: $(plain_text "$row")"
+    extra_rows+=("$row")
+}
+print_row_block() {
+    [ "${#extra_rows[@]}" -gt 0 ] || return 0
+    local anchor max block_w=0 left=0 i plain color
     anchor=$((line1_cols > 0 ? line1_cols : term_width - LINE1_MARGIN))
     # a line 1 wider than a KNOWN terminal edge is cut there by Claude Code;
     # meet it at the edge. A guessed width (pipe, tput's flat 80) may be low
@@ -4450,18 +4465,27 @@ print_anchored_row() {
         anchor=$((term_width - LINE1_MARGIN))
     fi
     max=$((anchor > term_width - 1 ? anchor : term_width - 1))
-    if [ "${#plain}" -gt "$max" ] 2>/dev/null && [ "$max" -gt 1 ]; then
-        color=$(printf '%s' "$row" | grep -o '^\\033\[[0-9;]*m' | head -1)
-        plain="${plain:0:$((max - 1))}…"
-        row="${color}${plain}${RESET}"
-    fi
-    pad=0
+    # single-hue-per-row truncation keeps a cut tail honest
+    for i in "${!extra_rows[@]}"; do
+        plain=$(plain_text "${extra_rows[$i]}")
+        if [ "${#plain}" -gt "$max" ] 2>/dev/null && [ "$max" -gt 1 ]; then
+            color=$(printf '%s' "${extra_rows[$i]}" | grep -o '^\033\[[0-9;]*m' | head -1)
+            plain="${plain:0:$((max - 1))}…"
+            extra_rows[$i]="${color}${plain}${RESET}"
+        fi
+        [ "${#plain}" -gt "$block_w" ] && block_w=${#plain}
+    done
     if [ "$alignment" != "right-left" ]; then
-        pad=$((anchor - ${#plain}))
-        [ "$pad" -gt 0 ] 2>/dev/null || pad=0
+        left=$((anchor - block_w))
+        [ "$left" -gt 0 ] 2>/dev/null || left=0
     fi
-    debug_log "$tag: $plain"
-    printf '%*s%b\n' "$pad" "" "$row"
+    for i in "${!extra_rows[@]}"; do
+        if [ "$left" -gt 0 ]; then
+            printf '%b%*s%b\n' "$RESET" "$left" "" "${extra_rows[$i]}"
+        else
+            printf '%b\n' "${extra_rows[$i]}"
+        fi
+    done
 }
 
 # Row order under the badges: evidence, then interpretation. The week row
@@ -4471,7 +4495,7 @@ print_anchored_row() {
 week_row=""
 if [ "$week_display_mode" != "off" ] && [ -n "${usage_data:-}" ]; then
     week_row=$(build_week_row "$usage_data" "$week_display_mode")
-    [ -n "$week_row" ] && print_anchored_row "$week_row" "WEEK"
+    queue_row "$week_row" "WEEK"
 fi
 
 # The advisor speaks under pressure or surplus in auto mode; when the week
@@ -4481,8 +4505,9 @@ if [ "$advisor_display_mode" != "off" ] && [ -n "${usage_data:-}" ]; then
     advisor_mode_now="$advisor_display_mode"
     [ "$advisor_mode_now" = "auto" ] && [ -n "$week_row" ] && advisor_mode_now="always"
     advisor_line=$(build_advisor_line "$usage_data" "$advisor_mode_now" "${model_id:-$model_display}")
-    [ -n "$advisor_line" ] && print_anchored_row "$advisor_line" "ADVISOR"
+    queue_row "$advisor_line" "ADVISOR"
 fi
+print_row_block
 
 if [ "$test_mode" = true ] && [ -n "$temp_transcript" ] && [ -f "$temp_transcript" ]; then
     rm -f "$temp_transcript"

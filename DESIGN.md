@@ -11,11 +11,18 @@ row 2    where it went: 5h + 7d ledgers             (--week, auto = once there i
 row 3    what to do about it: the advisor           (--advisor, auto = pressure or surplus)
 ```
 
-Evidence above interpretation. Rows 2–3 right-align to line 1's edge (the
-badges they belong to), never to `COLUMNS`. Line 1 must fit: Claude Code
-truncates or wraps a wider row and every anchor beneath it goes wrong.
-Degrade in value order before overflowing — trace URL → `[cctrace]` OSC 8
-link, then the path/stats gap → 1. Quiet is a row that does not exist.
+Evidence above interpretation. Rows 2–3 hang as one block under the
+badges: the block's right edge is line 1's edge (never `COLUMNS`), every
+row in it shares one left edge — the widest row touches the badges, the
+rest read flush-left beside it. A lone row is the block. Line 1 must fit:
+Claude Code truncates or wraps a wider row and every anchor beneath it
+goes wrong. Degrade in value order before overflowing — trace URL →
+`[cctrace]` OSC 8 link, then the path/stats gap → 1. Quiet is a row that
+does not exist.
+
+Claude Code trims each row it renders (`.trim()` per line, 2.1.234), so
+a block's padding rides behind a zero-width `\e[0m`: not whitespace, so
+it survives; not ink, so it costs nothing.
 
 ## Line 1, left → right
 
@@ -118,4 +125,6 @@ The API is asked for what the protocol does not hand us, and no more.
 
 Lowercase, terse, plain: `caps`, `dry`, `unused`, `expires`, `spend it`,
 `go heavier`. No exclamation marks except the pressure sigil. Numbers
-first, verbs second, adjectives never.
+first, verbs second, adjectives never. `,` joins facts, `·` joins
+clauses, `;` joins voices. No em dash on the line: a cell wide, it reads
+as a minus beside `-`/`+` and says less than `·`.

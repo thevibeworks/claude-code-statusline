@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Claude Code Statusline — quota, context, cost. Live, in one bash file.</title>
-<meta name="description" content="Live 5h/7d quota with reset times, per-model weekly limits, context pressure, session cost, prompt-cache expiry detection, git activity, and a usage-advisor second row in your Claude Code prompt. One bash file, 334 tests, no daemon, no telemetry.">
+<title>Claude Code Statusline — quota, ledgers, advisor. Live, in one bash file.</title>
+<meta name="description" content="Live 5h/7d quota with reset times, per-model weekly limits, context pressure, session cost, prompt-cache expiry detection, git activity, 5h/7d ledgers with pace, and an advisor row in your Claude Code prompt. One bash file, 383 tests, no daemon, no telemetry.">
 <style>
   :root {
     --bg: #0b0c0e;
@@ -55,8 +55,9 @@
   .term .bar span { margin-left: auto; color: var(--dim2); font-size: 12px; font-family: var(--mono); }
   .term .screen {
     padding: 18px 18px 14px; font-family: var(--mono); font-size: 14.5px;
-    white-space: nowrap; overflow-x: auto; min-height: 3.2em;
+    white-space: pre; overflow-x: auto; min-height: 4.9em;
   }
+  .term .screen .w2 { color: #eceef1; font-weight: bold; }
   .term .caption {
     padding: 0 18px 14px; color: var(--dim2); font-size: 12.5px;
     font-family: var(--mono); min-height: 1.6em;
@@ -129,8 +130,8 @@
   <div class="wrap">
     <h1>Claude Code Statusline</h1>
     <p class="sub">Quota, context, cost, model, and git — live in your Claude Code prompt.
-    Know when the 5h window resets, how deep the weekly limit runs, and what this session costs, without leaving the terminal.</p>
-    <p class="facts">one bash file &middot; 334 tests &middot; deps: jq + curl &middot; no daemon &middot; no telemetry</p>
+    Line 1: how much of each window is left. Beneath it: where it went (5h + 7d ledgers with pace), and what to do about it.</p>
+    <p class="facts">one bash file &middot; 383 tests &middot; deps: jq + curl &middot; no daemon &middot; no telemetry</p>
 
     <div class="term">
       <div class="bar"><i></i><i></i><i></i><span>claude</span></div>
@@ -162,6 +163,12 @@
           <td class="desc"><b>5-hour window.</b> Wall-clock reset time, deliberately not a countdown: the line only re-renders on activity, so <code>@1h38m</code> would decay into a lie during idle gaps. <code>@14:00</code> stays true in a frozen frame.</td></tr>
       <tr><td><span class="d">7d</span><span class="y">[55%<span class="d">@2d</span>]</span></td>
           <td class="desc"><b>7-day window, forecast-colored.</b> A learned per-weekday burn profile projects whether quota outlasts the window — your heavy Tuesday counts more than a generic average. Red means "at your pace, dry before the reset".</td></tr>
+      <tr><td><span class="d">5h</span> <span class="g">▂▅█▃</span><span class="w">▮</span><span class="d2">▯▯▯▯▯</span> <span class="d">0.8x @14:00</span></td>
+          <td class="desc"><b>5h ledger.</b> This sitting as ten half hours, height = the 5h points each cell cost; <code>▮</code> now, <code>▯</code> ahead, <code>ˍ</code> ran-but-negligible, <code>░</code> no sample. Ends with its pace (used ÷ elapsed) and the reset its right edge stands for — axis labels, not badges restated.</td></tr>
+      <tr><td><span class="d">7d</span> <span class="y">▅▁▂ ▃▅ˍ▃▅ … ▆▆</span><span class="w">▮</span><span class="d2">▯▯▯▯</span> <span class="d">0.7x @Wed 09:00</span></td>
+          <td class="desc"><b>7d ledger.</b> The week as its 5h windows (34 cells, oldest left, a gap at each local midnight in history only), height = the 7d points each burned; <code>×</code> where the pool runs dry at your pace. Reconstructed from your own usage log — the same history <a href="https://github.com/thevibeworks/ccpace">ccpace</a> reads.</td></tr>
+      <tr><td><span class="d2">- budget ~10x5h left · even 4.5%/win · heading ~72%</span></td>
+          <td class="desc"><b>Advisor.</b> Under the ledgers: the calm numbers they imply (runway, what even looks like, where you land). Under pressure or surplus it speaks instead — <code>! 5h caps ~05:18, 42m before reset</code>, <code>+ 7d resets @07:00, 56% unused · spend it</code>. Rows hang as one block under the badges; a quiet row is no row.</td></tr>
       <tr><td><span class="mono"><span class="br">≡!419k</span>&nbsp; <span class="y">≡~</span>&nbsp; <span class="d">!net</span></span></td>
           <td class="desc"><b>Truth badges.</b> <code>≡!419k</code> — prompt-cache break on resume (bold red past 200k); <code>≡~</code> — rebuilding; stale-data markers say <i>why</i> a fetch failed. Silent while healthy.</td></tr>
     </table>
@@ -172,7 +179,7 @@
   <h2>Built like it matters</h2>
   <div class="vals">
     <div class="val"><h3>An advisor, not a dashboard</h3>
-      <p>A second row that interprets the badges: <code>! 5h caps ~05:18, 42m before reset</code> when you'll hit a wall, <code>+ 7d resets @07:00, 56% unused &mdash; spend it</code> when paid capacity is about to expire unused. Quiet means no row at all.</p></div>
+      <p>A second row that interprets the badges: <code>! 5h caps ~05:18, 42m before reset</code> when you'll hit a wall, <code>+ 7d resets @07:00, 56% unused &middot; spend it</code> when paid capacity is about to expire unused. Quiet means no row at all.</p></div>
     <div class="val"><h3>Numbers that don't lie</h3>
       <p>Wall-clock resets instead of decaying countdowns. A visible <code>[░░░░░░0%]</code> instead of a hidden bar. Stale data is always badged, never passed off as fresh.</p></div>
     <div class="val"><h3>Cache break detection</h3>
@@ -183,7 +190,7 @@
       <p>Corporate mitm proxy or a local tracer: it builds a combined CA bundle from <code>NODE_EXTRA_CA_CERTS</code> automatically, so fetches survive where plain curl dies.</p></div>
     <div class="val"><h3>Documented wire contract</h3>
       <p>The <a href="https://github.com/thevibeworks/claude-code-statusline/blob/main/docs/api/oauth-usage.md">observed <code>/api/oauth/usage</code> schema</a> is versioned in-repo and re-synced against CLI captures, so parser changes check against ground truth.</p></div>
-    <div class="val"><h3>334 tests on one bash file</h3>
+    <div class="val"><h3>383 tests on one bash file</h3>
       <p>bats suite covering quota math, lock contention (20-contender single-winner), forecast pacing, ANSI rendering, and the installer. CI on every push.</p></div>
     <div class="val"><h3>Nothing running in the background</h3>
       <p>No daemon, no telemetry, no npm. It runs when Claude Code renders the prompt, reads stdin + one cached API call, prints a line, exits.</p></div>
@@ -220,34 +227,67 @@
   function f(c, t) { return '<span class="' + c + ' flash">' + t + '</span>'; }
   var P = s('d', 'my-project') + '&nbsp;&nbsp;';
 
+  // Rows beneath line 1 hang as one block: its right edge meets line 1's
+  // edge, every row shares one left edge — exactly how the script pads them.
+  var L5 = s('d','5h ') + s('g','▂▅█▃') + s('w2','▮') + s('d2','▯▯▯▯▯') + s('d',' 0.8x @14:00');
+  var L5b = s('d','5h ') + s('g','▂▅█▄') + s('w2','▮') + s('d2','▯▯▯▯▯') + s('d',' 0.9x @14:00');
+  var L7 = s('d','7d ') + s('y','▅▁▂ ▃▅ˍ▃▅ ▃▃▁▂▁ ▅ˍ▂▁▁ ˍˍˍ▃▅ ▆▆') + s('w2','▮') + s('d2','▯▯▯▯▯▯▯▯') + s('d',' 0.7x @Wed 09:00');
+  var LEDGER = L5 + '  ' + L7, LEDGER_B = L5b + '  ' + L7;
+  var BUDGET = s('d2','- budget ~10x5h left · even 4.5%/win · heading ~72%');
+  var BUDGET_B = s('d2','- budget ~10x5h left · even 4.3%/win · heading ~73%');
+
   var frames = [
     { d: 2200, c: 'session starts — fresh context, quota from the shared account cache',
       h: P + s('w','fabl5[1m]') + s('d','xh') + s('g','[░░░░░░0%]') + ' ' + s('d','fb') + s('y','[64%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[38%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[55%') + s('d','@2d') + s('y',']') },
-    { d: 2400, c: 'first turns land — lines, time, cost appear',
-      h: P + s('dg','+12') + s('d','/') + s('dr','-3') + ' ' + s('d','2m $0.48') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[█░░░░░6%]') + ' ' + s('d','fb') + s('y','[64%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[38%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[55%') + s('d','@2d') + s('y',']') },
+    { d: 3400, c: 'the ledgers appear — this sitting as half hours, the week as its 5h windows; the budget line rides with them',
+      h: P + s('dg','+12') + s('d','/') + s('dr','-3') + ' ' + s('d','2m $0.48') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[█░░░░░6%]') + ' ' + s('d','fb') + s('y','[64%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[38%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[55%') + s('d','@2d') + s('y',']'),
+      r: [LEDGER, BUDGET] },
     { d: 3000, c: 'refresh changes a value → it flashes the delta for 60s: <b>+.31 cost, +9 context</b>',
-      h: P + s('dg','+58') + s('d','/') + s('dr','-11') + ' ' + s('d','4m $0.79') + f('rev-d','+.31') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[█░░░░░15%]') + f('rev-g','+9') + ' ' + s('d','fb') + s('y','[64%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[38%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[55%') + s('d','@2d') + s('y',']') },
-    { d: 3000, c: 'quota climbs between renders → <b>5h[40%]+2</b> — "you just burned 2%"',
-      h: P + s('dg','+58') + s('d','/') + s('dr','-11') + ' ' + s('d','9m $2.14') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[██░░░░34%]') + ' ' + s('d','fb') + s('y','[65%]') + f('rev-y','+1') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[40%') + s('d','@14:00') + s('g',']') + f('rev-g','+2') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']') },
+      h: P + s('dg','+58') + s('d','/') + s('dr','-11') + ' ' + s('d','4m $0.79') + f('rev-d','+.31') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[█░░░░░15%]') + f('rev-g','+9') + ' ' + s('d','fb') + s('y','[64%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[38%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[55%') + s('d','@2d') + s('y',']'),
+      r: [LEDGER, BUDGET] },
+    { d: 3000, c: 'quota climbs between renders → <b>5h[40%]+2</b> — "you just burned 2%"; the now-cell grows',
+      h: P + s('dg','+58') + s('d','/') + s('dr','-11') + ' ' + s('d','9m $2.14') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[██░░░░34%]') + ' ' + s('d','fb') + s('y','[65%]') + f('rev-y','+1') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[40%') + s('d','@14:00') + s('g',']') + f('rev-g','+2') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']'),
+      r: [LEDGER_B, BUDGET_B] },
     { d: 2600, c: 'context pressure turns the bar yellow — time to think about compacting',
-      h: P + s('dg','+131') + s('d','/') + s('dr','-16') + ' ' + s('d','14m $5.90') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('y','[█████░86%]') + ' ' + s('d','fb') + s('y','[65%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[41%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']') },
+      h: P + s('dg','+131') + s('d','/') + s('dr','-16') + ' ' + s('d','14m $5.90') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('y','[█████░86%]') + ' ' + s('d','fb') + s('y','[65%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[41%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']'),
+      r: [LEDGER_B, BUDGET_B] },
     { d: 3400, c: '/compact — the bar snaps visibly to 0% and flashes the drop: <b>-86</b>',
-      h: P + s('dg','+131') + s('d','/') + s('dr','-16') + ' ' + s('d','14m $5.90') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[░░░░░░0%]') + f('rev-g','-86') + ' ' + s('d','fb') + s('y','[65%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[41%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']') },
-    { d: 3000, c: 'back to work — same line, always current, never in the way',
-      h: P + s('dg','+142') + s('d','/') + s('dr','-19') + ' ' + s('d','17m $7.53') + f('rev-d','+1.63') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[█░░░░░7%]') + ' ' + s('d','fb') + s('y','[66%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[42%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']') },
+      h: P + s('dg','+131') + s('d','/') + s('dr','-16') + ' ' + s('d','14m $5.90') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[░░░░░░0%]') + f('rev-g','-86') + ' ' + s('d','fb') + s('y','[65%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[41%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']'),
+      r: [LEDGER_B, BUDGET_B] },
+    { d: 3000, c: 'back to work — same lines, always current, never in the way',
+      h: P + s('dg','+142') + s('d','/') + s('dr','-19') + ' ' + s('d','17m $7.53') + f('rev-d','+1.63') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[█░░░░░7%]') + ' ' + s('d','fb') + s('y','[66%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[42%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']'),
+      r: [LEDGER_B, BUDGET_B] },
     { d: 3200, c: 'came back after 2h idle — cache expired, 419k-token rewrite at 20× the read rate: <b>≡!419k</b>',
-      h: P + s('dg','+142') + s('d','/') + s('dr','-19') + ' ' + s('d','17m $7.53') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[█░░░░░7%]') + ' ' + f('br','≡!419k') + ' ' + s('d','fb') + s('y','[66%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[42%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']') },
+      h: P + s('dg','+142') + s('d','/') + s('dr','-19') + ' ' + s('d','17m $7.53') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[█░░░░░7%]') + ' ' + f('br','≡!419k') + ' ' + s('d','fb') + s('y','[66%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[42%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']'),
+      r: [LEDGER_B, BUDGET_B] },
     { d: 2800, c: 'prefix rebuilding — ≡~ clears once the cache is warm again',
-      h: P + s('dg','+152') + s('d','/') + s('dr','-22') + ' ' + s('d','19m $8.71') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[██░░░░14%]') + ' ' + s('y','≡~') + ' ' + s('d','fb') + s('y','[67%]') + f('rev-y','+1') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[43%') + s('d','@14:00') + s('g',']') + f('rev-g','+1') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']') },
+      h: P + s('dg','+152') + s('d','/') + s('dr','-22') + ' ' + s('d','19m $8.71') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[██░░░░14%]') + ' ' + s('y','≡~') + ' ' + s('d','fb') + s('y','[67%]') + f('rev-y','+1') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[43%') + s('d','@14:00') + s('g',']') + f('rev-g','+1') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']'),
+      r: [LEDGER_B, BUDGET_B] },
     { d: 3000, c: 'cache warm, indicator gone — auto stays silent while healthy, zero width',
-      h: P + s('dg','+168') + s('d','/') + s('dr','-25') + ' ' + s('d','22m $10.40') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[██░░░░21%]') + ' ' + s('d','fb') + s('y','[67%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[43%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']') }
+      h: P + s('dg','+168') + s('d','/') + s('dr','-25') + ' ' + s('d','22m $10.40') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[██░░░░21%]') + ' ' + s('d','fb') + s('y','[67%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[43%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']'),
+      r: [LEDGER_B, BUDGET_B] }
   ];
+
+  // visible width of a rendered fragment (tags stripped, entities decoded)
+  var meter = document.createElement('div');
+  function vis(html) { meter.innerHTML = html; return meter.textContent.length; }
+  function pad(n) { return new Array(n + 1).join(' '); }
+  function render(fr) {
+    var out = fr.h, rows = fr.r || [];
+    if (rows.length) {
+      var anchor = vis(fr.h), widest = 0;
+      for (var k = 0; k < rows.length; k++) widest = Math.max(widest, vis(rows[k]));
+      var left = Math.max(0, anchor - widest);
+      for (var k2 = 0; k2 < rows.length; k2++) out += '\n' + pad(left) + rows[k2];
+    }
+    return out;
+  }
 
   var i = 0, timer = null;
   var reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   function show(n) {
-    line.innerHTML = frames[n].h;
+    line.innerHTML = render(frames[n]);
     cap.innerHTML = frames[n].c;
   }
   function step() {

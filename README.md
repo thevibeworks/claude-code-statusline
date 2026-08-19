@@ -246,13 +246,14 @@ echo '{"model":{"id":"claude-opus-4-8[1m]","display_name":"Opus"},"cwd":"/tmp/pr
 ## Week row
 
 Line 1 says how much of each window is left; the week row says where it
-went — one grammar at two scales, directly under the badges, right-aligned
-to the same anchor the stats cluster ends at:
+went — one grammar at two scales, directly under the badges. The rows
+beneath line 1 hang as one block: its right edge meets the edge the
+stats cluster ends at, and every row in it shares one left edge:
 
 ```text
 proj (main*)   fabl5[1m][██░░42%] fb[66%] [MAX|@work] 5h[38%@23:00] 7d[39%]
    5h ▂▅█▃▮▯▯▯▯▯ 0.9x @23:00  7d ▅▁▂ ▃▅ˍ▃▅ ▃▃▁▂▁ ▅ˍ▂▁▁ ˍˍˍ▃▅ ˍˍˍ▅ ▆▆ˍ▂▮▯▯ 0.7x @Wed 09:00
-                                       - budget ~3x5h left · even 20%/win · heading ~52%
+   - budget ~3x5h left · even 20%/win · heading ~52%
 ```
 
 Each strip ends with its **pace** (used ÷ elapsed: `0.7x` is on track,
@@ -315,10 +316,13 @@ ways, with a voice per direction:
   unused, or a sibling account is free while you're pinned. Cyan can
   never mean pressure, so the color alone carries the stance.
 
-Quiet means no row at all: a healthy session stays one line. The row is
-right-aligned to the same anchor the stats cluster ends at, so the advice
-sits directly beneath the badges it interprets (and beneath the
-[week row](#week-row) when that is showing: evidence, then interpretation).
+Quiet means no row at all: a healthy session stays one line. Alone, the
+row right-aligns to the edge the stats cluster ends at, so the advice
+sits directly beneath the badges it interprets; under the
+[week row](#week-row) it shares that row's left edge instead (evidence,
+then interpretation, one block). Claude Code trims every row it renders,
+so the padding rides behind a zero-width reset code — a bare-space row
+would land flush-left.
 
 ```text
 proj (main*)   fabl5[1m][██░░42%] fb[86%] [MAX|@work] 5h[95%@06:00] 7d[44%@07:00]
@@ -329,13 +333,13 @@ What it says, in value order (max two clauses):
 
 | Clause | When |
 |--------|------|
-| `! fb capped — back ~Thu 07:00` | The weekly limit scoped to *this session's model* (`limits[]` `weekly_scoped`) hit 100% — the model just became unavailable, and the one number that matters is when it returns. |
+| `! fb capped · back ~Thu 07:00` | The weekly limit scoped to *this session's model* (`limits[]` `weekly_scoped`) hit 100% — the model just became unavailable, and the one number that matters is when it returns. |
 | `! 5h caps ~14:20, 52m before reset` | The 5h badge is already yellow/red and the linear projection lands before the reset. Suppressed when relief is <= 30min out, same as the badge's recovery color. |
-| `+ 7d resets @07:00, 56% unused — spend it` (or `— ~40% expires even at full burn`) | Expiring surplus: inside the last day of the 7d window with >= 30% unused, a green badge means forfeiture, not headroom — at reset the remainder vanishes whether spent or not. The tail is feasibility-checked against the learned `pct_per_window` ratio (how many 7d points a fully burned 5h window costs *you*, mined from your own usage log): "spend it" appears only when full-tilt burning can actually consume the surplus; past that point the honest tail is how much expires no matter what. While the ratio is unlearned the clause states the bare fact and advises nothing. |
+| `+ 7d resets @07:00, 56% unused · spend it` (or `· ~40% expires even at full burn`) | Expiring surplus: inside the last day of the 7d window with >= 30% unused, a green badge means forfeiture, not headroom — at reset the remainder vanishes whether spent or not. The tail is feasibility-checked against the learned `pct_per_window` ratio (how many 7d points a fully burned 5h window costs *you*, mined from your own usage log): "spend it" appears only when full-tilt burning can actually consume the surplus; past that point the honest tail is how much expires no matter what. While the ratio is unlearned the clause states the bare fact and advises nothing. |
 | `+ alt 5h[8%] free` | Fleet relief for shared-home multi-account setups: once this account's 5h hits 90%, the idlest *fresh* sibling under `accounts/*/` is the actionable way out. Read-only, no credentials. |
 | `! fb caps ~Wed 18:00, 1d before reset` | The running model's scoped weekly quota caps before its reset — same linear math, gates, and recovery suppression as the 7d aggregate. |
-| `! 7d dry ~Thu 09:00, 2d before reset — then extra billing` (or `then hard stop`) | The learned weekday forecast projects the quota drying up early; cold start falls back to linear pace, but only once `seven_day_pace` already warns. The tail states what actually happens at 100%. |
-| `+ 7d on pace to leave ~62% unused — go heavier` | Underuse: on pace to strand a large chunk of the subscription. The learned weekday profile speaks first — it knows *your* remaining days, so it can warn from day two; cold start falls back to linear pace past half the window. Speaks only in an engaged, unsqueezed session (5h between 25% and 80%, no pressure clause) — it reaches exactly the person who can act on it and never nags an idle one. |
+| `! 7d dry ~Thu 09:00, 2d before reset · then extra billing` (or `then hard stop`) | The learned weekday forecast projects the quota drying up early; cold start falls back to linear pace, but only once `seven_day_pace` already warns. The tail states what actually happens at 100%. |
+| `+ 7d on pace to leave ~62% unused · go heavier` | Underuse: on pace to strand a large chunk of the subscription. The learned weekday profile speaks first — it knows *your* remaining days, so it can warn from day two; cold start falls back to linear pace past half the window. Speaks only in an engaged, unsqueezed session (5h between 25% and 80%, no pressure clause) — it reaches exactly the person who can act on it and never nags an idle one. |
 | `- budget ~19x5h left · even 1.1%/win · heading ~52%` | `--advisor always` only, when calm: the weekly budget in one breath — runway, what even looks like, where you land. "heading" is the learned end-of-week projection when trained, linear once the window is a day old. In the last window per-window math would just restate the headroom, so it degrades to `- budget last window · 61% left · heading ~40%`. |
 
 The 7d window gets one voice per render — surplus, dry, or underuse,
