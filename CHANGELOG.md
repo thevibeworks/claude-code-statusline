@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+**The ledgers say their pace and their reset; the budget line rides with
+them.** Each strip now ends with `0.7x @Wed 09:00`: pace = used ÷
+elapsed (dim below 1x, pressure-tinted from 1x, hidden for a window's
+first 15 min) and the reset its right edge stands for — axis labels for
+a timeline, not badges restated (the 7d reset was mostly absent from
+line 1 anyway). And while the week row is showing, the advisor's calm
+budget line (`- budget ~3x5h left · even 20%/win · heading ~52%`) shows
+with it under `--advisor auto`: the strips and the numbers they imply
+are one unit; pressure and surplus clauses still take its place.
+
+**Fixed: stale stdin numbers no longer poison the history.** Claude Code's
+`rate_limits` are per session — an idle session keeps reporting the
+numbers it last saw, so a stdin pair can sit behind the account's real
+state (an `8%` between `21%` and `23%`). A stdin sample is now logged
+only when it would win the display merge (same window and not below the
+cache, or a newer window), and the 5h ledger walks its samples as a
+monotone envelope (running max): a dip is a stale reading, never a
+refund — it used to turn into a phantom `█` burst.
+
 ## v0.24.0 — 2026-08-19 — the week row, and a line 1 that fits
 
 **New: week row — this sitting and the week as ledgers, under the badges.**

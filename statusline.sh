@@ -1065,6 +1065,32 @@ log_stdin_snapshot() {
     local pair
     pair=$(printf '%.0f|%.0f' "$fp" "$sp" 2>/dev/null) || return 0
     [ "$pair" = "$last_pair" ] && return 0
+    # rate_limits are per SESSION: an idle session keeps reporting the numbers
+    # it last saw, so a stdin pair can sit behind the account's real state
+    # (8% between 21% and 23%). Inside a window utilization only climbs;
+    # log a stdin pair only when it would win the display merge — same
+    # window and not below the cache, or a newer window.
+    local uc="$CLAUDE_ACCOUNT_DIR/usage.cache"
+    if [ -f "$uc" ]; then
+        local c5p c5r c7p c7r fe0 ce0
+        eval "$(jq -r '@sh "c5p=\(.five_hour.utilization // "")", @sh "c5r=\(.five_hour.resets_at // "")",
+                       @sh "c7p=\(.seven_day.utilization // "")", @sh "c7r=\(.seven_day.resets_at // "")"' "$uc" 2>/dev/null)"
+        fe0=$(_epoch_from_ts "$fr"); ce0=$(_epoch_from_ts "$c5r")
+        if [ -n "$c5p" ] && [ -n "$fe0" ] && [ -n "$ce0" ] && [ $(( fe0 - ce0 )) -lt 300 ] 2>/dev/null \
+            && [ $(( ce0 - fe0 )) -lt 300 ] 2>/dev/null \
+            && awk -v a="$fp" -v b="$c5p" 'BEGIN{exit !((a+0) < (b+0))}'; then
+            return 0
+        fi
+        if [ -n "$c7p" ] && [ -n "$sr" ] && [ -n "$c7r" ]; then
+            local se0 ce7
+            se0=$(_epoch_from_ts "$sr"); ce7=$(_epoch_from_ts "$c7r")
+            if [ -n "$se0" ] && [ -n "$ce7" ] && [ $(( se0 - ce7 )) -lt 300 ] 2>/dev/null \
+                && [ $(( ce7 - se0 )) -lt 300 ] 2>/dev/null \
+                && awk -v a="$sp" -v b="$c7p" 'BEGIN{exit !((a+0) < (b+0))}'; then
+                return 0
+            fi
+        fi
+    fi
     [ $((now - ${last_at:-0})) -lt "$STDIN_LOG_MIN_SECS" ] 2>/dev/null && return 0
     local fe se fiso siso
     fe=$(_epoch_from_ts "$fr"); [ -n "$fe" ] || return 0
@@ -2379,8 +2405,9 @@ week_period_start() {
 #      to 5 min (the API jitters it, and 05:59:59/06:00:00 are one window),
 #      cost = the 7d delta observed inside it;
 #   2. the 5h strip: samples of the current 5h window (same key), sorted,
-#      each positive 5h-utilization step credited to the half-hour cell the
-#      later sample fell in (the first sample's whole reading to its cell).
+#      walked as a monotone envelope (running max — utilization only climbs
+#      inside a window; a dip is a stale reading, never a refund), each
+#      step credited to the half-hour cell the sample fell in.
 week_scan() {
     local period_start="$1" five_start="${2:-0}"
     local ujl="$CLAUDE_ACCOUNT_DIR/usage.jsonl" wc="$CLAUDE_ACCOUNT_DIR/week.cache"
@@ -2424,9 +2451,10 @@ week_scan() {
                   | if length == 0 then "" else
                       . as $a
                       | span + " " +
-                        ( [ { b: ((($a[0].t - $fs) / $fc) | floor), d: $a[0].u } ]
-                          + [ range(1; length) as $i
-                              | { b: ((($a[$i].t - $fs) / $fc) | floor), d: ($a[$i].u - $a[$i-1].u) } ]
+                        ( [ foreach range(0; length) as $i ({m: 0};
+                              .prev = .m | .m = ([.m, $a[$i].u] | max)
+                              | .b = ((($a[$i].t - $fs) / $fc) | floor) | .d = (.m - .prev);
+                              {b: .b, d: .d}) ]
                           | map(select(.d > 0 and .b >= 0 and .b < $fw))
                           | group_by(.b) | map({ b: .[0].b, c: (map(.d) | add) })
                           | map("\(.b):\(.c)") | join(",") )
@@ -2576,7 +2604,32 @@ five_period_start() {
     echo $(( ( (now + five_secs - 18000 + 150) / 300 ) * 300 ))
 }
 
-# The live row: `5h ▂▅█▃▮▯▯▯▯▯  7d ▅▁▂▃▅ ˍ▃▅▃▃ …▮▯▯` under the badges — this
+# Tail of a strip: pace and the axis label of its right end (the reset).
+# pace = used / elapsed-fraction; >1x means the pool caps before the reset.
+# Dim below 1x, pressure-tinted from 1x (status lane), hidden while the
+# window is too young to judge (ADVISOR_PACE_MIN_ELAPSED). Reset is wall
+# clock: `@04:00` inside 24h, `@Wed 09:00` beyond — an axis label for a
+# timeline that ends there, not a badge restated.
+strip_tail() {
+    local pct="$1" secs_left="$2" length="$3" now="$4"
+    local out="" elapsed=$(( length - secs_left ))
+    if [ "$elapsed" -ge "$ADVISOR_PACE_MIN_ELAPSED" ] && [ "$pct" -gt 0 ] 2>/dev/null; then
+        local pace tint band
+        pace=$(awk -v u="$pct" -v e="$elapsed" -v l="$length" 'BEGIN{ printf "%.1f", (u/100)/(e/l) }')
+        band=$(awk -v p="$pace" 'BEGIN{ print (p>=1.5?2:(p>=1.0?1:0)) }')
+        case "$band" in 2) tint="$RED" ;; 1) tint="$YELLOW" ;; *) tint="$DIM" ;; esac
+        out=" ${tint}${pace}x${RESET}"
+    fi
+    local when
+    if [ "$secs_left" -lt 86400 ]; then
+        when=$(_fmt_epoch $(( now + secs_left )) '%H:%M')
+    else
+        when=$(_fmt_epoch $(( now + secs_left )) '%a %H:%M')
+    fi
+    printf '%s %s@%s%s' "$out" "$DIM" "$when" "$RESET"
+}
+
+# The live row: `5h ▂▅█▃▮▯▯▯▯▯ 0.6x @04:00  7d ▅▁▂▃▅ ˍ▃▅▃▃ …▮▯▯ 0.7x @Wed 09:00` under the badges — this
 # sitting at the left, the week at the right, one grammar. Prints nothing
 # when there is no live window, or — in auto mode — when the log holds no
 # sample for either period yet (a row of ░░░▮▯▯ says nothing the badges do
@@ -2622,13 +2675,13 @@ build_week_row() {
     if [ "$have_five" = 1 ]; then
         local fdry
         fdry=$(five_dry_cell "$five_int" "$five_secs" "$now" "$five_start")
-        parts="${DIM}5h ${RESET}$(build_five_strip "$five_int" "$now" "$five_start" "$fdry" "$five_hist")"
+        parts="${DIM}5h ${RESET}$(build_five_strip "$five_int" "$now" "$five_start" "$fdry" "$five_hist")$(strip_tail "$five_int" "$five_secs" 18000 "$now")"
     fi
     if [ "$have_seven" = 1 ]; then
         local dry
         dry=$(week_dry_slot "$seven_int" "$seven_secs" "$now" "$period_start")
         [ -n "$parts" ] && parts="$parts  "
-        parts="${parts}${DIM}7d ${RESET}$(build_week_strip "$seven_int" "$now" "$period_start" "$dry" "$week_hist")"
+        parts="${parts}${DIM}7d ${RESET}$(build_week_strip "$seven_int" "$now" "$period_start" "$dry" "$week_hist")$(strip_tail "$seven_int" "$seven_secs" "$SEVEN_DAY_WINDOW_SECS" "$now")"
     fi
     printf '%b' "$parts"
 }
@@ -4415,13 +4468,19 @@ print_anchored_row() {
 # is where the 7d points went (one cell per 5h window); the advisor row is
 # what to do about it. Reading down one column: 7d[44%@2d] -> the strip
 # that spent those 44% -> the clause that projects the rest.
+week_row=""
 if [ "$week_display_mode" != "off" ] && [ -n "${usage_data:-}" ]; then
     week_row=$(build_week_row "$usage_data" "$week_display_mode")
     [ -n "$week_row" ] && print_anchored_row "$week_row" "WEEK"
 fi
 
+# The advisor speaks under pressure or surplus in auto mode; when the week
+# row is showing, its calm budget line shows too — the strips and the
+# numbers derived from them (windows left, even, heading) are one unit.
 if [ "$advisor_display_mode" != "off" ] && [ -n "${usage_data:-}" ]; then
-    advisor_line=$(build_advisor_line "$usage_data" "$advisor_display_mode" "${model_id:-$model_display}")
+    advisor_mode_now="$advisor_display_mode"
+    [ "$advisor_mode_now" = "auto" ] && [ -n "$week_row" ] && advisor_mode_now="always"
+    advisor_line=$(build_advisor_line "$usage_data" "$advisor_mode_now" "${model_id:-$model_display}")
     [ -n "$advisor_line" ] && print_anchored_row "$advisor_line" "ADVISOR"
 fi
 
