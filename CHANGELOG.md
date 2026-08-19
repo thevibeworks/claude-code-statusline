@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+## v0.26.0 — 2026-08-19 — the rows hang where they belong
+
+**Fixed: the rows beneath line 1 finally land under the badges.** Claude
+Code trims every stdout row before rendering (`.trim()` per line, 2.1.234
+— verified live), so the leading spaces that right-anchored the week and
+advisor rows never reached the screen and both sat flush-left. The
+padding now rides behind a zero-width `\e[0m`: not whitespace, so it
+survives the trim; not ink, so it costs nothing. Same for a centered
+line 1.
+
+**The rows are one block.** The widest row (the ledgers) meets line 1's
+edge; the advisor shares its LEFT edge instead of the right one — a
+ragged left edge under a fixed right one was a staircase; flush-left
+beside the ledgers reads like text. A lone row is the block, so it
+right-anchors exactly as before.
+
+**No em dash on the line.** `! fb capped · back ~Thu 07:00`,
+`+ 7d resets @09:00, 50% unused · ~33% expires even at full burn`,
+`· go heavier`, `· then hard stop`: `,` joins facts, `·` joins clauses,
+`;` joins voices. The dash was a cell wide, read as a minus beside
+`-`/`+`, and said less.
+
+Hero and the Pages demo now show the three-row block.
+
 ## v0.25.0 — 2026-08-19 — the ledgers say their pace
 
 **The ledgers say their pace and their reset; the budget line rides with
