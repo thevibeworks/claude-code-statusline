@@ -1125,7 +1125,7 @@ _seed_week_store() {
     reset_5h=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
     reset_7d=$(jq -r .seven_day.resets_at "$tmpdir/.claude/statusline/usage.cache")
     input=$(printf '{"session_id":"wk","model":{"id":"claude-opus-4-8","display_name":"Opus"},"cwd":"/t","workspace":{"current_dir":"/t"},"cost":{"total_cost_usd":0},"context_window":{"used_percentage":10,"context_window_size":200000},"rate_limits":{"five_hour":{"used_percentage":85,"resets_at":"%s"},"seven_day":{"used_percentage":55,"resets_at":"%s"}}}' "$reset_5h" "$reset_7d")
-    out=$(printf '%s' "$input" | HOME="$tmpdir" COLUMNS=140 bash "$SCRIPT_DIR/statusline.sh")
+    out=$(printf '%s' "$input" | HOME="$tmpdir" COLUMNS=140 bash "$SCRIPT_DIR/statusline.sh" --notice off)
     # 140 cols: line 1 leaves ~45 beside the ledgers -> row 2 mirrors line 1:
     # advice left, evidence right, one edge shared with line 1. Two rows.
     [ "$(printf '%s\n' "$out" | wc -l)" -eq 2 ]
@@ -1137,7 +1137,7 @@ _seed_week_store() {
     raw2=$(printf '%s\n' "$out" | sed -n 2p)
     [[ "$raw2" == $'\e['* ]]
     [[ "$raw2" != $'\e[0m '* ]]
-    off=$(printf '%s' "$input" | HOME="$tmpdir" COLUMNS=140 bash "$SCRIPT_DIR/statusline.sh" --week off)
+    off=$(printf '%s' "$input" | HOME="$tmpdir" COLUMNS=140 bash "$SCRIPT_DIR/statusline.sh" --week off --notice off)
     [ "$(printf '%s\n' "$off" | wc -l)" -eq 2 ]
     rm -rf "$tmpdir"
 }
@@ -1150,7 +1150,7 @@ _seed_week_store() {
     reset_5h=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
     reset_7d=$(jq -r .seven_day.resets_at "$tmpdir/.claude/statusline/usage.cache")
     input=$(printf '{"session_id":"wk","model":{"id":"claude-opus-4-8","display_name":"Opus"},"cwd":"/t","workspace":{"current_dir":"/t"},"cost":{"total_cost_usd":0},"context_window":{"used_percentage":10,"context_window_size":200000},"rate_limits":{"five_hour":{"used_percentage":85,"resets_at":"%s"},"seven_day":{"used_percentage":55,"resets_at":"%s"}}}' "$reset_5h" "$reset_7d")
-    out=$(printf '%s' "$input" | HOME="$tmpdir" COLUMNS=96 setsid -w bash "$SCRIPT_DIR/statusline.sh")
+    out=$(printf '%s' "$input" | HOME="$tmpdir" COLUMNS=96 setsid -w bash "$SCRIPT_DIR/statusline.sh" --notice off)
     [ "$(printf '%s\n' "$out" | wc -l)" -eq 3 ]
     l1=$(printf '%s\n' "$out" | sed -n 1p | sed "s/\x1b\[[0-9;]*m//g")
     l2=$(printf '%s\n' "$out" | sed -n 2p | sed "s/\x1b\[[0-9;]*m//g")
@@ -3034,7 +3034,10 @@ JSON
     reset_7d=$(date -u -d '+4 days 22 hours' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":20,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":21,\"resets_at\":\"$reset_7d\"}}"
     plain=$(strip_ansi "$(build_advisor_line "$usage" always)")
-    [[ "$plain" =~ ^-\ budget\ ~24x5h\ left\ ·\ even\ 3\.3%/win\ ·\ heading\ ~70%$ ]]
+    [[ "$plain" =~ ^-\ 24x5h\ left\ ·\ 3\.3%/win$ ]]
+    # the whole sentence is still there for surfaces with a line to spend
+    long=$(strip_ansi "$(notice_long_line "$(notice_collect "$usage" always)")")
+    [[ "$long" =~ ^-\ budget\ ~24x5h\ left\ ·\ even\ 3\.3%/win\ ·\ heading\ ~70%$ ]]
 }
 
 @test "build_advisor_line: budget degrades to plain headroom in the last window" {
@@ -3045,9 +3048,13 @@ JSON
     reset_5h=$(date -u -d '+45 minutes' '+%Y-%m-%dT%H:%M:%SZ')
     reset_7d=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":20,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":75,\"resets_at\":\"$reset_7d\"}}"
+    # 25% unused is under ADVISOR_SURPLUS_MIN_PCT, so the end-of-week voice
+    # stays quiet and the budget line owns the row
     plain=$(strip_ansi "$(build_advisor_line "$usage" always)")
-    [[ "$plain" =~ ^-\ budget\ last\ window\ ·\ 25%\ left\ ·\ heading\ ~[0-9]+%$ ]]
+    [[ "$plain" =~ ^-\ last\ window\ ·\ 25%\ left$ ]]
     [[ "$plain" != *"/win"* ]]
+    long=$(strip_ansi "$(notice_long_line "$(notice_collect "$usage" always)")")
+    [[ "$long" =~ ^-\ budget\ last\ window\ ·\ 25%\ left\ ·\ heading\ ~[0-9]+%$ ]]
 }
 
 @test "build_advisor_line: hot 5h pace projects the cap wall-clock" {
@@ -3056,8 +3063,12 @@ JSON
     usage="{\"five_hour\":{\"utilization\":85,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":10}}"
     result=$(build_advisor_line "$usage" auto)
     plain=$(strip_ansi "$result")
-    [[ "$plain" =~ ^!\ 5h\ caps\ ~[0-9]{2}:[0-9]{2},\ .*\ before\ reset$ ]]
+    # the pin says the wall; "42m before reset" is derivable from line 1's
+    # own @HH:MM, so it rides the long form instead
+    [[ "$plain" =~ ^!\ 5h\ caps\ ~[0-9]{2}:[0-9]{2}$ ]]
     [[ "$result" == *'\033[0;33m'* ]]
+    long=$(strip_ansi "$(notice_long_line "$(notice_collect "$usage" auto)")")
+    [[ "$long" =~ ^!\ 5h\ caps\ ~[0-9]{2}:[0-9]{2},\ .*\ before\ reset$ ]]
 }
 
 @test "build_advisor_line: 5h at 92% escalates the row to red" {
@@ -3091,21 +3102,161 @@ JSON
     reset_7d=$(date -u -d '+2 days 5 hours' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":10},\"seven_day\":{\"utilization\":75,\"resets_at\":\"$reset_7d\"}}"
     plain=$(strip_ansi "$(build_advisor_line "$usage" auto)")
-    [[ "$plain" =~ ^!\ 7d\ caps\ ~[A-Z][a-z]{2}\ [0-9]{2}:[0-9]{2},\ .*\ before\ reset ]]
-    [[ "$plain" == *"then hard stop"* ]]
+    [[ "$plain" =~ ^!\ 7d\ caps\ ~[A-Z][a-z]{2}\ [0-9]{2}:[0-9]{2}\ ·\ hard\ stop$ ]]
+    long=$(strip_ansi "$(notice_long_line "$(notice_collect "$usage" auto)")")
+    [[ "$long" =~ ^!\ 7d\ caps\ ~[A-Z][a-z]{2}\ [0-9]{2}:[0-9]{2},\ .*\ before\ reset ]]
+    [[ "$long" == *"then hard stop"* ]]
 }
 
 @test "build_advisor_line: extra-usage billing changes the 7d tail" {
     reset_7d=$(date -u -d '+2 days 5 hours' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":10},\"seven_day\":{\"utilization\":75,\"resets_at\":\"$reset_7d\"},\"extra_usage\":{\"is_enabled\":true}}"
     plain=$(strip_ansi "$(build_advisor_line "$usage" auto)")
-    [[ "$plain" == *"then extra billing"* ]]
+    [[ "$plain" == *"· extra billing"* ]]
+    long=$(strip_ansi "$(notice_long_line "$(notice_collect "$usage" auto)")")
+    [[ "$long" == *"then extra billing"* ]]
 }
 
 @test "build_advisor_line: off mode is silent under any pressure" {
     reset_5h=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":95,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":95}}"
     [ -z "$(build_advisor_line "$usage" off)" ]
+}
+
+# --- the notice engine: ranking, the fading row 3, and what it knows ---
+
+@test "notice_highlight: bolds the number and restores the voice colour" {
+    out=$(notice_highlight "47% unused · spend it" "47%" "$CYAN")
+    [ "$out" = "${BOLD}47%${NO_BOLD}${CYAN} unused · spend it" ]
+    # a token that is not there leaves the sentence untouched
+    [ "$(notice_highlight "no numbers here" "47%" "$CYAN")" = "no numbers here" ]
+}
+
+@test "notice_ranked: one voice per scope, highest rank wins" {
+    NOTICE_RECS=()
+    notice_add 50 '+' 7d k.low '' 'low 7d' 'low 7d long'
+    notice_add 90 '!yellow' 5h k.five '' 'five' 'five long'
+    notice_add 75 '+' 7d k.high '' 'high 7d' 'high 7d long'
+    ranked=$(notice_ranked)
+    [ "$(printf '%s\n' "$ranked" | wc -l)" -eq 2 ]
+    [ "$(printf '%s\n' "$ranked" | sed -n 1p | cut -d$'\037' -f6)" = "five" ]
+    [ "$(printf '%s\n' "$ranked" | sed -n 2p | cut -d$'\037' -f6)" = "high 7d" ]
+    NOTICE_RECS=()
+}
+
+@test "notice_flash_line: explains a new condition, then fades and leaves the pin" {
+    state=$(mktemp -d)/notice_seen
+    NOTICE_RECS=()
+    notice_add 90 '!yellow' 5h '5h.caps.05:18' '~05:18' '5h caps ~05:18' '5h caps ~05:18, 42m before reset'
+    records=$(notice_ranked)
+    now=$(date +%s)
+    first=$(strip_ansi "$(notice_flash_line "$records" "$state" "$now")")
+    [ "$first" = "! 5h caps ~05:18, 42m before reset" ]
+    # same condition a minute later: still inside the flash window
+    [ -n "$(notice_flash_line "$records" "$state" $((now + 60)))" ]
+    # ...and past it the row is gone; row 2 keeps the pin
+    [ -z "$(notice_flash_line "$records" "$state" $((now + NOTICE_FLASH_SECS + 1)))" ]
+    [ "$(strip_ansi "$(notice_pin_line "$records")")" = "! 5h caps ~05:18" ]
+    NOTICE_RECS=()
+    rm -rf "$(dirname "$state")"
+}
+
+@test "notice_flash_line: a NEW condition speaks even when the old one has faded" {
+    state=$(mktemp -d)/notice_seen
+    now=$(date +%s)
+    printf '%s\t%s\n' '5h.caps.05:18' "$((now - 600))" > "$state"
+    NOTICE_RECS=()
+    notice_add 90 '!yellow' 5h '5h.caps.05:18' '' 'pin' 'the faded one'
+    notice_add 65 '+' 7d '7d.surplus.11' '' 'pin2' 'the fresh one'
+    out=$(strip_ansi "$(notice_flash_line "$(notice_ranked)" "$state" "$now")")
+    [ "$out" = "+ the fresh one" ]
+    NOTICE_RECS=()
+    rm -rf "$(dirname "$state")"
+}
+
+@test "notice_collect: the model caps before the account, so steer to the roomier one" {
+    reset_7d=$(date -u -d '+3 days' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":40},\"seven_day\":{\"utilization\":53,\"resets_at\":\"$reset_7d\"},\"limits\":[{\"kind\":\"weekly_scoped\",\"percent\":91,\"resets_at\":\"$reset_7d\",\"scope\":{\"model\":{\"display_name\":\"Fable\"}}},{\"kind\":\"weekly_scoped\",\"percent\":33,\"resets_at\":\"$reset_7d\",\"scope\":{\"model\":{\"display_name\":\"Opus\"}}}]}"
+    short=$(notice_collect "$usage" auto "claude-fable-5" | awk -F$'\037' '$3 == "fb" { print $6 }')
+    [ "$short" = "fb 91% vs 7d 53% · go op" ]
+    long=$(notice_collect "$usage" auto "claude-fable-5" | awk -F$'\037' '$3 == "fb" { print $7 }')
+    [[ "$long" == *"op sits at 33%"* ]]
+    # no roomier sibling in the payload: no model to name, so no fake advice
+    solo="{\"five_hour\":{\"utilization\":40},\"seven_day\":{\"utilization\":53,\"resets_at\":\"$reset_7d\"},\"limits\":[{\"kind\":\"weekly_scoped\",\"percent\":91,\"resets_at\":\"$reset_7d\",\"scope\":{\"model\":{\"display_name\":\"Fable\"}}}]}"
+    [[ "$(notice_collect "$solo" auto "claude-fable-5" | awk -F$'\037' '$3 == "fb" { print $6 }')" == *"spread the load" ]]
+}
+
+@test "notice_collect: a model level with the account says nothing about switching" {
+    reset_7d=$(date -u -d '+3 days' '+%Y-%m-%dT%H:%M:%SZ')
+    # 75% scoped vs 70% account: the model is not the binding constraint
+    usage="{\"five_hour\":{\"utilization\":40},\"seven_day\":{\"utilization\":70,\"resets_at\":\"$reset_7d\"},\"limits\":[{\"kind\":\"weekly_scoped\",\"percent\":75,\"resets_at\":\"$reset_7d\",\"scope\":{\"model\":{\"display_name\":\"Fable\"}}}]}"
+    [ -z "$(notice_collect "$usage" auto "claude-fable-5" | awk -F$'\037' '$3 == "fb"')" ]
+}
+
+@test "notice_collect: 7d falling inside one window reads as a re-base, not as burn" {
+    tmpdir=$(mktemp -d)
+    export CLAUDE_ACCOUNT_DIR="$tmpdir"
+    reset_7d=$(date -u -d '+3 days' '+%Y-%m-%dT%H:%M:%SZ')
+    _u() { printf '{"five_hour":{"utilization":40},"seven_day":{"utilization":%s,"resets_at":"%s"}}' "$1" "$reset_7d"; }
+    # first sight: nothing to compare against
+    notice_collect "$(_u 53)" auto >/dev/null
+    [ -z "$(notice_collect "$(_u 53)" auto | grep rebase)" ]
+    # same window instance, utilization collapses: a plan change or an
+    # out-of-band reset — burn never runs backwards
+    short=$(notice_collect "$(_u 12)" auto | awk -F$'\037' '$4 ~ /rebase/ { print $6 }')
+    [ "$short" = "7d rebased 53%→12%" ]
+    # it stays newsworthy across renders, not just the one that caught it
+    [ -n "$(notice_collect "$(_u 12)" auto | grep rebase)" ]
+    # ...and the underuse voice stays quiet while the denominator is suspect
+    [ -z "$(notice_collect "$(_u 12)" auto | grep 'go heavier')" ]
+    unset CLAUDE_ACCOUNT_DIR
+    rm -rf "$tmpdir"
+}
+
+@test "notice_collect: a closing 5h window only matters when the week has slack" {
+    reset_5h=$(date -u -d '+40 minutes' '+%Y-%m-%dT%H:%M:%SZ')
+    # week on pace: an unspent 5h window is headroom, not waste — silence
+    reset_7d=$(date -u -d '+3 days' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":30,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":60,\"resets_at\":\"$reset_7d\"}}"
+    [ -z "$(notice_collect "$usage" auto | awk -F$'\037' '$3 == "5h"')" ]
+    # week stranding capacity: the same window is throughput you cannot bank
+    reset_7d=$(date -u -d '+20 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":30,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":40,\"resets_at\":\"$reset_7d\"}}"
+    short=$(notice_collect "$usage" auto | awk -F$'\037' '$3 == "5h" { print $6 }')
+    [[ "$short" =~ ^5h\ ~[0-9]+m\ left\ ·\ 70%\ unused$ ]]
+}
+
+@test "strip_tail: hide drops the reset line 1 already prints, keeps the pace" {
+    now=$(date +%s)
+    show=$(strip_ansi "$(strip_tail 50 3600 18000 "$now" show)")
+    hide=$(strip_ansi "$(strip_tail 50 3600 18000 "$now" hide)")
+    [[ "$show" =~ ^\ [0-9]\.[0-9]x\ @[0-9]{2}:[0-9]{2}$ ]]
+    [[ "$hide" =~ ^\ [0-9]\.[0-9]x$ ]]
+    # default is still show: `--week` on its own has no badge above it
+    [ "$(strip_ansi "$(strip_tail 50 3600 18000 "$now")")" = "$show" ]
+}
+
+@test "integration: the 5h strip drops the reset the 5h badge already carries" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude/statusline"
+    printf '{"claudeAiOauth":{"accessToken":"tok"}}' > "$tmpdir/.claude/.credentials.json"
+    _seed_week_store "$tmpdir/.claude/statusline"
+    reset_5h=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_7d=$(jq -r .seven_day.resets_at "$tmpdir/.claude/statusline/usage.cache")
+    input=$(printf '{"session_id":"dedup","model":{"id":"claude-opus-4-8","display_name":"Opus"},"cwd":"/t","workspace":{"current_dir":"/t"},"cost":{"total_cost_usd":0},"context_window":{"used_percentage":10,"context_window_size":200000},"rate_limits":{"five_hour":{"used_percentage":40,"resets_at":"%s"},"seven_day":{"used_percentage":55,"resets_at":"%s"}}}' "$reset_5h" "$reset_7d")
+    out=$(printf '%s' "$input" | HOME="$tmpdir" COLUMNS=160 bash "$SCRIPT_DIR/statusline.sh" --notice off)
+    l1=$(strip_ansi "$(printf '%s\n' "$out" | sed -n 1p)")
+    l2=$(strip_ansi "$(printf '%s\n' "$out" | sed -n 2p)")
+    # line 1 carries the 5h reset, so the 5h strip does not repeat it
+    re_badge='5h\[40%@[0-9]{2}:[0-9]{2}\]'
+    re_strip='5h [^ ]+ [0-9]\.[0-9]x  7d'
+    re_seven='7d .*[0-9]{2}:[0-9]{2}$'
+    [[ "$l1" =~ $re_badge ]]
+    [[ "$l2" =~ $re_strip ]]
+    # the 7d badge shows no reset here, so its strip still labels its own end
+    [[ ! "$l1" =~ 7d\[[0-9]+%@ ]]
+    [[ "$l2" =~ $re_seven ]]
+    rm -rf "$tmpdir"
 }
 
 @test "build_advisor_fleet_hint: picks idlest fresh sibling, skips self and stale" {
@@ -3149,8 +3300,14 @@ JSON
     usage="{\"five_hour\":{\"utilization\":20,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":44,\"resets_at\":\"$reset_7d\"}}"
     result=$(build_advisor_line "$usage" auto)
     plain=$(strip_ansi "$result")
-    [[ "$plain" =~ ^\+\ 7d\ resets\ @[0-9]{2}:[0-9]{2},\ 56%\ unused$ ]]
+    # the strip beside the pin already prints @HH:MM; the pin spends its
+    # columns on the number you act on
+    [[ "$plain" =~ ^\+\ last\ 5h\ of\ the\ week\ ·\ 56%\ unused$ ]]
     [[ "$result" == *'\033[0;36m'* ]]
+    # ...and the number is the bolded part
+    [[ "$result" == *'\033[1m56%\033[22m'* ]]
+    long=$(strip_ansi "$(notice_long_line "$(notice_collect "$usage" auto)")")
+    [[ "$long" =~ ^\+\ 7d\ resets\ in\ .*:\ the\ last\ 5h\ window\ of\ the\ period\ ·\ 56%\ of\ the\ week\ is\ unused\ and\ expires\ with\ it$ ]]
 }
 
 _write_ppw_fixture() { # dir ppw
@@ -3164,7 +3321,7 @@ _write_ppw_fixture() { # dir ppw
     reset_7d=$(date -u -d '+20 hours' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":10,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":65,\"resets_at\":\"$reset_7d\"}}"
     plain=$(CLAUDE_ACCOUNT_DIR="$tmpdir" strip_ansi "$(CLAUDE_ACCOUNT_DIR="$tmpdir" build_advisor_line "$usage" auto)")
-    [[ "$plain" =~ ^\+\ 7d\ resets\ @[0-9]{2}:[0-9]{2},\ 35%\ unused\ ·\ spend\ it$ ]]
+    [[ "$plain" =~ ^\+\ 35%\ unused\ ·\ spend\ it$ ]]
     rm -rf "$tmpdir"
 }
 
@@ -3177,24 +3334,30 @@ _write_ppw_fixture() { # dir ppw
     reset_5h=$(date -u -d '+55 minutes' '+%Y-%m-%dT%H:%M:%SZ')
     reset_7d=$(date -u -d '+2 hours' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":95,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":44,\"resets_at\":\"$reset_7d\"}}"
-    result=$(CLAUDE_ACCOUNT_DIR="$tmpdir" build_advisor_line "$usage" auto)
-    plain=$(strip_ansi "$result")
-    [[ "$plain" =~ 7d\ resets\ @[0-9]{2}:[0-9]{2},\ 56%\ unused\ ·\ ~53%\ expires\ even\ at\ full\ burn ]]
-    [[ "$plain" != *"spend it"* ]]
+    seven=$(CLAUDE_ACCOUNT_DIR="$tmpdir" notice_collect "$usage" auto | awk -F$'\037' '$3 == "7d" { print $6 }')
+    [[ "$seven" =~ ^last\ 5h\ of\ the\ week\ ·\ 56%\ unused\ ·\ ~53%\ expires\ even\ at\ full\ burn$ ]]
+    [[ "$seven" != *"spend it"* ]]
     rm -rf "$tmpdir"
 }
 
-@test "build_advisor_line: hot 5h + expiring surplus pair into one coherent story" {
-    # The utilization-gap failure: 5h nearly spent, 7d resets an hour later
-    # with half the week unused. Both facts, one row, pressure color.
+@test "notice_collect: hot 5h and expiring surplus are two records, not one crammed row" {
+    # The utilization-gap case: 5h nearly spent, 7d resets an hour later with
+    # half the week unused. Two scopes, two stories: the wall pins row 2
+    # (pressure outranks opportunity) and the surplus keeps its own record —
+    # the old row crammed both into one "; " sentence nobody could scan.
     reset_5h=$(date -u -d '+55 minutes' '+%Y-%m-%dT%H:%M:%SZ')
     reset_7d=$(date -u -d '+2 hours' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":95,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":44,\"resets_at\":\"$reset_7d\"}}"
+    records=$(notice_collect "$usage" auto)
+    [ "$(printf '%s\n' "$records" | wc -l)" -ge 2 ]
+    [ "$(printf '%s\n' "$records" | sed -n 1p | cut -d$'\037' -f3)" = "5h" ]
+    [ "$(printf '%s\n' "$records" | sed -n 2p | cut -d$'\037' -f3)" = "7d" ]
     result=$(build_advisor_line "$usage" auto)
     plain=$(strip_ansi "$result")
-    [[ "$plain" =~ ^!\ 5h\ caps\ ~[0-9]{2}:[0-9]{2},\ .*\ before\ reset\;\ 7d\ resets\ @[0-9]{2}:[0-9]{2},\ 56%\ unused$ ]]
-    [[ "$plain" != *"spend it"* ]]
+    [[ "$plain" =~ ^!\ 5h\ caps\ ~[0-9]{2}:[0-9]{2}$ ]]
     [[ "$result" == *'\033[0;31m'* ]]
+    # one scope, one voice: the 7d record never doubles up on the 5h pin
+    [ "$(printf '%s\n' "$records" | cut -d$'\037' -f3 | sort | uniq -d)" = "" ]
 }
 
 @test "build_advisor_line: small surplus near reset stays quiet" {
@@ -3208,8 +3371,10 @@ _write_ppw_fixture() { # dir ppw
     usage="{\"five_hour\":{\"utilization\":40},\"seven_day\":{\"utilization\":25,\"resets_at\":\"$reset_7d\"}}"
     result=$(build_advisor_line "$usage" auto)
     plain=$(strip_ansi "$result")
-    [[ "$plain" =~ ^\+\ 7d\ on\ pace\ to\ leave\ ~62%\ unused\ ·\ go\ heavier$ ]]
+    [[ "$plain" =~ ^\+\ ~62%\ will\ expire\ ·\ go\ heavier$ ]]
     [[ "$result" == *'\033[0;36m'* ]]
+    long=$(strip_ansi "$(notice_long_line "$(notice_collect "$usage" auto)")")
+    [[ "$long" =~ ^\+\ 7d\ on\ pace\ to\ leave\ ~62%\ unused\ ·\ go\ heavier$ ]]
 }
 
 @test "build_advisor_line: underuse stays quiet in an idle session" {
@@ -3233,7 +3398,7 @@ _write_ppw_fixture() { # dir ppw
     reset_7d=$(date -u -d '+4 days 12 hours' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":40},\"seven_day\":{\"utilization\":20,\"resets_at\":\"$reset_7d\"}}"
     plain=$(CLAUDE_ACCOUNT_DIR="$tmpdir" strip_ansi "$(CLAUDE_ACCOUNT_DIR="$tmpdir" build_advisor_line "$usage" auto)")
-    [[ "$plain" =~ ^\+\ 7d\ on\ pace\ to\ leave\ ~7[01]%\ unused\ ·\ go\ heavier$ ]]
+    [[ "$plain" =~ ^\+\ ~7[01]%\ will\ expire\ ·\ go\ heavier$ ]]
     rm -rf "$tmpdir"
 }
 
@@ -3243,7 +3408,9 @@ _write_ppw_fixture() { # dir ppw
     usage="{\"five_hour\":{\"utilization\":20},\"seven_day\":{\"utilization\":20,\"resets_at\":\"$reset_7d\"},\"limits\":[{\"kind\":\"weekly_scoped\",\"percent\":100,\"resets_at\":\"$reset_sc\",\"scope\":{\"model\":{\"display_name\":\"Fable\"}}}]}"
     result=$(build_advisor_line "$usage" auto "claude-fable-5")
     plain=$(strip_ansi "$result")
-    [[ "$plain" =~ ^!\ fb\ capped\ ·\ back\ ~[A-Z][a-z]{2}\ [0-9]{2}:[0-9]{2}$ ]]
+    [[ "$plain" =~ ^!\ fb\ capped\ ~[A-Z][a-z]{2}\ [0-9]{2}:[0-9]{2}$ ]]
+    long=$(strip_ansi "$(notice_long_line "$(notice_collect "$usage" auto "claude-fable-5")")")
+    [[ "$long" =~ ^!\ fb\ capped\ ·\ back\ ~[A-Z][a-z]{2}\ [0-9]{2}:[0-9]{2} ]]
     [[ "$result" == *'\033[0;31m'* ]]
 }
 
@@ -3252,8 +3419,22 @@ _write_ppw_fixture() { # dir ppw
     usage="{\"five_hour\":{\"utilization\":20},\"seven_day\":{\"utilization\":20},\"limits\":[{\"kind\":\"weekly_scoped\",\"percent\":92,\"resets_at\":\"$reset_sc\",\"scope\":{\"model\":{\"display_name\":\"Fable\"}}}]}"
     result=$(build_advisor_line "$usage" auto "claude-fable-5")
     plain=$(strip_ansi "$result")
-    [[ "$plain" =~ ^!\ fb\ caps\ ~[A-Z][a-z]{2}\ [0-9]{2}:[0-9]{2},\ .*\ before\ reset$ ]]
+    # 92% on the model against 20% on the account: the wall is real, and the
+    # way out (another model) is the pin. Pressure voice, because there IS a
+    # wall; the deadline itself rides the long form.
+    [[ "$plain" =~ ^!\ fb\ 92%\ vs\ 7d\ 20%\ ·\ spread\ the\ load$ ]]
     [[ "$result" == *'\033[0;31m'* ]]
+    long=$(strip_ansi "$(notice_long_line "$(notice_collect "$usage" auto "claude-fable-5")")")
+    [[ "$long" =~ dry\ ~[A-Z][a-z]{2}\ [0-9]{2}:[0-9]{2} ]]
+}
+
+@test "build_advisor_line: a model that caps with no roomier sibling states the deadline" {
+    # account as deep as the model (no steering to do): the bare deadline
+    reset_sc=$(date -u -d '+2 days' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_7d=$(date -u -d '+2 days' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":20},\"seven_day\":{\"utilization\":85,\"resets_at\":\"$reset_7d\"},\"limits\":[{\"kind\":\"weekly_scoped\",\"percent\":92,\"resets_at\":\"$reset_sc\",\"scope\":{\"model\":{\"display_name\":\"Fable\"}}}]}"
+    fb=$(notice_collect "$usage" auto "claude-fable-5" | awk -F$'\037' '$3 == "fb" { print $6 }')
+    [[ "$fb" =~ ^fb\ caps\ ~[A-Z][a-z]{2}\ [0-9]{2}:[0-9]{2}$ ]]
 }
 
 @test "build_advisor_line: scoped limit for another model stays out of this session" {
@@ -3274,9 +3455,13 @@ _write_ppw_fixture() { # dir ppw
     _mk_input() {
         printf '{"session_id":"adv","model":{"id":"claude-opus-4-8","display_name":"Opus"},"cwd":"/t","workspace":{"current_dir":"/t"},"cost":{"total_cost_usd":0},"context_window":{"used_percentage":10,"context_window_size":200000},"rate_limits":{"five_hour":{"used_percentage":%s,"resets_at":"%s"},"seven_day":{"used_percentage":10,"resets_at":"%s"}}}' "$1" "$reset_5h" "$reset_7d"
     }
-    hot=$(_mk_input 85 | HOME="$tmpdir" bash "$SCRIPT_DIR/statusline.sh")
+    hot=$(_mk_input 85 | HOME="$tmpdir" bash "$SCRIPT_DIR/statusline.sh" --notice off)
     [ "$(printf '%s\n' "$hot" | wc -l)" -eq 2 ]
     [[ "$(strip_ansi "$hot")" == *"5h caps ~"* ]]
+    # a condition this session has not seen yet also explains itself on row 3
+    fresh=$(_mk_input 85 | HOME="$tmpdir" bash "$SCRIPT_DIR/statusline.sh")
+    [ "$(printf '%s\n' "$fresh" | wc -l)" -eq 3 ]
+    [[ "$(strip_ansi "$fresh")" == *"before reset"* ]]
     calm=$(_mk_input 20 | HOME="$tmpdir" bash "$SCRIPT_DIR/statusline.sh")
     [ "$(printf '%s\n' "$calm" | wc -l)" -eq 1 ]
     rm -rf "$tmpdir"
@@ -3301,7 +3486,7 @@ _write_ppw_fixture() { # dir ppw
     # TERM=dumb forces the tput fallback (term_width=80): line 2 must end at
     # the stats anchor, column 75 (term_width - 5), padded from the left.
     out=$(printf '{"session_id":"adv3","model":{"id":"claude-opus-4-8","display_name":"Opus"},"cwd":"/t","workspace":{"current_dir":"/t"},"cost":{"total_cost_usd":0},"rate_limits":{"five_hour":{"used_percentage":85,"resets_at":"%s"}}}' "$reset_5h" \
-        | HOME="$tmpdir" TERM=dumb bash "$SCRIPT_DIR/statusline.sh")
+        | HOME="$tmpdir" TERM=dumb bash "$SCRIPT_DIR/statusline.sh" --notice off)
     line2=$(printf '%s\n' "$out" | sed -n '2p')
     plain=$(strip_ansi "$line2")
     [ "${#plain}" -eq 75 ]
@@ -3617,7 +3802,7 @@ make_deadman_shim() { # $1=tmpdir $2=chip output
     printf '{"five_hour":{"utilization":85,"resets_at":"%s"},"seven_day":{"utilization":10},"fetched_at":%s}' \
         "$reset_5h" "$(date +%s)" > "$tmpdir/.claude/statusline/usage.cache"
     out=$(echo '{"session_id":"align-test","model":{"id":"claude-opus-4-6","display_name":"Opus"},"cwd":"/t/proj","workspace":{"current_dir":"/t/proj"},"version":"2.1.174","cost":{"total_cost_usd":0}}' \
-        | HOME="$tmpdir" COLUMNS=110 bash "$SCRIPT_DIR/statusline.sh" --test)
+        | HOME="$tmpdir" COLUMNS=110 bash "$SCRIPT_DIR/statusline.sh" --test --notice off)
     line1=$(strip_ansi "$(printf '%s\n' "$out" | sed -n 1p)")
     line2=$(strip_ansi "$(printf '%s\n' "$out" | sed -n 2p)")
     [ -n "$line2" ]
@@ -3636,7 +3821,7 @@ make_deadman_shim() { # $1=tmpdir $2=chip output
     # overflows the guess; the advisor must anchor on line 1's real edge, not
     # the guessed one — a pipe's 80 says nothing about the real terminal.
     out=$(echo '{"session_id":"align-low","model":{"id":"claude-opus-4-6","display_name":"Opus"},"cwd":"/t/proj","workspace":{"current_dir":"/t/proj"},"version":"2.1.174","cost":{"total_cost_usd":0}}' \
-        | env -u COLUMNS TERM=dumb HOME="$tmpdir" setsid -w bash "$SCRIPT_DIR/statusline.sh" --test --path-display full --order activity,time,cost,model,user,quota,extra)
+        | env -u COLUMNS TERM=dumb HOME="$tmpdir" setsid -w bash "$SCRIPT_DIR/statusline.sh" --test --notice off --path-display full --order activity,time,cost,model,user,quota,extra)
     line1=$(strip_ansi "$(printf '%s\n' "$out" | sed -n 1p)")
     line2=$(strip_ansi "$(printf '%s\n' "$out" | sed -n 2p)")
     [ -n "$line2" ]
@@ -3655,7 +3840,7 @@ make_deadman_shim() { # $1=tmpdir $2=chip output
     # cuts line 1 at its edge, so the advisor meets that edge, not the
     # overflowing content's.
     out=$(echo '{"session_id":"align-known","model":{"id":"claude-opus-4-6","display_name":"Opus"},"cwd":"/t/a/very/long/project/path/that/keeps/going/and/going/on","workspace":{"current_dir":"/t/a/very/long/project/path/that/keeps/going/and/going/on"},"version":"2.1.174","cost":{"total_cost_usd":0}}' \
-        | COLUMNS=60 HOME="$tmpdir" setsid -w bash "$SCRIPT_DIR/statusline.sh" --test --path-display full)
+        | COLUMNS=60 HOME="$tmpdir" setsid -w bash "$SCRIPT_DIR/statusline.sh" --test --notice off --path-display full)
     line1=$(strip_ansi "$(printf '%s\n' "$out" | sed -n 1p)")
     line2=$(strip_ansi "$(printf '%s\n' "$out" | sed -n 2p)")
     [ -n "$line2" ]

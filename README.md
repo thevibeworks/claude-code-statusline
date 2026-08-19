@@ -17,9 +17,10 @@
 One Bash file that plugs into the official `statusLine` command hook. Shows
 what matters: active model, context window, session cost, 5h / 7d quota with
 reset times, prompt-cache health, extra-usage spend, git activity, and subscription tier.
-When the numbers stop meaning what they appear to mean, an [advisor second
-row](#advisor-line) interprets them — cap projections, expiring-surplus and
-underuse advice, per-model weekly limits, sibling-account relief.
+When the numbers stop meaning what they appear to mean, the
+[notice engine](#the-notice-engine) interprets them — cap projections,
+expiring-surplus and underuse advice, which model caps first, out-of-band
+quota re-bases, sibling-account relief.
 No daemon, no telemetry, no npm.
 
 ## Install
@@ -138,8 +139,9 @@ Flags go in the command string in `~/.claude/settings.json`:
 | `--alignment` | `left-right`, `right-left`, `center` | `left-right` |
 | `--extra` | `auto`, `always`, `on-limit`, `off` | `auto` |
 | `--cache` | `auto`, `always`, `off` | `auto` |
-| `--advisor` | `auto`, `always`, `off` — projection row, see [Advisor line](#advisor-line) | `auto` |
+| `--advisor` | `auto`, `always`, `off` — the pinned notice, see [The notice engine](#the-notice-engine) | `auto` |
 | `--week` | `auto`, `always`, `off` — the 5h + 7d ledger row with pace and reset, see [Week row](#week-row) | `auto` |
+| `--notice` | `auto`, `off` — the fading row 3 (a new notice explained in full for ~90 s), see [The notice engine](#the-notice-engine). `STATUSLINE_NOTICE` sets it too | `auto` |
 | `--deadman` | `auto`, `off` — [deadman](https://github.com/thevibeworks/deadman) switch chip | `auto` |
 | `--debug` | Write logs to `~/.claude/statusline/logs/statusline.log` | off |
 | `--test [json]` | Render with mock data | off |
@@ -247,13 +249,19 @@ echo '{"model":{"id":"claude-opus-4-8[1m]","display_name":"Opus"},"cwd":"/tmp/pr
 
 Line 1 says how much of each window is left; the week row says where it
 went — one grammar at two scales, directly under the badges. Row 2
-mirrors line 1: advice on the left, evidence on the right, the gap
-between them absorbing the width, the right edge shared with line 1:
+mirrors line 1: the [pinned notice](#the-notice-engine) on the left,
+evidence on the right, the gap between them absorbing the width, the
+right edge shared with line 1:
 
 ```text
 proj (main*)       +84/-14 8m $6.72 fabl5[1m][██░░42%] fb[66%] [MAX|@work] 5h[38%@23:00] 7d[39%]
-- budget ~3x5h left · even 20%/win   5h ▂▅█▃▮▯▯▯▯▯ 0.9x @23:00  7d ▅▁▂ ▃▅ˍ▃▅ ▃▃▁▂▁ ▅ˍ▂▁▁ ˍˍˍ▃▅ ˍˍˍ▅ ▆▆ˍ▂▮▯▯ 0.7x @Wed 09:00
+- 3x5h left · 20%/win   5h ▂▅█▃▮▯▯▯▯▯ 0.9x  7d ▅▁▂ ▃▅ˍ▃▅ ▃▃▁▂▁ ▅ˍ▂▁▁ ˍˍˍ▃▅ ˍˍˍ▅ ▆▆ˍ▂▮▯▯ 0.7x @Wed 09:00
 ```
+
+The 5h strip prints no reset: line 1's `5h[38%@23:00]` already carries
+it, and one badge per fact runs in both directions. The 7d badge shows a
+reset only under pressure, so the 7d strip labels its own end until it
+does.
 
 The advisor sentence is compacted to the room line 1 leaves beside the
 ledgers — weakest joint first (`;` the second voice, then `·` the tail
@@ -311,70 +319,52 @@ grows, so a render never pays for the scan. Interoperates with
 [ccpace](https://github.com/thevibeworks/ccpace), which draws the same
 week ledger from the same log.
 
-## Advisor line
+## The notice engine
 
-The statusline can render a second row — Claude Code displays each stdout
-line as its own row ([docs](https://code.claude.com/docs/en/statusline)).
-The advisor uses it to *interpret* the badges: it speaks only when the
-numbers on line 1 don't mean what they appear to mean, and every clause
-derives from a badge already shown — no third alarm channel. It cuts both
-ways, with a voice per direction:
-
-- **pressure** — `! ...` in yellow/red: you'll hit a wall before a reset.
-- **budget** — `- budget ~3x5h left · even 20%/win · heading ~52%` in dim:
-  the calm numbers; shown whenever the week row is showing (and always
-  under `--advisor always`).
-- **opportunity** — `+ ...` in cyan: paid capacity is about to expire
-  unused, or a sibling account is free while you're pinned. Cyan can
-  never mean pressure, so the color alone carries the stance.
-
-Quiet means no row at all: a healthy session stays one line. Alone, the
-row right-aligns to the edge the stats cluster ends at, so the advice
-sits directly beneath the badges it interprets. With the
-[week row](#week-row) showing it moves onto that row's left side,
-compacted to fit (row 2 then mirrors line 1: advice left, evidence
-right); only when no honest room is left does it drop to a third row,
-flush-left under the ledgers. Claude Code trims every row it renders,
-so any leading padding rides behind a zero-width reset code — a
-bare-space row would land flush-left.
+Line 1 is the numbers; the notice engine is what they *mean*. Readers
+turn the live account into notices, each carrying a short form and a
+long one:
 
 ```text
-proj (main*)   fabl5[1m][██░░42%] fb[86%] [MAX|@work] 5h[95%@06:00] 7d[44%@07:00]
-                          ! 5h caps ~05:18, 42m before reset; 7d resets @07:00, 56% unused
+proj (main*)      +84/-14 8m $6.72 fabl5[1m][██░░42%] fb[91%] [MAX|@work] 5h[38%@23:00] 7d[55%]
++ fb 91% vs 7d 55% · go op   5h ▂▅█▃▮▯▯▯▯▯ 0.9x  7d ▅▁▂ ▃▅ˍ▃▅ … ▆▆ˍ▂▮▯▯ 0.6x @Wed 09:00
++ fb weekly 91% against 7d 55% · the model caps first, not the account; op sits at 33%, so run it for the bulk
 ```
 
-What it says, in value order (max two clauses):
+**Row 2 pins** the top notice, compacted to the room the ledgers leave —
+it stays while the condition holds. **Row 3 flashes** the same notice in
+full, but only for ~90 s after the condition first appears in this
+session: the explanation arrives once, then gets out of the way and
+leaves the pin. A second story that shows up later takes row 3 next.
+The number you act on is **bold**.
 
-| Clause | When |
-|--------|------|
-| `! fb capped · back ~Thu 07:00` | The weekly limit scoped to *this session's model* (`limits[]` `weekly_scoped`) hit 100% — the model just became unavailable, and the one number that matters is when it returns. |
-| `! 5h caps ~14:20, 52m before reset` | The 5h badge is already yellow/red and the linear projection lands before the reset. Suppressed when relief is <= 30min out, same as the badge's recovery color. |
-| `+ 7d resets @07:00, 56% unused · spend it` (or `· ~40% expires even at full burn`) | Expiring surplus: inside the last day of the 7d window with >= 30% unused, a green badge means forfeiture, not headroom — at reset the remainder vanishes whether spent or not. The tail is feasibility-checked against the learned `pct_per_window` ratio (how many 7d points a fully burned 5h window costs *you*, mined from your own usage log): "spend it" appears only when full-tilt burning can actually consume the surplus; past that point the honest tail is how much expires no matter what. While the ratio is unlearned the clause states the bare fact and advises nothing. |
-| `+ alt 5h[8%] free` | Fleet relief for shared-home multi-account setups: once this account's 5h hits 90%, the idlest *fresh* sibling under `accounts/*/` is the actionable way out. Read-only, no credentials. |
-| `! fb caps ~Wed 18:00, 1d before reset` | The running model's scoped weekly quota caps before its reset — same linear math, gates, and recovery suppression as the 7d aggregate. |
-| `! 7d dry ~Thu 09:00, 2d before reset · then extra billing` (or `then hard stop`) | The learned weekday forecast projects the quota drying up early; cold start falls back to linear pace, but only once `seven_day_pace` already warns. The tail states what actually happens at 100%. |
-| `+ 7d on pace to leave ~62% unused · go heavier` | Underuse: on pace to strand a large chunk of the subscription. The learned weekday profile speaks first — it knows *your* remaining days, so it can warn from day two; cold start falls back to linear pace past half the window. Speaks only in an engaged, unsqueezed session (5h between 25% and 80%, no pressure clause) — it reaches exactly the person who can act on it and never nags an idle one. |
-| `- budget ~19x5h left · even 1.1%/win · heading ~52%` | `--advisor always` only, when calm: the weekly budget in one breath — runway, what even looks like, where you land. "heading" is the learned end-of-week projection when trained, linear once the window is a day old. In the last window per-window math would just restate the headroom, so it degrades to `- budget last window · 61% left · heading ~40%`. |
+Three voices, one hue each:
 
-The 7d window gets one voice per render — surplus, dry, or underuse,
-never two that could disagree.
+- **pressure** — `! ...` in yellow/red: a wall between here and a reset.
+- **opportunity** — `+ ...` in cyan: capacity about to expire unused, a
+  model with room, a free sibling account. Cyan can never mean pressure.
+- **budget** — `- ...` in dim: the calm week in one breath.
 
-```bash
---advisor auto      # default: speak under pressure or expiring surplus
---advisor always    # add the weekly budget line when calm
---advisor off       # single row, never
-```
+One voice per window per frame (`5h`, `7d`, `fb`, `acct`), so two
+clauses about one window can never disagree.
 
-All times are wall-clock (`~14:20`) or future-to-future gaps (`52m before
-reset` = reset minus cap, both in the future) — freeze-safe in an idle
-frame, same idiom as the badges. Add `"refreshInterval": 60` to your
-`statusLine` settings if you want the row re-evaluated on a timer while
-idle.
+| Notice | What it knows that line 1 doesn't |
+|--------|-----------------------------------|
+| `! fb capped ~Thu 07:00` | The weekly limit scoped to *this session's model* hit 100%: that model is gone until then. The long form names a model that still has room. |
+| `! 5h caps ~05:18` | Linear projection off this window's own pace: you hit the wall before the reset. Long form adds how long you'd sit blocked. |
+| `! 7d dry ~Thu 09:00 · hard stop` | The learned per-weekday burn profile (EWMA over your own history), not a straight line — your heavy Tuesday counts more than an average. Tail says what happens at 100%: extra billing, or a stop. |
+| `! fb 91% vs 7d 55% · go op` | **The relation** between two badges: the *model* caps before the account does. Switching models buys the week's remaining capacity back; the roomiest other `weekly_scoped` limit in the payload gets named. |
+| `+ 7d rebased 53%→12%` | Utilization fell *inside* one window instance: burn never runs backwards, so this is a plan change or an out-of-band reset. The projections restart; the ledger still draws the old period. |
+| `+ last 5h of the week · 47% unused` | The 7d window resets inside this 5h window: no later window exists to spend the remainder through. |
+| `+ 47% unused · spend it` (or `· ~33% expires even at full burn`) | Expiring surplus, feasibility-checked against your learned `pct_per_window`: "spend it" only when full-tilt burn can actually consume it. |
+| `+ 5h ~40m left · 70% unused` | Said only when the *week* is stranding capacity — an unspent 5h window is otherwise headroom, not waste, since the 5h window is a rate limit and not a budget. |
+| `+ ~62% will expire · go heavier` | On pace to strand a large chunk of the subscription. Speaks only to an engaged, unsqueezed session. |
+| `+ work 5h[8%] free` | A sibling account in the same shared home is idle while this one is pinned. |
+| `- 19x5h left · 1.1%/win` | The calm budget: runway, what even looks like, where you land (long form). |
 
-For a standalone full-screen watcher (multi-account polling,
-notifications), see `claude.py --watch-usage` in
-[claudex](https://github.com/thevibeworks/claudex) — it consumes the same
-state dir this script maintains (see `docs/api/state-dir.md`).
+`--notice off` keeps row 3 quiet; `--advisor off` silences both. `--check`
+and `--week` print the long form, since a terminal command has a whole
+line to spend.
 
 ## The waste ledger
 

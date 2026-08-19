@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Claude Code Statusline — quota, ledgers, advisor. Live, in one bash file.</title>
-<meta name="description" content="Live 5h/7d quota with reset times, per-model weekly limits, context pressure, session cost, prompt-cache expiry detection, git activity, 5h/7d ledgers with pace, and an advisor row in your Claude Code prompt. One bash file, 383 tests, no daemon, no telemetry.">
+<title>Claude Code Statusline — quota, ledgers, notices. Live, in one bash file.</title>
+<meta name="description" content="Live 5h/7d quota with reset times, per-model weekly limits, context pressure, session cost, prompt-cache expiry detection, git activity, 5h/7d ledgers with pace, and a notice engine that says which limit binds first, in your Claude Code prompt. One bash file, 384 tests, no daemon, no telemetry.">
 <style>
   :root {
     --bg: #0b0c0e;
@@ -55,7 +55,7 @@
   .term .bar span { margin-left: auto; color: var(--dim2); font-size: 12px; font-family: var(--mono); }
   .term .screen {
     padding: 18px 18px 14px; font-family: var(--mono); font-size: 12.5px;
-    white-space: pre; overflow-x: auto; min-height: 3.6em;
+    white-space: pre; overflow-x: auto; min-height: 4.8em;
   }
   .term .screen .w2 { color: #eceef1; font-weight: bold; }
   .term .caption {
@@ -130,8 +130,8 @@
   <div class="wrap">
     <h1>Claude Code Statusline</h1>
     <p class="sub">Quota, context, cost, model, and git — live in your Claude Code prompt.
-    Line 1: how much of each window is left. Row 2: what to do about it, and where it went (5h + 7d ledgers with pace).</p>
-    <p class="facts">one bash file &middot; 383 tests &middot; deps: jq + curl &middot; no daemon &middot; no telemetry</p>
+    Line 1: how much of each window is left. Row 2: what to do about it, and where it went. Row 3 says it in full, then fades.</p>
+    <p class="facts">one bash file &middot; 384 tests &middot; deps: jq + curl &middot; no daemon &middot; no telemetry</p>
 
     <div class="term">
       <div class="bar"><i></i><i></i><i></i><span>claude</span></div>
@@ -167,8 +167,10 @@
           <td class="desc"><b>5h ledger.</b> This sitting as ten half hours, height = the 5h points each cell cost; <code>▮</code> now, <code>▯</code> ahead, <code>ˍ</code> ran-but-negligible, <code>░</code> no sample. Ends with its pace (used ÷ elapsed) and the reset its right edge stands for — axis labels, not badges restated.</td></tr>
       <tr><td><span class="d">7d</span> <span class="y">▅▁▂ ▃▅ˍ▃▅ … ▆▆</span><span class="w">▮</span><span class="d2">▯▯▯▯</span> <span class="d">0.7x @Wed 09:00</span></td>
           <td class="desc"><b>7d ledger.</b> The week as its 5h windows (34 cells, oldest left, a gap at each local midnight in history only), height = the 7d points each burned; <code>×</code> where the pool runs dry at your pace. Reconstructed from your own usage log — the same history <a href="https://github.com/thevibeworks/ccpace">ccpace</a> reads.</td></tr>
-      <tr><td><span class="d2">- budget ~10x5h left · even 4.5%/win · heading ~72%</span></td>
-          <td class="desc"><b>Advisor.</b> Left of the ledgers, compacted to the room line 1 leaves (weakest joint first: <code>;</code> voice, <code>·</code> clause, <code>,</code> sub-fact): the calm numbers the ledgers imply, or under pressure / surplus — <code>! 5h caps ~05:18, 42m before reset</code>, <code>+ 7d resets @07:00, 56% unused · spend it</code>. Row 2 mirrors line 1: advice left, evidence right. No room (narrow terminal) drops it to a third row; a quiet row is no row.</td></tr>
+      <tr><td><span class="c">+ <b>fb 91%</b> vs 7d 55% · go op</span></td>
+          <td class="desc"><b>The pin.</b> Left of the ledgers, compacted to the room line 1 leaves (cut at the rightmost joint, so it gives up as little as possible). It stays while the condition holds. The number you act on is bold; the hue is the stance — <span class="c">cyan</span> opportunity, yellow/red pressure, dim budget.</td></tr>
+      <tr><td><span class="c">+ fb weekly 91% against 7d 55% · the model caps first…</span></td>
+          <td class="desc"><b>The flash.</b> Row 3: the same notice in full, for ~90&nbsp;s after the condition first appears in this session — then it disappears and leaves the pin. What it knows: which limit binds first (<code>fb 91% vs 7d 55%</code> = the <i>model</i> caps before the account), an out-of-band quota re-base (<code>7d rebased 53%→12%</code>), the last 5h window of the week, expiring surplus checked against your own burn ratio. <code>--notice off</code> keeps row 3 quiet.</td></tr>
       <tr><td><span class="mono"><span class="br">≡!419k</span>&nbsp; <span class="y">≡~</span>&nbsp; <span class="d">!net</span></span></td>
           <td class="desc"><b>Truth badges.</b> <code>≡!419k</code> — prompt-cache break on resume (bold red past 200k); <code>≡~</code> — rebuilding; stale-data markers say <i>why</i> a fetch failed. Silent while healthy.</td></tr>
     </table>
@@ -190,7 +192,7 @@
       <p>Corporate mitm proxy or a local tracer: it builds a combined CA bundle from <code>NODE_EXTRA_CA_CERTS</code> automatically, so fetches survive where plain curl dies.</p></div>
     <div class="val"><h3>Documented wire contract</h3>
       <p>The <a href="https://github.com/thevibeworks/claude-code-statusline/blob/main/docs/api/oauth-usage.md">observed <code>/api/oauth/usage</code> schema</a> is versioned in-repo and re-synced against CLI captures, so parser changes check against ground truth.</p></div>
-    <div class="val"><h3>383 tests on one bash file</h3>
+    <div class="val"><h3>384 tests on one bash file</h3>
       <p>bats suite covering quota math, lock contention (20-contender single-winner), forecast pacing, ANSI rendering, and the installer. CI on every push.</p></div>
     <div class="val"><h3>Nothing running in the background</h3>
       <p>No daemon, no telemetry, no npm. It runs when Claude Code renders the prompt, reads stdin + one cached API call, prints a line, exits.</p></div>
@@ -229,12 +231,15 @@
 
   // Rows beneath line 1 hang as one block: its right edge meets line 1's
   // edge, every row shares one left edge — exactly how the script pads them.
-  var L5 = s('d','5h ') + s('g','▂▅█▃') + s('w2','▮') + s('d2','▯▯▯▯▯') + s('d',' 0.8x @14:00');
-  var L5b = s('d','5h ') + s('g','▂▅█▄') + s('w2','▮') + s('d2','▯▯▯▯▯') + s('d',' 0.9x @14:00');
+  var L5 = s('d','5h ') + s('g','▂▅█▃') + s('w2','▮') + s('d2','▯▯▯▯▯') + s('d',' 0.8x');
+  var L5b = s('d','5h ') + s('g','▂▅█▄') + s('w2','▮') + s('d2','▯▯▯▯▯') + s('d',' 0.9x');
   var L7 = s('d','7d ') + s('y','▅▁▂ ▃▅ˍ▃▅ ▃▃▁▂▁ ▅ˍ▂▁▁ ˍˍˍ▃▅ ▆▆') + s('w2','▮') + s('d2','▯▯▯▯▯▯▯▯') + s('d',' 0.7x @Wed 09:00');
+  // the 5h strip prints no reset: line 1's 5h badge already carries it
   var LEDGER = L5 + '  ' + L7, LEDGER_B = L5b + '  ' + L7;
-  var BUDGET = s('d2','- budget ~10x5h left · even 4.5%/win · heading ~72%');
-  var BUDGET_B = s('d2','- budget ~10x5h left · even 4.3%/win · heading ~73%');
+  var BUDGET = s('d2','- 10x5h left · 4.5%/win');
+  var BUDGET_B = s('d2','- 10x5h left · 4.3%/win');
+  var PIN = s('c','+ ') + s('c','<b>fb 91%</b>') + s('c',' vs 7d 55% · go op');
+  var FLASH = s('c','+ fb weekly 91% against 7d 55% · the model caps first, not the account');
 
   var frames = [
     { d: 2200, c: 'session starts — fresh context, quota from the shared account cache',
@@ -254,6 +259,12 @@
     { d: 3400, c: '/compact — the bar snaps visibly to 0% and flashes the drop: <b>-86</b>',
       h: P + s('dg','+131') + s('d','/') + s('dr','-16') + ' ' + s('d','14m $5.90') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[░░░░░░0%]') + f('rev-g','-86') + ' ' + s('d','fb') + s('y','[65%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[41%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']'),
       r: [LEDGER_B, BUDGET_B] },
+    { d: 3600, c: 'the model quota outruns the account: <b>fb 91% vs 7d 55%</b> — the pin says the way out, row 3 says why',
+      h: P + s('dg','+131') + s('d','/') + s('dr','-16') + ' ' + s('d','14m $5.90') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[█░░░░░9%]') + ' ' + s('d','fb') + f('rev-y','+3') + s('y','[91%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[41%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[55%') + s('d','@2d') + s('y',']'),
+      r: [LEDGER_B, PIN, FLASH] },
+    { d: 3200, c: '~90s later the explanation fades and the pin stays — one row of advice, not a wall of text',
+      h: P + s('dg','+138') + s('d','/') + s('dr','-16') + ' ' + s('d','16m $6.40') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[██░░░░13%]') + ' ' + s('d','fb') + s('y','[91%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[42%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[55%') + s('d','@2d') + s('y',']'),
+      r: [LEDGER_B, PIN] },
     { d: 3000, c: 'back to work — same lines, always current, never in the way',
       h: P + s('dg','+142') + s('d','/') + s('dr','-19') + ' ' + s('d','17m $7.53') + f('rev-d','+1.63') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[█░░░░░7%]') + ' ' + s('d','fb') + s('y','[66%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[42%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']'),
       r: [LEDGER_B, BUDGET_B] },
@@ -284,16 +295,26 @@
     if (text.length > avail) text = text.slice(0, avail - 1) + '…';
     return text;
   }
+  // rows = [ledgers, pin, flash?]: the pin merges into the ledger row (row 2
+  // mirrors line 1), the flash keeps its own row until it fades.
   function render(fr) {
     var out = fr.h, rows = fr.r || [];
     if (!rows.length) return out;
     var anchor = vis(fr.h);
-    if (rows.length === 2) {
-      var ledger = rows[0], adviceHtml = rows[1], adviceText = (meter.innerHTML = adviceHtml, meter.textContent);
-      var short = compact(adviceText, anchor - vis(ledger) - 2);
+    if (rows.length >= 2) {
+      var ledger = rows[0], pinHtml = rows[1];
+      var pinText = (meter.innerHTML = pinHtml, meter.textContent);
+      var short = compact(pinText, anchor - vis(ledger) - 2);
       if (short !== null) {
-        var cls = /class="([^"]+)"/.exec(adviceHtml)[1];
-        return out + '\n' + s(cls, short) + pad(anchor - vis(ledger) - short.length) + ledger;
+        var keep = pinHtml.indexOf(pinText) >= 0 ? pinHtml : null;
+        var head = keep && short === pinText ? pinHtml : s(/class="([^"]+)"/.exec(pinHtml)[1], short);
+        out += '\n' + head + pad(anchor - vis(ledger) - short.length) + ledger;
+        for (var f = 2; f < rows.length; f++) {
+          var flashText = (meter.innerHTML = rows[f], meter.textContent);
+          var cut = compact(flashText, anchor - 1);
+          out += '\n' + (cut === flashText ? rows[f] : s('c', cut));
+        }
+        return out;
       }
     }
     var widest = 0;
