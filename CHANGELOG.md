@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.25.0 — 2026-08-19 — the ledgers say their pace
+
 **The ledgers say their pace and their reset; the budget line rides with
 them.** Each strip now ends with `0.7x @Wed 09:00`: pace = used ÷
 elapsed (dim below 1x, pressure-tinted from 1x, hidden for a window's
