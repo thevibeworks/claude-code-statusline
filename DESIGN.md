@@ -65,12 +65,14 @@ own signal.
 ## The ledgers (row 2)
 
 ```
-5h ▃▄▮▯▯▯▯▯▯▯  7d ▅▁▂ ▃▅ˍ▃▅ ▃▃▁▂▁ ▅ˍ▂▁▁ ˍˍˍ▃▅ ˍˍˍ▅ ▆▆ˍ▂▮▯▯
+5h ▃▄▮▯▯▯▯▯▯▯ 0.6x @04:00  7d ▅▁▂ ▃▅ˍ▃▅ ▃▃▁▂▁ ▅ˍ▂▁▁ ˍˍˍ▃▅ ˍˍˍ▅ ▆▆ˍ▂▮▯▯ 0.7x @Wed 09:00
 ```
 
 One grammar, two scales. `5h` = this window as 10 half hours; `7d` = the
 period as 34 five-hour windows, oldest left, a gap at each local midnight
-*in history only* — the run from `▮` on is contiguous.
+*in history only* — the run from `▮` on is contiguous. Each strip ends
+with its pace (used ÷ elapsed; dim <1x, pressure ≥1x, hidden under 15 min)
+and the reset its right edge is — axis labels, not restated badges.
 
 ```
 ▁▂▃▄▅▆▇█   burned; height = points that cell cost (▁ ≤2 … ▅ ≤11 … █ >20)
@@ -88,9 +90,10 @@ row is freeze-safe by construction. Same glyphs, same math as
 
 ## Advisor (row 3)
 
-Speaks only when line 1's numbers don't mean what they look like. Two
-voices, one hue each: `!` pressure (yellow/red), `+` opportunity (cyan),
-`-` budget (`--advisor always`, calm). Every clause derives from a badge
+Speaks when line 1's numbers don't mean what they look like, and — while
+the ledgers are showing — says the calm numbers they imply. Three voices,
+one hue each: `!` pressure (yellow/red), `+` opportunity (cyan), `-`
+budget (dim: windows left · even · heading). Every clause derives from a badge
 already shown; max two clauses; the 7d window gets one voice per frame.
 
 ## Requests
@@ -99,7 +102,10 @@ The API is asked for what the protocol does not hand us, and no more.
 
 - Claude Code passes `rate_limits` (5h/7d) on every render → merged into
   the badges immediately; logged as `source:"stdin"` samples when the pair
-  changes (≥60 s apart) — free history for the ledgers and the forecast.
+  changes (≥60 s apart) and is not behind the cache in the same window
+  (they are per session; an idle session reports stale numbers) — free
+  history for the ledgers and the forecast. The 5h ledger walks samples as
+  a monotone envelope: a dip is stale, never a refund.
 - `/api/oauth/usage` (scoped weekly `fb`, extra usage): adaptive TTL by 5h
   heat (300→30 s) with a 120 s floor whenever stdin already carries 5h/7d.
 - Profile: 24 h. Prepaid: 5 min. All caches shared per account under

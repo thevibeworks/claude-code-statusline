@@ -921,12 +921,13 @@ _seed_week_store() {
     plain=$(strip_ansi "$row")
     # no live 5h window in the fixture: the 7d strip alone
     [[ "$plain" == "7d "* ]]
-    bar=$(printf '%s' "${plain#7d }" | tr -d ' ')
+    strip=$(printf '%s' "${plain#7d }" | sed 's/ [0-9.]*x @.*$//; s/ @.*$//')
+    bar=$(printf '%s' "$strip" | tr -d ' ')
     [ "$(echo "$bar" | grep -o . | wc -l)" -eq 34 ]
     [[ "$bar" =~ [▁▂▃▄▅▆▇█]ˍ[▁▂▃▄▅▆▇█] ]]
     [[ "$bar" == *▮* ]]
     # day gaps: single spaces inside the strip, several of them across a week
-    [ "$(printf '%s' "${plain#7d }" | tr -cd ' ' | wc -c)" -ge 5 ]
+    [ "$(printf '%s' "$strip" | tr -cd ' ' | wc -c)" -ge 5 ]
     rm -rf "$tmpdir"
 }
 
@@ -951,12 +952,79 @@ _seed_week_store() {
     rm -rf "$tmpdir"
 }
 
+@test "strip_tail: pace from 1x tints, below 1x dims, young window hides it; reset is an axis label" {
+    now=$(date +%s)
+    # 50% used, 2h30 into a 5h window -> 1.0x (yellow); reset inside 24h -> @HH:MM
+    t=$(strip_tail 50 9000 18000 "$now")
+    plain=$(strip_ansi "$t")
+    [[ "$plain" =~ ^\ 1\.0x\ @[0-9]{2}:[0-9]{2}$ ]]
+    [[ "$t" == *"${YELLOW}1.0x"* ]]
+    # 10% at 2h30 -> 0.2x dim
+    t=$(strip_tail 10 9000 18000 "$now"); [[ "$t" == *"${DIM}0.2x"* ]]
+    # 80% at 2h30 -> 1.6x red
+    t=$(strip_tail 80 9000 18000 "$now"); [[ "$t" == *"${RED}1.6x"* ]]
+    # 10 minutes in: too young for a pace, the reset still labels the edge
+    plain=$(strip_ansi "$(strip_tail 10 17400 18000 "$now")")
+    [[ "$plain" =~ ^\ @[0-9]{2}:[0-9]{2}$ ]]
+    # 7d reset beyond 24h -> weekday + time
+    plain=$(strip_ansi "$(strip_tail 40 $((3*86400)) 604800 "$now")")
+    [[ "$plain" =~ @[A-Z][a-z][a-z]\ [0-9]{2}:[0-9]{2}$ ]]
+}
+
+@test "build_week_row: each strip ends with its pace and reset" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    _seed_week_store "$tmpdir"
+    now=$(date +%s)
+    reset_5h=$(date -u -d "@$((now + 3 * 3600))" '+%Y-%m-%dT%H:%M:%SZ')
+    usage=$(jq -c --arg r "$reset_5h" '.five_hour.resets_at = $r | .five_hour.utilization = 40' "$tmpdir/usage.cache")
+    plain=$(strip_ansi "$(build_week_row "$usage" auto)")
+    # 5h resets inside 24h -> @HH:MM; 7d resets in 31h -> @Ddd HH:MM
+    [[ "$plain" =~ ^5h\ .*▮.*\ [0-9]\.[0-9]x\ @[0-9]{2}:[0-9]{2}\ \ 7d\ .*▮.*\ [0-9]\.[0-9]x\ @[A-Z][a-z][a-z]\ [0-9]{2}:[0-9]{2}$ ]]
+    rm -rf "$tmpdir"
+}
+
+@test "log_stdin_snapshot: a stdin pair behind the cache in the same window is a stale session — not logged" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    printf '{"account":{"uuid":"u-1"}}' > "$tmpdir/profile.cache"
+    printf '{"five_hour":{"utilization":21,"resets_at":"2026-08-19T11:00:00.2+00:00"},"seven_day":{"utilization":43,"resets_at":"2026-08-19T16:00:00.1+00:00"},"fetched_at":1}' > "$tmpdir/usage.cache"
+    log_stdin_snapshot s 8 1787137200 41 1787155200      # same windows, behind the cache
+    [ ! -f "$tmpdir/usage.jsonl" ] || [ "$(wc -l < "$tmpdir/usage.jsonl")" -eq 0 ]
+    log_stdin_snapshot s 23 1787137200 43 1787155200     # ahead: logged
+    [ "$(wc -l < "$tmpdir/usage.jsonl")" -eq 1 ]
+    # a NEWER 5h window is logged even though its number is lower
+    printf '12|39 0\n' > "$tmpdir/stdin_seen"
+    log_stdin_snapshot s 2 1787155200 43 1787155200
+    [ "$(wc -l < "$tmpdir/usage.jsonl")" -eq 2 ]
+    rm -rf "$tmpdir"
+}
+
+@test "five strip: a dip inside the window never becomes a burst (monotone envelope)" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    now=$(date +%s)
+    reset_5h=$((now + 3 * 3600 - 400))
+    fs=$(( ( (reset_5h - 18000 + 150) / 300 ) * 300 ))
+    iso=$(date -u -d "@$reset_5h" '+%Y-%m-%dT%H:%M:%SZ')
+    : > "$tmpdir/usage.jsonl"
+    # 20 -> 21 -> (stale 8) -> 23: the envelope credits 1 + 2, never +15
+    for spec in "600 20" "2400 21" "2500 8" "2600 23"; do
+        set -- $spec
+        printf '{"timestamp":%s,"five_hour":{"utilization":%s,"resets_at":"%s"},"seven_day":{"utilization":20}}\n' \
+            "$((fs + $1))" "$2" "$iso" >> "$tmpdir/usage.jsonl"
+    done
+    five=$(five_history_cells 0 "$fs")
+    [[ "$five" == *"0:20,1:3" ]]
+    rm -rf "$tmpdir"
+}
+
 @test "week strip: day gaps live in history only — never right after ▮" {
     tmpdir=$(mktemp -d)
     CLAUDE_ACCOUNT_DIR="$tmpdir"
     reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
     usage=$(printf '{"fetched_at":%s,"five_hour":{"utilization":9},"seven_day":{"utilization":20,"resets_at":"%s"}}' "$(date +%s)" "$reset_7d")
-    plain=$(strip_ansi "$(build_week_row "$usage" always)")
+    plain=$(strip_ansi "$(build_week_row "$usage" always)" | sed 's/ [0-9.]*x @.*$//; s/ @.*$//')
     # everything from ▮ to the end is one contiguous run
     [[ "${plain#*▮}" =~ ^▯+$ ]]
     rm -rf "$tmpdir"
@@ -980,7 +1048,7 @@ _seed_week_store() {
     done
     plain=$(strip_ansi "$(build_week_row "$usage" auto)")
     [[ "$plain" == "5h "* ]]
-    five="${plain#5h }"; five="${five%%  7d*}"
+    five="${plain#5h }"; five="${five%%  7d*}"; five=$(printf '%s' "$five" | sed 's/ [0-9.]*x @.*$//; s/ @.*$//')
     [ "$five" = "▃▅ˍ█▮▯▯▯▯▯" ]
     # 30% in 2h -> dry past the reset: holds, so no × in this window
     [[ "$five" != *×* ]]
@@ -993,7 +1061,7 @@ _seed_week_store() {
     reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
     usage=$(printf '{"fetched_at":%s,"five_hour":{"utilization":9},"seven_day":{"utilization":20,"resets_at":"%s"}}' "$(date +%s)" "$reset_7d")
     [ -z "$(build_week_row "$usage" auto)" ]
-    plain=$(strip_ansi "$(build_week_row "$usage" always)" | tr -d ' ')
+    plain=$(strip_ansi "$(build_week_row "$usage" always)" | sed 's/ [0-9.]*x @.*$//; s/ @.*$//' | tr -d ' ')
     [[ "$plain" =~ ^7d░+▮▯+$ ]]
     [ -z "$(build_week_row "$usage" off)" ]
     # no live 7d window: nothing, even in always mode
