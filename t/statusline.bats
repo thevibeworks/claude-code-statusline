@@ -1102,7 +1102,22 @@ _seed_week_store() {
     [ "$(week_period_start "$now" $((604800 + 150)))" = "1786550700" ]
 }
 
-@test "integration: week row sits between the badges and the advisor, anchored to line 1" {
+@test "compact_text: drops the weakest joint first, keeps the leading fact" {
+    t="! 5h caps ~05:18, 52m before reset; 7d dry ~Thu 09:00, 2d before reset · then hard stop"
+    [ "$(compact_text "$t" 200)" = "$t" ]
+    [ "$(compact_text "$t" 40)" = "! 5h caps ~05:18, 52m before reset" ]
+    [ "$(compact_text "$t" 20)" = "! 5h caps ~05:18" ]
+    b="- budget ~3x5h left · even 20%/win · heading ~52%"
+    [ "$(compact_text "$b" 36)" = "- budget ~3x5h left · even 20%/win" ]
+    [ "$(compact_text "$b" 19)" = "- budget ~3x5h left" ]
+    # no joint left: hard cut with an ellipsis, never a mid-word lie
+    [ "$(compact_text "- budget last window is long" 16)" = "- budget last w…" ]
+    # under 16 columns nothing honest fits
+    run compact_text "$b" 15
+    [ "$status" -eq 1 ]
+}
+
+@test "integration: advisor merges into the week row when line 1 leaves room" {
     tmpdir=$(mktemp -d)
     mkdir -p "$tmpdir/.claude/statusline"
     printf '{"claudeAiOauth":{"accessToken":"tok"}}' > "$tmpdir/.claude/.credentials.json"
@@ -1111,6 +1126,31 @@ _seed_week_store() {
     reset_7d=$(jq -r .seven_day.resets_at "$tmpdir/.claude/statusline/usage.cache")
     input=$(printf '{"session_id":"wk","model":{"id":"claude-opus-4-8","display_name":"Opus"},"cwd":"/t","workspace":{"current_dir":"/t"},"cost":{"total_cost_usd":0},"context_window":{"used_percentage":10,"context_window_size":200000},"rate_limits":{"five_hour":{"used_percentage":85,"resets_at":"%s"},"seven_day":{"used_percentage":55,"resets_at":"%s"}}}' "$reset_5h" "$reset_7d")
     out=$(printf '%s' "$input" | HOME="$tmpdir" COLUMNS=140 bash "$SCRIPT_DIR/statusline.sh")
+    # 140 cols: line 1 leaves ~45 beside the ledgers -> row 2 mirrors line 1:
+    # advice left, evidence right, one edge shared with line 1. Two rows.
+    [ "$(printf '%s\n' "$out" | wc -l)" -eq 2 ]
+    l1=$(printf '%s\n' "$out" | sed -n 1p | sed "s/\x1b\[[0-9;]*m//g")
+    l2=$(printf '%s\n' "$out" | sed -n 2p | sed "s/\x1b\[[0-9;]*m//g")
+    [[ "$l2" =~ ^!\ 5h\ caps\ ~.*\ \ 5h\ .*▮.*7d\ .*▮ ]]
+    [ "${#l2}" -eq "${#l1}" ]
+    # the merged row starts with ink (its color), not whitespace: nothing to trim
+    raw2=$(printf '%s\n' "$out" | sed -n 2p)
+    [[ "$raw2" == $'\e['* ]]
+    [[ "$raw2" != $'\e[0m '* ]]
+    off=$(printf '%s' "$input" | HOME="$tmpdir" COLUMNS=140 bash "$SCRIPT_DIR/statusline.sh" --week off)
+    [ "$(printf '%s\n' "$off" | wc -l)" -eq 2 ]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: no room beside the ledgers keeps the block — ledgers, then the full sentence" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude/statusline"
+    printf '{"claudeAiOauth":{"accessToken":"tok"}}' > "$tmpdir/.claude/.credentials.json"
+    _seed_week_store "$tmpdir/.claude/statusline"
+    reset_5h=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_7d=$(jq -r .seven_day.resets_at "$tmpdir/.claude/statusline/usage.cache")
+    input=$(printf '{"session_id":"wk","model":{"id":"claude-opus-4-8","display_name":"Opus"},"cwd":"/t","workspace":{"current_dir":"/t"},"cost":{"total_cost_usd":0},"context_window":{"used_percentage":10,"context_window_size":200000},"rate_limits":{"five_hour":{"used_percentage":85,"resets_at":"%s"},"seven_day":{"used_percentage":55,"resets_at":"%s"}}}' "$reset_5h" "$reset_7d")
+    out=$(printf '%s' "$input" | HOME="$tmpdir" COLUMNS=96 setsid -w bash "$SCRIPT_DIR/statusline.sh")
     [ "$(printf '%s\n' "$out" | wc -l)" -eq 3 ]
     l1=$(printf '%s\n' "$out" | sed -n 1p | sed "s/\x1b\[[0-9;]*m//g")
     l2=$(printf '%s\n' "$out" | sed -n 2p | sed "s/\x1b\[[0-9;]*m//g")
@@ -1128,8 +1168,6 @@ _seed_week_store() {
     # row before rendering, a bare-space row would land flush-left
     raw2=$(printf '%s\n' "$out" | sed -n 2p)
     [[ "$raw2" == $'\e[0m '* ]]
-    off=$(printf '%s' "$input" | HOME="$tmpdir" COLUMNS=140 bash "$SCRIPT_DIR/statusline.sh" --week off)
-    [ "$(printf '%s\n' "$off" | wc -l)" -eq 2 ]
     rm -rf "$tmpdir"
 }
 

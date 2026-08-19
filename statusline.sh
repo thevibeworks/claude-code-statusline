@@ -4447,6 +4447,28 @@ format_output
 # rows sat flush-left for a while. A zero-width SGR reset ahead of the
 # padding is not whitespace, so the padding survives the trim and the
 # renderer (Ink, wrap=truncate) keeps it. Nerd-hacky, verified live.
+# Shorten an advisor sentence to fit `avail` columns by dropping its LAST
+# segment at the weakest joint first: `; ` (the second voice), then ` · `
+# (the tail clause), then `, ` (a sub-fact). The leading fact survives:
+# "! 5h caps ~05:18, 52m before reset; 7d dry ~Thu 09:00 · then hard stop"
+# -> "! 5h caps ~05:18, 52m before reset" -> "! 5h caps ~05:18". A hard cut
+# with `…` only when no joint is left; fails (rc 1) under 16 columns, where
+# nothing honest fits.
+ADVISOR_MERGE_MIN_COLS=16
+compact_text() {
+    local text="$1" avail="$2" sep
+    [ "$avail" -ge "$ADVISOR_MERGE_MIN_COLS" ] 2>/dev/null || return 1
+    for sep in '; ' ' · ' ', '; do
+        while [ "${#text}" -gt "$avail" ] && [[ "$text" == *"$sep"* ]]; do
+            text="${text%"$sep"*}"
+        done
+    done
+    if [ "${#text}" -gt "$avail" ]; then
+        text="${text:0:$((avail - 1))}…"
+    fi
+    printf '%s' "$text"
+}
+
 extra_rows=()
 queue_row() {
     local row="$1" tag="$2"
@@ -4469,7 +4491,7 @@ print_row_block() {
     for i in "${!extra_rows[@]}"; do
         plain=$(plain_text "${extra_rows[$i]}")
         if [ "${#plain}" -gt "$max" ] 2>/dev/null && [ "$max" -gt 1 ]; then
-            color=$(printf '%s' "${extra_rows[$i]}" | grep -o '^\033\[[0-9;]*m' | head -1)
+            color=$(printf '%s' "${extra_rows[$i]}" | grep -o '^\\033\[[0-9;]*m' | head -1)
             plain="${plain:0:$((max - 1))}…"
             extra_rows[$i]="${color}${plain}${RESET}"
         fi
@@ -4505,7 +4527,35 @@ if [ "$advisor_display_mode" != "off" ] && [ -n "${usage_data:-}" ]; then
     advisor_mode_now="$advisor_display_mode"
     [ "$advisor_mode_now" = "auto" ] && [ -n "$week_row" ] && advisor_mode_now="always"
     advisor_line=$(build_advisor_line "$usage_data" "$advisor_mode_now" "${model_id:-$model_display}")
-    queue_row "$advisor_line" "ADVISOR"
+fi
+
+# Row 2 mirrors line 1 when it can: advice on the left, evidence on the
+# right, the gap between them absorbing the width (exactly line 1's
+# path/stats shape). The advisor sentence is compacted to the room line 1
+# leaves beside the ledgers — weakest joint first, leading fact last — so
+# a calm frame is two rows, not three. No honest room (< 16 cols, narrow
+# terminals) keeps the block: ledgers, then the full sentence beneath.
+if [ -n "$advisor_line" ]; then
+    merged=""
+    if [ -n "$week_row" ]; then
+        week_anchor=$((line1_cols > 0 ? line1_cols : term_width - LINE1_MARGIN))
+        if [ "$term_width_trusted" = 1 ] && [ "$week_anchor" -gt $((term_width - LINE1_MARGIN)) ]; then
+            week_anchor=$((term_width - LINE1_MARGIN))
+        fi
+        week_plain=$(plain_text "$week_row")
+        advisor_plain=$(plain_text "$advisor_line")
+        avail=$((week_anchor - ${#week_plain} - 2))
+        if [ "$alignment" != "right-left" ] \
+           && advisor_short=$(compact_text "$advisor_plain" "$avail"); then
+            advisor_color=$(printf '%s' "$advisor_line" | grep -o '^\\033\[[0-9;]*m' | head -1)
+            merged="${advisor_color}${advisor_short}${RESET}"
+            merged+=$(printf '%*s' $((week_anchor - ${#week_plain} - ${#advisor_short})) "")
+            merged+="$week_row"
+            extra_rows[0]="$merged"
+            debug_log "ADVISOR (merged): $advisor_short"
+        fi
+    fi
+    [ -z "$merged" ] && queue_row "$advisor_line" "ADVISOR"
 fi
 print_row_block
 
