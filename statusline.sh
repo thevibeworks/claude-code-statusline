@@ -453,6 +453,7 @@ eval "$(echo "$input" | jq -r '
     @sh "exceeds_200k=\(.exceeds_200k_tokens // false)",
     @sh "ctx_pct=\(.context_window.used_percentage // "")",
     @sh "ctx_size=\(.context_window.context_window_size // "")",
+    @sh "ctx_total_in=\(.context_window.total_input_tokens // "")",
     @sh "effort_level=\(.effort.level // "")",
     @sh "fast_mode=\(.fast_mode // false)",
     @sh "rl_five_pct=\(.rate_limits.five_hour.used_percentage // "")",
@@ -1070,6 +1071,22 @@ fetch_prepaid_balance() {
 # ccpace read them as history without knowing the difference. Never rebuilds
 # the weekday profile: that stays on the fetch path.
 STDIN_LOG_MIN_SECS=60
+session_telemetry_json() {
+    [ -n "${cost_usd:-}" ] || [ -n "${ctx_total_in:-}" ] || return 0
+    jq -nc --arg cost "${cost_usd:-}" --arg dur "${duration_ms:-}" \
+        --arg api "${api_duration_ms:-}" --arg la "${lines_added:-}" \
+        --arg ld "${lines_removed:-}" --arg cin "${ctx_total_in:-}" \
+        --arg csz "${ctx_size:-}" --arg eff "${effort_level:-}" \
+        --arg fast "${fast_mode:-}" --arg cli "${cli_version:-}" '
+        def num: tonumber? // null;
+        {cost_usd: ($cost|num), dur_ms: ($dur|num), api_ms: ($api|num),
+         lines_add: ($la|num), lines_del: ($ld|num),
+         ctx_in: ($cin|num), ctx_size: ($csz|num),
+         effort: (if $eff == "" then null else $eff end),
+         fast: ($fast == "true"),
+         cli: (if $cli == "" then null else $cli end)}' 2>/dev/null
+}
+
 log_stdin_snapshot() {
     local session_id="$1" fp="$2" fr="$3" sp="$4" sr="$5"
     [ -n "$fp" ] && [ -n "$fr" ] && [ -n "$sp" ] || return 0
@@ -1086,24 +1103,43 @@ log_stdin_snapshot() {
     # (8% between 21% and 23%). Inside a window utilization only climbs;
     # log a stdin pair only when it would win the display merge — same
     # window and not below the cache, or a newer window.
+    # An EXPIRED window is never news. A session that sat idle across a
+    # boundary — or a hand-piped fixture — reports the window it last saw;
+    # logged, that pair reads as a 49-point drop and the next real sample
+    # re-climbs it, so every learner counts the same burn twice. This guard
+    # needs no cache: a window whose reset is already behind us cannot be
+    # the current one. 300 s of slack covers clock skew at the boundary.
+    local fe_now se_now
+    fe_now=$(_epoch_from_ts "$fr")
+    [ -n "$fe_now" ] && [ $(( fe_now - now )) -gt -300 ] 2>/dev/null || return 0
+    if [ -n "$sr" ]; then
+        se_now=$(_epoch_from_ts "$sr")
+        [ -n "$se_now" ] && [ $(( se_now - now )) -gt -300 ] 2>/dev/null || return 0
+    fi
+
     local uc="$CLAUDE_ACCOUNT_DIR/usage.cache"
     if [ -f "$uc" ]; then
         local c5p c5r c7p c7r fe0 ce0
         eval "$(jq -r '@sh "c5p=\(.five_hour.utilization // "")", @sh "c5r=\(.five_hour.resets_at // "")",
                        @sh "c7p=\(.seven_day.utilization // "")", @sh "c7r=\(.seven_day.resets_at // "")"' "$uc" 2>/dev/null)"
         fe0=$(_epoch_from_ts "$fr"); ce0=$(_epoch_from_ts "$c5r")
-        if [ -n "$c5p" ] && [ -n "$fe0" ] && [ -n "$ce0" ] && [ $(( fe0 - ce0 )) -lt 300 ] 2>/dev/null \
-            && [ $(( ce0 - fe0 )) -lt 300 ] 2>/dev/null \
-            && awk -v a="$fp" -v b="$c5p" 'BEGIN{exit !((a+0) < (b+0))}'; then
-            return 0
+        if [ -n "$c5p" ] && [ -n "$fe0" ] && [ -n "$ce0" ]; then
+            # older window than the cache: stale by construction, drop it
+            [ $(( ce0 - fe0 )) -ge 300 ] 2>/dev/null && return 0
+            if [ $(( fe0 - ce0 )) -lt 300 ] 2>/dev/null \
+                && awk -v a="$fp" -v b="$c5p" 'BEGIN{exit !((a+0) < (b+0))}'; then
+                return 0
+            fi
         fi
         if [ -n "$c7p" ] && [ -n "$sr" ] && [ -n "$c7r" ]; then
             local se0 ce7
             se0=$(_epoch_from_ts "$sr"); ce7=$(_epoch_from_ts "$c7r")
-            if [ -n "$se0" ] && [ -n "$ce7" ] && [ $(( se0 - ce7 )) -lt 300 ] 2>/dev/null \
-                && [ $(( ce7 - se0 )) -lt 300 ] 2>/dev/null \
-                && awk -v a="$sp" -v b="$c7p" 'BEGIN{exit !((a+0) < (b+0))}'; then
-                return 0
+            if [ -n "$se0" ] && [ -n "$ce7" ]; then
+                [ $(( ce7 - se0 )) -ge 300 ] 2>/dev/null && return 0
+                if [ $(( se0 - ce7 )) -lt 300 ] 2>/dev/null \
+                    && awk -v a="$sp" -v b="$c7p" 'BEGIN{exit !((a+0) < (b+0))}'; then
+                    return 0
+                fi
             fi
         fi
     fi
@@ -1123,14 +1159,17 @@ log_stdin_snapshot() {
     mkdir -p "$CLAUDE_ACCOUNT_DIR"
     local usage_log="$CLAUDE_ACCOUNT_DIR/usage.jsonl"
     rotate_usage_log "$usage_log"
+    local sess=""
+    sess=$(session_telemetry_json) || true; [ -n "$sess" ] || sess=null
     jq -nc --arg sid "$session_id" --argjson ts "$now" --arg model "${model_id:-}" \
         --argjson fp "$fp" --arg fr "$fiso" --argjson sp "$sp" --arg sr "$siso" \
-        --arg uuid "$uuid" --arg email "$email" \
+        --arg uuid "$uuid" --arg email "$email" --argjson sess "$sess" \
         '{type:"usage", source:"stdin", session_id:$sid, timestamp:$ts,
           user:{email:$email, uuid:$uuid},
           five_hour:{utilization:$fp, resets_at:$fr},
           seven_day:{utilization:$sp, resets_at:(if $sr == "" then null else $sr end)},
-          model:(if $model == "" then null else $model end)}' >>"$usage_log" 2>/dev/null \
+          model:(if $model == "" then null else $model end),
+          session:$sess}' >>"$usage_log" 2>/dev/null \
         && printf '%s %s\n' "$pair" "$now" >"$seen_file.tmp.$$" && mv -f "$seen_file.tmp.$$" "$seen_file"
     debug_log "log_stdin_snapshot: logged 5h=$fp 7d=$sp"
 }
@@ -1194,11 +1233,15 @@ log_usage_snapshot() {
         [ -n "$_s_secs" ] && read -r _ predicted_end <<<"$(_seven_day_walk "$_s_util" "$_s_secs")"
     fi
 
+    local sess=""
+    sess=$(session_telemetry_json) || true; [ -n "$sess" ] || sess=null
+
     echo "$usage_data" | jq -c \
         --arg sid "$session_id" \
         --arg ts "$(date +%s)" \
         --arg model "${model_id:-}" \
         --arg pend "${predicted_end:-}" \
+        --argjson sess "$sess" \
         --arg email "$user_email" \
         --arg name "$user_name" \
         --arg uuid "$user_uuid" \
@@ -1235,7 +1278,8 @@ log_usage_snapshot() {
             extra_usage:.extra_usage,
             limits:(.limits // []),
             model:($model | if . == "" then null else . end),
-            predicted_end:($pend | if . == "" then null else tonumber end)
+            predicted_end:($pend | if . == "" then null else tonumber end),
+            session:$sess
         }' \
         >>"$usage_log" 2>/dev/null
 }
@@ -1261,23 +1305,40 @@ detect_session_boundary() {
         return 0
     fi
 
-    local last_entry=$(tail -1 "$usage_log" 2>/dev/null)
+    # The newest record that actually carries a window, not just the newest
+    # line: session_start/session_end markers have no .five_hour, and a
+    # bounded tail keeps this off the whole-log path.
+    local last_entry
+    last_entry=$(tail -n 200 "$usage_log" 2>/dev/null \
+        | jq -c 'select((.five_hour.resets_at // .data.five_hour.resets_at // "") != "")' 2>/dev/null | tail -1)
     if [ -z "$last_entry" ]; then
         _emit_session_start
         return 0
     fi
 
-    local last_five_hour_reset=$(echo "$last_entry" | jq -r '.five_hour.resets_at // .data.five_hour.resets_at // empty' 2>/dev/null)
-    local last_session_id=$(echo "$last_entry" | jq -r '.session_id // empty' 2>/dev/null)
+    local last_five_hour_reset last_session_id
+    last_five_hour_reset=$(echo "$last_entry" | jq -r '.five_hour.resets_at // .data.five_hour.resets_at // empty' 2>/dev/null)
+    last_session_id=$(echo "$last_entry" | jq -r '.session_id // empty' 2>/dev/null)
 
-    if [ "$last_five_hour_reset" != "$current_five_hour_reset" ] && [ -n "$last_five_hour_reset" ]; then
-        if [ -n "$last_session_id" ] && [ "$last_session_id" != "$session_id" ]; then
-            jq -n -c --arg sid "$last_session_id" --arg ts "$(date +%s)" \
-                '{type:"session_end",session_id:$sid,timestamp:($ts|tonumber)}' \
-                >>"$usage_log" 2>/dev/null
-        fi
-        _emit_session_start
+    # Compare WINDOWS, not strings. resets_at carries microseconds and
+    # wobbles per fetch (06:00:00.515434 vs 06:00:00.087190 — one window,
+    # two strings), and 05:59:59/06:00:00 straddle the same boundary. The
+    # raw-string compare this replaced fired on nearly every fetch and wrote
+    # a session_end/session_start pair each time: 26% of the log was markers
+    # for windows that never rolled. A boundary is a window that is NEWER
+    # by more than the jitter — a stale sample never opens one.
+    local cur_e last_e
+    cur_e=$(_epoch_from_ts "$current_five_hour_reset")
+    last_e=$(_epoch_from_ts "$last_five_hour_reset")
+    [ -n "$cur_e" ] && [ -n "$last_e" ] || return 0
+    [ $(( cur_e - last_e )) -ge 300 ] 2>/dev/null || return 0
+
+    if [ -n "$last_session_id" ] && [ "$last_session_id" != "$session_id" ]; then
+        jq -n -c --arg sid "$last_session_id" --arg ts "$(date +%s)" \
+            '{type:"session_end",session_id:$sid,timestamp:($ts|tonumber)}' \
+            >>"$usage_log" 2>/dev/null
     fi
+    _emit_session_start
 }
 
 should_show_extra() {
@@ -1986,19 +2047,110 @@ build_seven_day_profile() {
                           | fromdateiso8601 | (. + 30) / 60 | floor) catch $raw)
                   end;
             select((.user.uuid // "") == $a)
+            | ([.limits[]? | select(.kind == "weekly_scoped")] | first) as $sc
             | [.timestamp, (.seven_day.utilization // ""),
                (.five_hour.utilization // ""),
-               ((.five_hour.resets_at // "") | norm)] | @tsv' 2>/dev/null \
+               ((.five_hour.resets_at // "") | norm),
+               ((.seven_day.resets_at // "") | norm),
+               ($sc.percent // ""), ($sc.scope.model.display_name // ""),
+               (.session.cost_usd // ""), (.session_id // "")] | @tsv' 2>/dev/null \
         | sort -n | awk -F'\t' -v now="$now" -v tz="$tzoff_s" '
-        $2 != "" {
-            if (prev_set && $2 > prev) {
-                d = $2 - prev
-                day = int(($1 + tz) / 86400)
-                burn[day] += d
-                if (now - $1 <= 86400)  r24 += d
-                if (now - $1 <= 172800) r48 += d
+        # Burn is the rise of a MONOTONE ENVELOPE, not the rise of the last
+        # sample. Summing raw positive deltas counts every stale dip twice:
+        # measured, that read 146 points of "burn" against a real 50-point
+        # week, and the walk then forecast a dry-out that was never coming.
+        #
+        # Two things pull a sample below the envelope, and they need
+        # opposite answers:
+        #   stale  a session that sat idle reports the numbers it last saw.
+        #          One sample, small step back. Hold the envelope.
+        #   reset  the account s counter actually went back to zero. Sticks,
+        #          and it is a long fall. Re-baseline, credit nothing.
+        # resets_at cannot tell them apart: an observed 7d reset (100 -> 0,
+        # 2026-08-17) left resets_at untouched, so the window key is only
+        # ever a one-way hint — a NEWER key is certainly a reset; an
+        # unchanged one proves nothing. Hence the two-signal test below:
+        # sustained (>= RESET_CONFIRM samples) AND deep (>= RESET_DROP
+        # points). Both cheap, both independent, and the failure mode is a
+        # bounded UNDER-count — which costs a missed warning, where the
+        # over-count cost a false alarm on every render.
+        # Functions, not bare rules: the ratio learner below is a separate
+        # pass over the same line, and a `next` in an envelope rule would
+        # silently starve it.
+        function key_ok(k) { return (k != "" && k ~ /^[0-9]+$/) }
+        function seven_env(ts, v, key,    d, day) {
+            if (key_ok(key)) {
+                if (key + 0 < swin) return                 # stale window
+                if (key + 0 > swin) { swin = key + 0; env = v; lo_n = 0; env_set = 1; return }
             }
-            prev = $2; prev_set = 1
+            # The first sample is a BASELINE, not burn: we are seeing where
+            # the account already stood, not watching it climb there.
+            if (!env_set) { env = v; env_set = 1; return }
+            if (v < env) {
+                lo_n++; if (lo_n == 1 || v < lo_min) lo_min = v
+                if (lo_n < RESET_CONFIRM || env - lo_min < RESET_DROP) return
+                env = lo_min; lo_n = 0                     # confirmed reset
+            }
+            lo_n = 0
+            if (v <= env) return
+            d = v - env; env = v; day = int((ts + tz) / 86400)
+            burn[day] += d; credited = d
+            if (now - ts <= 86400)  r24 += d
+            if (now - ts <= 172800) r48 += d
+        }
+        # Same envelope, same reset test, for the model-scoped weekly cap
+        # (limits[] kind=weekly_scoped — Fable today). Kept per scope name so
+        # a change in WHICH model is capped cannot blend two series into one
+        # profile, and so a reader can tell what the profile is ABOUT.
+        function scoped_env(ts, v, nm, key,    d, day) {
+            sc_last = nm
+            if (key_ok(key)) {
+                if (key + 0 < cwin[nm]) return
+                if (key + 0 > cwin[nm]) { cwin[nm] = key + 0; cenv[nm] = v; cn[nm] = 0; sset[nm] = 1; return }
+            }
+            if (!sset[nm]) { cenv[nm] = v; sset[nm] = 1; return }
+            if (v < cenv[nm]) {
+                cn[nm]++; if (cn[nm] == 1 || v < cmin[nm]) cmin[nm] = v
+                if (cn[nm] < RESET_CONFIRM || cenv[nm] - cmin[nm] < RESET_DROP) return
+                cenv[nm] = cmin[nm]; cn[nm] = 0
+            }
+            cn[nm] = 0
+            if (v <= cenv[nm]) return
+            d = v - cenv[nm]; cenv[nm] = v; day = int((ts + tz) / 86400)
+            cburn[nm SUBSEP day] += d
+            if (now - ts <= 86400) cr24[nm] += d
+        }
+        # Dollars. cost_usd is cumulative PER SESSION, and consecutive
+        # samples come from different sessions, so the column is not a series
+        # — it is many interleaved ones. Per session it only climbs, which
+        # makes it the same envelope shape as a quota window with one
+        # difference: a session opening at $0 has no reset to distinguish, so
+        # a drop is simply a different session and the per-key envelope
+        # handles it. The first sample of a session is a baseline, not spend.
+        #
+        # This is the join the quota API cannot make and Claude Code does not:
+        # the API knows percent and no dollars (limit_dollars is null on
+        # subscription), the transcripts know dollars and no percent. Only a
+        # sample carrying both can price a percentage point.
+        function cost_env(ts, v, sid,    d, day) {
+            if (!(sid in cset)) { cost_env_v[sid] = v; cset[sid] = 1; return }
+            if (v <= cost_env_v[sid]) return
+            d = v - cost_env_v[sid]; cost_env_v[sid] = v
+            day = int((ts + tz) / 86400)
+            usd[day] += d; usd_all += d
+            if (now - ts <= 86400)  u24 += d
+            if (now - ts <= 604800) u7d += d
+        }
+        BEGIN { RESET_CONFIRM = 2; RESET_DROP = 15; swin = -1 }
+        {
+            credited = 0
+            if ($2 != "") seven_env($1, $2 + 0, $5)
+            if ($6 != "" && $7 != "") scoped_env($1, $6 + 0, $7, $5)
+            # The price denominator must be PAIRED: only points watched by a
+            # sample that also carried a dollar figure. The log predates the
+            # session block by months, so dividing recent dollars by all of
+            # history would price a whole week at pennies.
+            if ($8 != "" && $9 != "") { burn_paired += credited; cost_env($1, $8 + 0, $9) }
         }
         # Cross-window ratio: pair consecutive samples inside the SAME 5h
         # window (resets_at identity guards against pairing across a reset)
@@ -2029,6 +2181,18 @@ build_seven_day_profile() {
                 if (ppw < 1)  ppw = 1
                 if (ppw > 50) ppw = 50
             }
+            # Scoped weekday profile, newest capped model only, same EWMA.
+            # -1 on a weekday never observed — exactly like the all-model
+            # profile, so a reader cannot mistake 0 for "quiet" when it
+            # means "unknown".
+            for (k in cburn) {
+                split(k, kp, SUBSEP)
+                if (kp[1] != sc_last) continue
+                age = today - kp[2]; if (age < 0) age = 0
+                w = exp(-0.0495 * age)
+                dw = (kp[2] + 4) % 7
+                cnum[dw] += cburn[k] * w; cden[dw] += w
+            }
             printf "{\"computed_at\":%d,\"days_history\":%d,", now, ndays
             printf "\"recent_24h\":%.2f,\"recent_48h\":%.2f,", r24, r48
             printf "\"pct_per_window\":%.2f,", ppw
@@ -2038,7 +2202,24 @@ build_seven_day_profile() {
                 p = (den[i] > 0) ? num[i] / den[i] : -1
                 printf "%s\"%d\":%.2f", sep, i, p; sep = ","
             }
-            printf "}}\n"
+            printf "},"
+            printf "\"scoped_name\":%s,", (sc_last == "" ? "null" : "\"" sc_last "\"")
+            printf "\"scoped_recent_24h\":%.2f,", (sc_last == "" ? -1 : cr24[sc_last])
+            printf "\"scoped_profile\":{"
+            sep = ""
+            for (i = 0; i <= 6; i++) {
+                p = (cden[i] > 0) ? cnum[i] / cden[i] : -1
+                printf "%s\"%d\":%.2f", sep, i, p; sep = ","
+            }
+            printf "},"
+            # What a 7d point costs, over the samples that carried both. -1
+            # until a real window of paired observation exists: a price
+            # mined from two samples is a rumour, not a rate.
+            upp = -1
+            if (usd_all > 0 && burn_paired >= 5) upp = usd_all / burn_paired
+            printf "\"cost\":{\"usd_24h\":%.2f,\"usd_7d\":%.2f,\"usd_per_pct\":%.4f,\"paired_pct\":%.1f}", \
+                u24, u7d, upp, burn_paired
+            printf "}\n"
         }')
     if [ -n "$data" ]; then
         printf '%s\n' "$data" >"${out}.tmp.$$" 2>/dev/null && mv -f "${out}.tmp.$$" "$out"
@@ -2059,8 +2240,8 @@ build_seven_day_profile() {
 #                  outlasts the window
 #   projected_end  final utilization at the reset, capped at 100
 # Silent on cold start (<14 days history) or missing/empty inputs.
-_seven_day_walk() {
-    local used="$1" secs_left="$2"
+_profile_walk() {
+    local used="$1" secs_left="$2" prof_key="${3:-weekday_profile}" recent_key="${4:-recent_24h}"
     local fc="$CLAUDE_ACCOUNT_DIR/forecast.cache"
     [ -f "$fc" ] || return 0
     [ -n "$secs_left" ] && [ "$secs_left" -gt 0 ] 2>/dev/null || return 0
@@ -2070,13 +2251,15 @@ _seven_day_walk() {
     local now tzoff_s
     now=$(date +%s)
     tzoff_s=$(date +%z | awk '{ s=substr($0,1,1)=="-"?-1:1; h=substr($0,2,2)+0; m=substr($0,4,2)+0; print s*(h*3600+m*60) }')
-    jq -r '[.days_history, .recent_24h,
-            .weekday_profile["0"], .weekday_profile["1"], .weekday_profile["2"],
-            .weekday_profile["3"], .weekday_profile["4"], .weekday_profile["5"],
-            .weekday_profile["6"]] | @tsv' "$fc" 2>/dev/null \
+    jq -r --arg p "$prof_key" --arg r "$recent_key" '
+        (.[$p] // {}) as $wp
+        | [.days_history, (.[$r] // -1),
+           ($wp["0"] // -1), ($wp["1"] // -1), ($wp["2"] // -1), ($wp["3"] // -1),
+           ($wp["4"] // -1), ($wp["5"] // -1), ($wp["6"] // -1)] | @tsv' "$fc" 2>/dev/null \
     | awk -F'\t' -v used="$used_int" -v left="$secs_left" -v now="$now" -v tz="$tzoff_s" '
     {
         ndays = $1 + 0; r24 = $2 + 0
+        if (r24 < 0) r24 = 0               # unlearned recent: no blend, no lie
         for (i = 0; i <= 6; i++) prof[i] = $(i + 3) + 0
         if (ndays < 14) exit               # cold start: not enough history
         # fallback rate for never-seen weekdays: mean of known ones
@@ -2105,6 +2288,11 @@ _seven_day_walk() {
     }'
 }
 
+# The account 7d and the model-scoped cap, each by name. Callers say which
+# question they are asking; neither has to know how a profile is stored.
+_seven_day_walk() { _profile_walk "$1" "$2" weekday_profile recent_24h; }
+_scoped_walk()    { _profile_walk "$1" "$2" scoped_profile scoped_recent_24h; }
+
 seven_day_forecast() {
     local used="$1" secs_left="$2"
     local used_int
@@ -2115,6 +2303,42 @@ seven_day_forecast() {
     local level="yellow"
     { [ "$gap_h" -ge 48 ] || [ "$used_int" -ge 90 ]; } 2>/dev/null && level="red"
     echo "$level $gap_h"
+}
+
+# The scoped cap's learned forecast, same shape and contract as
+# seven_day_forecast. This is the one that can say on Thursday that Fable
+# runs out on Monday: linear pace only ever measures the week so far, and a
+# week whose Tuesday is 39%/day and whose Sunday is 6%/day is not a line.
+scoped_forecast() {
+    local used="$1" secs_left="$2"
+    local used_int
+    used_int=$(printf '%.0f' "$used" 2>/dev/null || echo 0)
+    local gap_h proj_end
+    read -r gap_h proj_end <<<"$(_scoped_walk "$used_int" "$secs_left")"
+    [ -n "$gap_h" ] && [ "$gap_h" != "-1" ] || return 0
+    local level="yellow"
+    { [ "$gap_h" -ge 48 ] || [ "$used_int" -ge 90 ]; } 2>/dev/null && level="red"
+    echo "$level $gap_h"
+}
+
+# The scope the learned profile describes, or nothing while unlearned. A
+# caller must not attribute a forecast to a model the profile is not about.
+scoped_profile_name() {
+    local fc="$CLAUDE_ACCOUNT_DIR/forecast.cache"
+    [ -f "$fc" ] || return 0
+    jq -r '.scoped_name // empty' "$fc" 2>/dev/null
+}
+
+# What a 7d percentage point costs this account, in dollars, or nothing while
+# unlearned. The join no single source can make: the quota API reports percent
+# and never dollars on a subscription plan, the transcripts report dollars and
+# never percent.
+forecast_usd_per_pct() {
+    local fc="$CLAUDE_ACCOUNT_DIR/forecast.cache"
+    [ -f "$fc" ] || return 0
+    local v
+    v=$(jq -r '.cost.usd_per_pct // -1' "$fc" 2>/dev/null) || return 0
+    awk -v p="${v:--1}" 'BEGIN{ if (p > 0) printf "%.4f", p }'
 }
 
 # Learned cross-window ratio from forecast.cache: 7d percentage points a
@@ -2238,6 +2462,24 @@ run_usage_report() {
     else
         printf 'exchange rate: still learning (needs ~half a window of paired burn)\n'
     fi
+
+    # Price. A percentage is not a quantity you can reason about; a dollar is.
+    local upp usd24 usd7d paired
+    upp=$(forecast_usd_per_pct)
+    eval "$(jq -r '@sh "usd24=\(.cost.usd_24h // 0)", @sh "usd7d=\(.cost.usd_7d // 0)",
+                   @sh "paired=\(.cost.paired_pct // 0)"' \
+        "$CLAUDE_ACCOUNT_DIR/forecast.cache" 2>/dev/null)" 2>/dev/null || true
+    if [ -n "$upp" ]; then
+        printf 'price: ~$%s per 7d point%s · one 5h window ~$%s · a full week ~$%s\n' \
+            "$(awk -v p="$upp" 'BEGIN{printf "%.2f", p}')" \
+            "${paired:+ (learned from ${paired} paired points)}" \
+            "$(awk -v p="$upp" -v w="${ppw:-0}" 'BEGIN{printf "%.0f", p * w}')" \
+            "$(awk -v p="$upp" 'BEGIN{printf "%.0f", p * 100}')"
+    else
+        printf 'price: still learning (samples carrying both dollars and percent)\n'
+    fi
+    awk -v a="${usd24:-0}" -v b="${usd7d:-0}" \
+        'BEGIN{ if (a > 0 || b > 0) printf "spent: $%.2f in 24h · $%.2f in 7d\n", a, b }' 
 
     # Week in progress, from the freshest source (usage.cache), projected with
     # the same learned walk the advisor uses — the surfaces must not disagree.
@@ -2441,14 +2683,26 @@ week_scan() {
             return 0
         fi
     fi
+    # Aggregating readers partition by account uuid, never by directory
+    # placement (state-dir contract v2). The default dir is the untagged
+    # account s, but ten months of it predate account scoping — this log
+    # holds twelve uuids, and without the filter the ledger draws all of
+    # them as one account s week.
+    # `|| true`: under `set -e` a bare `x=$(cmd)` aborts AT the assignment,
+    # and jq exits nonzero on a missing profile.cache — which is the normal
+    # state before the first fetch.
+    local acct=""
+    acct=$(jq -r '.account.uuid // empty' "$CLAUDE_ACCOUNT_DIR/profile.cache" 2>/dev/null) || true
     local scan week five
     scan=$( { cat "${ujl}.1" 2>/dev/null; cat "$ujl" 2>/dev/null; } \
         | jq -sr --argjson ps "$period_start" --argjson w "$WEEK_CELLS" \
+                 --arg acct "$acct" \
                  --argjson fs "$five_start" --argjson fw "$FIVE_CELLS" --argjson fc "$FIVE_CELL_SECS" '
             def wkey: .five_hour.resets_at | sub("\\.[0-9]+";"") | sub("\\+00:00";"Z")
                       | fromdateiso8601 | . / 300 | round * 300;
             def span: (map(.t) | min | tostring) + " " + (map(.t) | max | tostring);
-            [ .[] | select(.five_hour.resets_at) ] as $all
+            [ .[] | select(.five_hour.resets_at)
+                  | select($acct == "" or (.user.uuid // "") == $acct) ] as $all
             | ( $all
                 | map(select(.seven_day.utilization != null and .timestamp >= $ps)
                       | { k: (wkey - 18000), t: .timestamp, s: .seven_day.utilization })
@@ -3508,18 +3762,45 @@ notice_collect() {
     fi
 
     # Where the running model's weekly quota runs out, if it does before its
-    # own reset. Same linear math and >= 80 gate as its badge colour. Held as
-    # a fact, not a sentence: the steering reader below wants to carry it.
+    # own reset. Held as a fact, not a sentence: the steering reader below
+    # wants to carry it.
+    #
+    # The LEARNED scoped walk speaks first, exactly as it does for the account
+    # 7d. Linear pace can only measure the week so far, and a week whose
+    # Tuesday burns 39%/day and whose Sunday burns 6%/day is not a line. That
+    # is the difference between "you are at 84%" on a quiet Thursday and
+    # "Fable runs out Monday, two days before it comes back" — one is a
+    # number, the other is a decision. It only ever speaks for the scope its
+    # profile was built from: which model carries the weekly cap is
+    # Anthropic's choice and has changed before, and one model's weekday shape
+    # is not another's. Cold, it falls back to the old linear math behind the
+    # badge's own >= 80 gate.
     local sc_str="" sc_gap="" sc_voice='!yellow'
-    if [ -n "$scope_int" ] && [ "$scope_int" -ge 80 ] && [ "$scope_int" -lt 100 ] 2>/dev/null \
+    if [ -n "$scope_int" ] && [ "$scope_int" -gt 0 ] && [ "$scope_int" -lt 100 ] 2>/dev/null \
        && [ -n "$scope_secs" ] && [ "$scope_secs" -gt "$SEVEN_DAY_RECOVERY_SECS" ] 2>/dev/null; then
-        local sc_elapsed=$((SEVEN_DAY_WINDOW_SECS - scope_secs))
-        if [ "$sc_elapsed" -gt 0 ]; then
-            local sc_cap=$(( (100 - scope_int) * sc_elapsed / scope_int ))
-            if [ "$sc_cap" -lt "$scope_secs" ]; then
-                sc_str=$(_fmt_epoch $((now + sc_cap)) '%a %H:%M')
-                sc_gap=$(format_duration $(( (scope_secs - sc_cap) * 1000 )))
-                [ "$scope_int" -ge 90 ] && sc_voice='!red'
+        local sc_cap="" sc_prof_lc
+        sc_prof_lc=$(scoped_profile_name | tr '[:upper:]' '[:lower:]')
+        if [ -n "$sc_prof_lc" ] && [ "$sc_prof_lc" = "$scope_name" ]; then
+            local sw_level sw_gap
+            read -r sw_level sw_gap <<<"$(scoped_forecast "$scope_int" "$scope_secs")"
+            if [ -n "$sw_level" ] && [ "${sw_gap:-0}" -gt 0 ] 2>/dev/null; then
+                sc_cap=$((scope_secs - sw_gap * 3600))
+                [ "$sw_level" = "red" ] && sc_voice='!red'
+            fi
+        fi
+        if [ -z "$sc_cap" ] && [ "$scope_int" -ge 80 ] 2>/dev/null; then
+            local sc_elapsed=$((SEVEN_DAY_WINDOW_SECS - scope_secs))
+            [ "$sc_elapsed" -gt 0 ] && sc_cap=$(( (100 - scope_int) * sc_elapsed / scope_int ))
+            [ "$scope_int" -ge 90 ] && sc_voice='!red'
+        fi
+        if [ -n "$sc_cap" ] && [ "$sc_cap" -ge 0 ] 2>/dev/null \
+           && [ "$sc_cap" -lt "$scope_secs" ] 2>/dev/null; then
+            local sc_gap_secs=$((scope_secs - sc_cap))
+            sc_str=$(_fmt_epoch $((now + sc_cap)) '%a %H:%M')
+            if [ "$sc_gap_secs" -ge 172800 ]; then
+                sc_gap="$((sc_gap_secs / 86400))d"
+            else
+                sc_gap=$(format_duration $((sc_gap_secs * 1000)))
             fi
         fi
     fi

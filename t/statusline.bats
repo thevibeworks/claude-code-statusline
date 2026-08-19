@@ -103,13 +103,13 @@ setup() {
 # --- format_reset_relative ---
 
 @test "format_reset_relative: days and hours" {
-    ts=$(date -u -d '+2 days 5 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    ts=$(date -u -d '+2 days 5 hours 30 seconds' '+%Y-%m-%dT%H:%M:%SZ')
     result=$(format_reset_relative "$ts")
     [ "$result" = "2d5h" ]
 }
 
 @test "format_reset_relative: hours and minutes" {
-    ts=$(date -u -d '+3 hours 30 minutes' '+%Y-%m-%dT%H:%M:%SZ')
+    ts=$(date -u -d '+3 hours 30 minutes 30 seconds' '+%Y-%m-%dT%H:%M:%SZ')
     result=$(format_reset_relative "$ts")
     [ "$result" = "3h30m" ]
 }
@@ -133,7 +133,7 @@ setup() {
 }
 
 @test "format_reset_relative: unix epoch produces relative time" {
-    epoch=$(date -d '+2 hours 30 minutes' +%s)
+    epoch=$(date -d '+2 hours 30 minutes 30 seconds' +%s)
     result=$(format_reset_relative "$epoch")
     [ "$result" = "2h30m" ]
 }
@@ -600,6 +600,163 @@ _write_forecast_fixture() {
     rm -rf "$tmpdir"
 }
 
+# A learned profile for the model-scoped weekly cap: every weekday burns
+# $3 percent of it, and $4 is the last 24h. days_history is the ALL-model
+# count — the scoped series rides the same scan.
+_write_scoped_profile_cache() { # dir days rate recent24 scope_name
+    cat > "$1/forecast.cache" <<EOF
+{"computed_at":$(date +%s),"days_history":$2,"recent_24h":0,"recent_48h":0,
+ "weekday_profile":{"0":-1,"1":-1,"2":-1,"3":-1,"4":-1,"5":-1,"6":-1},
+ "scoped_name":"$5","scoped_recent_24h":$4,
+ "scoped_profile":{"0":$3,"1":$3,"2":$3,"3":$3,"4":$3,"5":$3,"6":$3}}
+EOF
+}
+
+@test "build_seven_day_profile: a stale dip is not a refund" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    echo '{"account":{"uuid":"acct-A"}}' > "$tmpdir/profile.cache"
+    now=$(date +%s)
+    : > "$tmpdir/usage.jsonl"
+    # 10 -> 30 -> 50, then ONE sample at 4 (an idle session reporting the
+    # window it last saw), then 54. Real burn: 44. Summing positive deltas
+    # reads 90 — the dip is refunded and then re-earned.
+    i=0
+    for u in 10 30 50 4 54; do
+        printf '{"timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":%s}}\n' \
+            "$(( now - 3600 + i * 60 ))" "$u" >> "$tmpdir/usage.jsonl"
+        i=$(( i + 1 ))
+    done
+    build_seven_day_profile
+    [ "$(jq -r '.recent_24h' "$tmpdir/forecast.cache")" = "44.00" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_seven_day_profile: a confirmed reset re-baselines, mid-window and all" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    echo '{"account":{"uuid":"acct-A"}}' > "$tmpdir/profile.cache"
+    now=$(date +%s)
+    : > "$tmpdir/usage.jsonl"
+    # The counter really can go back to zero with resets_at UNCHANGED (seen
+    # 2026-08-17: 100 -> 0, same reset instant). A sustained, deep drop is a
+    # reset: 40 before it, 20 after, 60 total — and nothing credited for the
+    # fall itself.
+    i=0
+    for u in 10 30 50 0 0 20; do
+        printf '{"timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":%s,"resets_at":"2026-08-19T16:00:00+00:00"}}\n' \
+            "$(( now - 3600 + i * 60 ))" "$u" >> "$tmpdir/usage.jsonl"
+        i=$(( i + 1 ))
+    done
+    build_seven_day_profile
+    [ "$(jq -r '.recent_24h' "$tmpdir/forecast.cache")" = "60.00" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_seven_day_profile: learns the model-scoped weekly cap too" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    echo '{"account":{"uuid":"acct-A"}}' > "$tmpdir/profile.cache"
+    now=$(date +%s)
+    : > "$tmpdir/usage.jsonl"
+    i=0
+    for u in 5 25 60 12 90; do
+        printf '{"timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":1},"limits":[{"kind":"weekly_scoped","percent":%s,"scope":{"model":{"display_name":"Fable"}}}]}\n' \
+            "$(( now - 3600 + i * 60 ))" "$u" >> "$tmpdir/usage.jsonl"
+        i=$(( i + 1 ))
+    done
+    build_seven_day_profile
+    [ "$(jq -r '.scoped_name' "$tmpdir/forecast.cache")" = "Fable" ]
+    # 5 -> 90 with one stale dip (12) held: 85, not 85+78.
+    [ "$(jq -r '.scoped_recent_24h' "$tmpdir/forecast.cache")" = "85.00" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_seven_day_profile: no scoped samples leaves the scoped profile unlearned" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    _write_forecast_fixture "$tmpdir" 16
+    build_seven_day_profile
+    [ "$(jq -r '.scoped_name' "$tmpdir/forecast.cache")" = "null" ]
+    [ "$(jq -r '.scoped_profile["1"]' "$tmpdir/forecast.cache")" = "-1.00" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_seven_day_profile: prices a 7d point from paired samples" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    echo '{"account":{"uuid":"acct-A"}}' > "$tmpdir/profile.cache"
+    now=$(date +%s)
+    # Two sessions interleaved. cost_usd is cumulative PER SESSION, so the
+    # raw column goes 1, 2, 9, 12, 15 — deltas of that are nonsense. Per
+    # session: s1 1->9->15 (+14), s2 2->12 (+10) = $24. 7d 10->30 with the
+    # first sample a baseline = 20 paired points. $1.20 a point.
+    : > "$tmpdir/usage.jsonl"
+    i=0
+    for spec in "10 s1 1.0" "15 s2 2.0" "20 s1 9.0" "25 s2 12.0" "30 s1 15.0"; do
+        set -- $spec
+        printf '{"timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":%s},"session_id":"%s","session":{"cost_usd":%s}}\n' \
+            "$(( now - 3000 + i * 300 ))" "$1" "$2" "$3" >> "$tmpdir/usage.jsonl"
+        i=$(( i + 1 ))
+    done
+    build_seven_day_profile
+    [ "$(jq -r '.cost.usd_24h' "$tmpdir/forecast.cache")" = "24.00" ]
+    [ "$(jq -r '.cost.paired_pct' "$tmpdir/forecast.cache")" = "20.0" ]
+    [ "$(jq -r '.cost.usd_per_pct' "$tmpdir/forecast.cache")" = "1.2000" ]
+    [ "$(CLAUDE_ACCOUNT_DIR="$tmpdir" forecast_usd_per_pct)" = "1.2000" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_seven_day_profile: quota points with no dollars beside them are never priced" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    echo '{"account":{"uuid":"acct-A"}}' > "$tmpdir/profile.cache"
+    now=$(date +%s)
+    # months of quota history with no session block: the denominator must not
+    # borrow those points, or a week prices at pennies.
+    : > "$tmpdir/usage.jsonl"
+    for (( d = 40; d >= 1; d-- )); do
+        printf '{"timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":10}}\n' "$(( now - d * 86400 ))"
+        printf '{"timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":40}}\n' "$(( now - d * 86400 + 3600 ))"
+    done >> "$tmpdir/usage.jsonl"
+    build_seven_day_profile
+    [ "$(jq -r '.cost.usd_per_pct' "$tmpdir/forecast.cache")" = "-1.0000" ]
+    [ "$(jq -r '.cost.paired_pct' "$tmpdir/forecast.cache")" = "0.0" ]
+    [ -z "$(CLAUDE_ACCOUNT_DIR="$tmpdir" forecast_usd_per_pct)" ]
+    rm -rf "$tmpdir"
+}
+
+@test "forecast_usd_per_pct: no cache, no price, no error" {
+    tmpdir=$(mktemp -d)
+    [ -z "$(CLAUDE_ACCOUNT_DIR="$tmpdir" forecast_usd_per_pct)" ]
+    printf '{"computed_at":0}' > "$tmpdir/forecast.cache"
+    [ -z "$(CLAUDE_ACCOUNT_DIR="$tmpdir" forecast_usd_per_pct)" ]
+    rm -rf "$tmpdir"
+}
+
+@test "scoped_forecast: the learned walk warns where linear pace cannot" {
+    tmpdir=$(mktemp -d)
+    # 45% used with 4 days left is calm to a straight line — pace says you
+    # land near 79%. The profile says 20%/day, so the cap arrives on day 3.
+    _write_scoped_profile_cache "$tmpdir" 20 20 0 Fable
+    read -r level gap <<<"$(CLAUDE_ACCOUNT_DIR="$tmpdir" scoped_forecast 45 345600)"
+    [ "$level" = "red" ] || [ "$level" = "yellow" ]
+    [ "$gap" -gt 0 ]
+    # and the account-7d walk is untouched by it: that profile is unlearned
+    [ -z "$(CLAUDE_ACCOUNT_DIR="$tmpdir" seven_day_forecast 45 345600)" ]
+    rm -rf "$tmpdir"
+}
+
+@test "scoped_forecast: an unlearned scoped profile says nothing" {
+    tmpdir=$(mktemp -d)
+    _write_scoped_profile_cache "$tmpdir" 20 -1 -1 Fable
+    [ -z "$(CLAUDE_ACCOUNT_DIR="$tmpdir" scoped_forecast 45 345600)" ]
+    # cold start: enough weekdays, not enough days
+    _write_scoped_profile_cache "$tmpdir" 3 20 0 Fable
+    [ -z "$(CLAUDE_ACCOUNT_DIR="$tmpdir" scoped_forecast 45 345600)" ]
+    rm -rf "$tmpdir"
+}
+
 @test "build_seven_day_profile: no paired 5h samples leaves the ratio unlearned" {
     tmpdir=$(mktemp -d)
     CLAUDE_ACCOUNT_DIR="$tmpdir"
@@ -662,6 +819,134 @@ _write_forecast_fixture() {
     [ "$(echo "$line" | jq -r '.model')" = "claude-fable-5" ]
     [ "$(echo "$line" | jq -r '.limits[0].kind')" = "weekly_scoped" ]
     [ "$(echo "$line" | jq -r '.predicted_end')" = "null" ]
+    rm -rf "$tmpdir"
+}
+
+@test "detect_session_boundary: microsecond jitter is not a new window" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    log="$tmpdir/usage.jsonl"
+    printf '{"type":"usage","session_id":"s1","timestamp":1,"five_hour":{"resets_at":"2026-07-28T06:00:00.515434+00:00"}}\n' > "$log"
+    # resets_at wobbles per fetch and 05:59:59/06:00:00 straddle one
+    # boundary. Compared as strings, every fetch looked like a roll and
+    # wrote a marker pair: 26% of a real log was markers for windows that
+    # never rolled, and the rotation cap ate that much history.
+    detect_session_boundary s1 '{"five_hour":{"resets_at":"2026-07-28T06:00:00.087190+00:00"}}'
+    detect_session_boundary s1 '{"five_hour":{"resets_at":"2026-07-28T05:59:59.344798+00:00"}}'
+    [ "$(grep -c 'session_start\|session_end' "$log")" -eq 0 ]
+    # a real roll: one end (the previous session) and one start
+    detect_session_boundary s2 '{"five_hour":{"resets_at":"2026-07-28T11:00:00.123456+00:00"}}'
+    [ "$(grep -c '"session_start"' "$log")" -eq 1 ]
+    [ "$(grep -c '"session_end"' "$log")" -eq 1 ]
+    # an OLDER window is a stale sample: it opens nothing
+    detect_session_boundary s2 '{"five_hour":{"resets_at":"2026-05-20T16:00:00.000000+00:00"}}'
+    [ "$(grep -c '"session_start"' "$log")" -eq 1 ]
+    rm -rf "$tmpdir"
+}
+
+@test "detect_session_boundary: markers between samples do not hide the window" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    log="$tmpdir/usage.jsonl"
+    printf '{"type":"usage","session_id":"s1","timestamp":1,"five_hour":{"resets_at":"2026-07-28T06:00:00.5+00:00"}}\n' > "$log"
+    printf '{"type":"session_start","session_id":"s1","timestamp":2}\n' >> "$log"
+    detect_session_boundary s1 '{"five_hour":{"resets_at":"2026-07-28T06:00:00.1+00:00"}}'
+    [ "$(grep -c '"session_start"' "$log")" -eq 1 ]
+    rm -rf "$tmpdir"
+}
+
+@test "session telemetry: what stdin knows and the quota API does not" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    model_id="claude-opus-5"
+    cost_usd=2.45; duration_ms=834656; api_duration_ms=297096
+    lines_added=11; lines_removed=3
+    ctx_total_in=115348; ctx_size=1000000
+    effort_level="xhigh"; fast_mode=false; cli_version="2.1.235"
+    usage='{"five_hour":{"utilization":50},"seven_day":{"utilization":40}}'
+    log_usage_snapshot "sess-1" "$usage" ""
+    line=$(grep '"type":"usage"' "$tmpdir/usage.jsonl" | tail -1)
+    [ "$(echo "$line" | jq -r '.session.cost_usd')" = "2.45" ]
+    [ "$(echo "$line" | jq -r '.session.api_ms')" = "297096" ]
+    [ "$(echo "$line" | jq -r '.session.ctx_in')" = "115348" ]
+    [ "$(echo "$line" | jq -r '.session.effort')" = "xhigh" ]
+    [ "$(echo "$line" | jq -r '.session.fast')" = "false" ]
+    [ "$(echo "$line" | jq -r '.session.cli')" = "2.1.235" ]
+    # and on the free stdin path too, so the series has no holes
+    printf '{"account":{"uuid":"u-1"}}' > "$tmpdir/profile.cache"
+    log_stdin_snapshot sid1 12 "$(( $(date +%s) + 3600 ))" 39 "$(( $(date +%s) + 86400 ))"
+    line=$(grep '"source":"stdin"' "$tmpdir/usage.jsonl" | tail -1)
+    [ "$(echo "$line" | jq -r '.session.cost_usd')" = "2.45" ]
+    [ "$(echo "$line" | jq -r '.session.lines_add')" = "11" ]
+    rm -rf "$tmpdir"
+}
+
+@test "session telemetry: no stdin context, no block — never a broken record" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    model_id=""; cost_usd=""; ctx_total_in=""; duration_ms=""; api_duration_ms=""
+    lines_added=""; lines_removed=""; ctx_size=""; effort_level=""; fast_mode=""; cli_version=""
+    log_usage_snapshot "sess-1" '{"five_hour":{"utilization":50}}' ""
+    line=$(grep '"type":"usage"' "$tmpdir/usage.jsonl" | tail -1)
+    echo "$line" | jq -e . >/dev/null
+    [ "$(echo "$line" | jq -r '.session')" = "null" ]
+    rm -rf "$tmpdir"
+}
+
+@test "week_scan: partitions by account uuid, not by directory" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    _seed_week_store "$tmpdir"
+    # the default dir predates account scoping — a real one holds a dozen
+    # uuids. Tag the seeded rows as A and add a fat B window; only A's
+    # burn may reach the strip.
+    # derive the period from the seeded cache, not from a second `date` —
+    # a second of drift shifts every slot index
+    ps=$(( $(date -u -d "$(jq -r '.seven_day.resets_at' "$tmpdir/usage.cache")" +%s) - 604800 ))
+    tmpf="$tmpdir/tagged.jsonl"
+    jq -c '. + {user:{uuid:"acct-A"}}' "$tmpdir/usage.jsonl" > "$tmpf" && mv "$tmpf" "$tmpdir/usage.jsonl"
+    w_end=$((ps + 8 * 18000 + 18000))
+    for u in 0 99; do
+        printf '{"timestamp":%s,"user":{"uuid":"acct-B"},"five_hour":{"resets_at":"%s"},"seven_day":{"utilization":%s}}\n' \
+            "$((w_end - 18000))" "$(date -u -d "@$w_end" '+%Y-%m-%dT%H:%M:%SZ')" "$u" \
+            >> "$tmpdir/usage.jsonl"
+    done
+    echo '{"account":{"uuid":"acct-A"}}' > "$tmpdir/profile.cache"
+    # slot-agnostic: week_scan rounds the window key to 5 min but FLOORS the
+    # slot, so an unaligned period can drop a window one cell left. The costs
+    # are what this test is about.
+    cells=$(week_history_cells "$ps")
+    [[ ! "$cells" =~ :99(,|$) ]]      # acct-B's fat window never lands
+    [[ "$cells" =~ (^|,|\ )[0-9]+:8(,|$) ]]   # acct-A's 10->18 window does
+    [[ "$cells" =~ (^|,|\ )[0-9]+:7(,|$) ]]
+    rm -rf "$tmpdir"
+}
+
+@test "build_advisor_line: the learned scoped walk projects the model cap days early" {
+    tmpdir=$(mktemp -d)
+    # the env prefix must cover notice_collect too — it reads the profile
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    _write_scoped_profile_cache "$tmpdir" 20 20 0 Fable
+    reset=$(date -u -d '+4 days' '+%Y-%m-%dT%H:%M:%SZ')
+    usage=$(printf '{"five_hour":{"utilization":20},"seven_day":{"utilization":30,"resets_at":"%s"},"limits":[{"kind":"weekly_scoped","percent":45,"resets_at":"%s","scope":{"model":{"display_name":"Fable"}}}]}' "$reset" "$reset")
+    plain=$(strip_ansi "$(notice_long_line "$(notice_collect "$usage" auto claude-fable-5)")")
+    [[ "$plain" =~ fb\ caps\ ~[A-Z][a-z]{2}\ [0-9]{2}:[0-9]{2},\ .*\ before\ reset ]]
+    # linear pace alone is silent here: 45% with 4d left is under the 80 gate
+    printf '{"computed_at":0,"days_history":0}' > "$tmpdir/forecast.cache"
+    [ -z "$(notice_long_line "$(notice_collect "$usage" auto claude-fable-5)")" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_advisor_line: a scoped profile about another model is never borrowed" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    # the profile was learned while OPUS carried the scoped cap; the session
+    # runs Fable. Attributing opus's weekday shape to fable would invent a
+    # forecast, so the clause falls back to linear (silent under 80).
+    _write_scoped_profile_cache "$tmpdir" 20 20 0 Opus
+    reset=$(date -u -d '+4 days' '+%Y-%m-%dT%H:%M:%SZ')
+    usage=$(printf '{"five_hour":{"utilization":20},"seven_day":{"utilization":30,"resets_at":"%s"},"limits":[{"kind":"weekly_scoped","percent":45,"resets_at":"%s","scope":{"model":{"display_name":"Fable"}}}]}' "$reset" "$reset")
+    [ -z "$(notice_long_line "$(notice_collect "$usage" auto claude-fable-5)")" ]
     rm -rf "$tmpdir"
 }
 
@@ -935,18 +1220,21 @@ _seed_week_store() {
     tmpdir=$(mktemp -d)
     CLAUDE_ACCOUNT_DIR="$tmpdir"
     printf '{"account":{"uuid":"u-1","email":"e@x"}}' > "$tmpdir/profile.cache"
-    log_stdin_snapshot sid1 12 1787119200 39 1787155200
-    log_stdin_snapshot sid1 12 1787119200 39 1787155200   # same pair: no row
-    log_stdin_snapshot sid2 13 1787119200 39 1787155200   # changed, but < 60s: no row
+    # windows must be LIVE, not a frozen epoch: an expired window is never
+    # logged, so a hardcoded one turns this test into a time bomb.
+    five=$(( $(date +%s) + 3600 )); seven=$(( $(date +%s) + 86400 ))
+    log_stdin_snapshot sid1 12 "$five" 39 "$seven"
+    log_stdin_snapshot sid1 12 "$five" 39 "$seven"   # same pair: no row
+    log_stdin_snapshot sid2 13 "$five" 39 "$seven"   # changed, but < 60s: no row
     [ "$(wc -l < "$tmpdir/usage.jsonl")" -eq 1 ]
     row=$(cat "$tmpdir/usage.jsonl")
     [ "$(echo "$row" | jq -r .source)" = "stdin" ]
     [ "$(echo "$row" | jq -r .user.uuid)" = "u-1" ]
-    [ "$(echo "$row" | jq -r .five_hour.resets_at)" = "2026-08-19T06:00:00Z" ]
+    [ "$(echo "$row" | jq -r .five_hour.resets_at)" = "$(date -u -d "@$five" '+%Y-%m-%dT%H:%M:%SZ')" ]
     [ "$(echo "$row" | jq -r .seven_day.utilization)" = "39" ]
     # older than the floor: the changed pair lands
     printf '12|39 %s\n' "$(( $(date +%s) - 120 ))" > "$tmpdir/stdin_seen"
-    log_stdin_snapshot sid2 13 1787119200 39 1787155200
+    log_stdin_snapshot sid2 13 "$five" 39 "$seven"
     [ "$(wc -l < "$tmpdir/usage.jsonl")" -eq 2 ]
     # the week strip reads them like fetched samples (same window key)
     rm -rf "$tmpdir"
@@ -984,18 +1272,45 @@ _seed_week_store() {
     rm -rf "$tmpdir"
 }
 
+@test "log_stdin_snapshot: an EXPIRED window is never a sample" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    printf '{"account":{"uuid":"u-1"}}' > "$tmpdir/profile.cache"
+    # An idle session — or a hand-piped fixture — reports the window it last
+    # saw. Logged, that pair reads as a huge drop and the next real sample
+    # re-climbs it: the learner counts the same burn twice. Measured on a
+    # real log, two such rows inflated a 50-point week to 146.
+    old5=$(( $(date +%s) - 7200 )); old7=$(( $(date +%s) - 3600 ))
+    log_stdin_snapshot stale 4 "$old5" 4 "$old7"
+    [ ! -f "$tmpdir/usage.jsonl" ] || [ "$(wc -l < "$tmpdir/usage.jsonl")" -eq 0 ]
+    # a live 5h window with an expired 7d one is still not a sample
+    log_stdin_snapshot stale 4 "$(( $(date +%s) + 3600 ))" 4 "$old7"
+    [ ! -f "$tmpdir/usage.jsonl" ] || [ "$(wc -l < "$tmpdir/usage.jsonl")" -eq 0 ]
+    # both live: logged
+    log_stdin_snapshot live 4 "$(( $(date +%s) + 3600 ))" 4 "$(( $(date +%s) + 86400 ))"
+    [ "$(wc -l < "$tmpdir/usage.jsonl")" -eq 1 ]
+    rm -rf "$tmpdir"
+}
+
 @test "log_stdin_snapshot: a stdin pair behind the cache in the same window is a stale session — not logged" {
     tmpdir=$(mktemp -d)
     CLAUDE_ACCOUNT_DIR="$tmpdir"
     printf '{"account":{"uuid":"u-1"}}' > "$tmpdir/profile.cache"
-    printf '{"five_hour":{"utilization":21,"resets_at":"2026-08-19T11:00:00.2+00:00"},"seven_day":{"utilization":43,"resets_at":"2026-08-19T16:00:00.1+00:00"},"fetched_at":1}' > "$tmpdir/usage.cache"
-    log_stdin_snapshot s 8 1787137200 41 1787155200      # same windows, behind the cache
+    five=$(( $(date +%s) + 3600 )); seven=$(( $(date +%s) + 86400 ))
+    printf '{"five_hour":{"utilization":21,"resets_at":"%s"},"seven_day":{"utilization":43,"resets_at":"%s"},"fetched_at":1}' \
+        "$(date -u -d "@$five" '+%Y-%m-%dT%H:%M:%S.2+00:00')" \
+        "$(date -u -d "@$seven" '+%Y-%m-%dT%H:%M:%S.1+00:00')" > "$tmpdir/usage.cache"
+    log_stdin_snapshot s 8 "$five" 41 "$seven"      # same windows, behind the cache
     [ ! -f "$tmpdir/usage.jsonl" ] || [ "$(wc -l < "$tmpdir/usage.jsonl")" -eq 0 ]
-    log_stdin_snapshot s 23 1787137200 43 1787155200     # ahead: logged
+    log_stdin_snapshot s 23 "$five" 43 "$seven"     # ahead: logged
     [ "$(wc -l < "$tmpdir/usage.jsonl")" -eq 1 ]
     # a NEWER 5h window is logged even though its number is lower
     printf '12|39 0\n' > "$tmpdir/stdin_seen"
-    log_stdin_snapshot s 2 1787155200 43 1787155200
+    log_stdin_snapshot s 2 "$seven" 43 "$seven"
+    [ "$(wc -l < "$tmpdir/usage.jsonl")" -eq 2 ]
+    # ... but an OLDER 5h window than the cache is a stale session, not news
+    printf '12|39 0\n' > "$tmpdir/stdin_seen"
+    log_stdin_snapshot s 99 "$(( five - 18000 ))" 43 "$seven"
     [ "$(wc -l < "$tmpdir/usage.jsonl")" -eq 2 ]
     rm -rf "$tmpdir"
 }

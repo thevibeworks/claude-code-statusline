@@ -2,6 +2,81 @@
 
 ## Unreleased
 
+## v0.29.0 — 2026-08-19 — the store learns to count
+
+**Fixed: burn was counted wrong, by a factor of three.** The weekday
+profile summed raw positive deltas of `seven_day.utilization`. Every
+stale reading — an idle session reporting the numbers it last saw — was
+therefore refunded and then re-earned: measured against a real 23 MiB
+log, 146 points of "burn" for a week that actually moved 50. The
+learner now walks a **monotone envelope**, crediting only the rise of
+the running max, and the forecast that reads it stopped inventing
+dry-outs that were never coming.
+
+**Telling a stale reading from a real reset needs two signals, because
+`resets_at` cannot.** It looks like a window key and for 5h it behaves
+like one, but on 2026-08-17 an account's `seven_day.utilization` went
+`100.0 → 0.0` and stayed there, sampled by two independent writers,
+with `seven_day.resets_at` unchanged: the weekly counter can be reset
+out of band. A newer key is certainly a new window; an unchanged one
+proves nothing. The envelope re-baselines only on a drop that is both
+sustained (≥ 2 consecutive samples) and deep (≥ 15 points) — the
+failure mode is a bounded under-count, which costs a missed warning
+where the over-count cost a false alarm on every render.
+
+**Fixed: an expired window is never a sample.** A session idle across a
+boundary — or a fixture piped in by hand — reports the window it last
+saw. Logged, that pair read as a 49-point drop that the next real
+sample re-climbed. Rejected now on its own merits: a window whose reset
+is already behind us cannot be the current one.
+
+**Fixed: 26% of the log was markers for windows that never rolled.**
+`session_start`/`session_end` compared `resets_at` as a raw string, and
+the server jitters it (`06:00:00.515434` vs `06:00:00.087190`, and
+`05:59:59`/`06:00:00` straddling one boundary), so nearly every fetch
+wrote a marker pair — 24,747 of them in a log holding 25,004 real
+samples, eaten straight out of the 32 MiB rotation cap. The boundary
+test now compares window *instants* with 300 s of slack and requires
+the new window to be newer.
+
+**Fixed: the week ledger drew every account at once.** `week_scan` did
+not partition by `user.uuid`, which the state-dir contract has required
+since v2. The default dir predates account scoping and a real one holds
+a dozen uuids.
+
+**New: the model-scoped weekly cap gets the learned forecast.** `fb
+caps ~Mon 14:00, 2d before reset` — where linear pace is structurally
+silent, because 45% with four days left *is* a calm straight line. A
+week whose Tuesday burns 39%/day and whose Sunday burns 6%/day is not a
+line. One walker (`_profile_walk`) now serves both the account 7d and
+the scoped cap, so the two forecasts cannot disagree about physics, and
+the scoped one only ever speaks for the scope its profile was built
+from (`scoped_name`) — which model carries the cap is Anthropic's
+choice and has changed before.
+
+**New: the statusline records what a percentage costs.** Claude Code
+hands us cost, tokens, context size, effort and CLI version on stdin at
+every render; until now they were read for the badges and thrown away.
+Each `usage` record now carries a `session` block, and `forecast.cache`
+gains a `cost` object pricing a 7d point in dollars — the join no
+single source can make, since the quota API reports percent and never
+dollars on a subscription plan (`limit_dollars` is null) while the
+transcripts report dollars and never percent. `report` shows the price
+and the spend. The denominator is **paired**: only points observed by a
+sample that also carried a dollar figure, because the log predates the
+`session` block by months and dividing by all of it would price a week
+at pennies.
+
+**Fixed: three test fixtures raced the clock.** The fixture reads
+`date`, the function reads it again, and one tick between them flips
+`2h30m` to `2h29m`. Reproduced once in ten full runs; +30 s of slack
+absorbs the tick without weakening the assertion.
+
+The contract doc gains a **Reading the quota series** section: the four
+properties above, plus the two things the series cannot tell you —
+gaps are not idleness (samples exist only while a statusline renders),
+and `model` is the logging session's, not the spender's.
+
 ## v0.28.0 — 2026-08-19 — the notice engine
 
 **New: a notice engine behind rows 2 and 3.** The advisor was one

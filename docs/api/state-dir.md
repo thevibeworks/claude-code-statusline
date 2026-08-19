@@ -7,7 +7,7 @@ read concurrently.
 
 - Contract version: **2** (bump on any breaking layout/field change; this
   file is the changelog)
-- Synced with: statusline.sh v0.22.0
+- Synced with: statusline.sh v0.29.0
 - Permissions: the script runs under `umask 077` — files are owner-only.
   Caches hold account PII (email, uuid, org names).
 
@@ -105,7 +105,11 @@ Output of the hourly usage.jsonl scan (EWMA half-life 14 days):
 {"computed_at": 1785000000, "days_history": 21,
  "recent_24h": 14.20, "recent_48h": 22.10,
  "pct_per_window": 11.83,
- "weekday_profile": {"0": 5.1, "1": 27.3, "…": 0, "6": -1}}
+ "weekday_profile": {"0": 5.1, "1": 27.3, "…": 0, "6": -1},
+ "scoped_name": "Fable", "scoped_recent_24h": 76.00,
+ "scoped_profile": {"0": 5.7, "1": 23.5, "…": 0, "6": -1},
+ "cost": {"usd_24h": 12.40, "usd_7d": 84.10,
+          "usd_per_pct": 1.6820, "paired_pct": 50.0}}
 ```
 
 `weekday_profile` keys are days-of-week `0`=Sun..`6`=Sat, values are
@@ -115,6 +119,38 @@ points consumed by one fully burned 5h window, mined from paired samples
 inside the same 5h window; `-1` until enough paired burn has been
 observed (>= half a window). Snapshots are partitioned by `account.uuid`
 before aggregation.
+
+`scoped_*` mirror the all-model fields for the `weekly_scoped` limit —
+the per-model weekly cap, `Fable` at time of writing. `scoped_name` is
+the scope the profile is ABOUT (`null` while unobserved); burn is
+tracked per scope name so a change in which model is capped cannot blend
+two series into one profile.
+
+Both profiles use the burn accounting described under [Reading the
+quota series](#reading-the-quota-series) — envelope rise, not raw
+positive deltas, and both are walked by the same simulator, so the
+account's forecast and the model's cannot disagree about physics.
+
+`cost` prices the quota. `usd_per_pct` is what one 7d percentage point
+costs this account, and it is the join no single source can make: the
+quota API reports percent and never dollars on a subscription plan
+(`limit_dollars` is null), the transcripts report dollars and never
+percent. Only a sample carrying both can price a point.
+
+Its denominator is **paired**, not total: `paired_pct` counts only the
+7d points observed by a sample that also carried `session.cost_usd`. A
+log that predates the `session` block by months holds far more points
+than dollars, and dividing by all of them would price a week at pennies.
+`usd_per_pct` is `-1` until at least 5 paired points exist — a price
+mined from two samples is a rumour, not a rate.
+
+`usd_24h` / `usd_7d` are summed per session as the rise of each
+session's own cumulative `cost_usd`, never as deltas of the raw column
+(see the aggregation rule under usage.jsonl).
+
+A reader must not attribute `scoped_profile` to a model other than
+`scoped_name`: which model carries the weekly cap is Anthropic's choice
+and has changed before, and one model's weekday shape is not another's.
 
 ### week.cache
 
@@ -137,7 +173,10 @@ samples keyed by `five_hour.resets_at` rounded to 5 min). `five`: per
 half hour of the current 5h window, the 5h points added (each positive
 step between consecutive samples credited to the later sample's cell).
 Rebuilt when either period, the signature, or a 5-min TTL disagrees;
-safe to delete.
+safe to delete. Partitioned by `user.uuid` against `profile.cache` —
+the default (untagged) dir predates account scoping and a real one holds
+a dozen uuids. Note the cell math rounds the window key to 5 min but
+floors the slot, so an unaligned period can draw a window one cell left.
 
 ### usage.jsonl
 
@@ -146,8 +185,19 @@ Append-only, one JSON object per line, three event types:
 | `type` | Emitted | Payload |
 |--------|---------|---------|
 | `usage` | every successful usage fetch; and (`source:"stdin"`) every changed 5h/7d pair Claude Code hands the statusline on stdin, >= 60 s apart — same window keys, `user.uuid` from profile.cache, no `organization`/`extra_usage`/`limits` | `session_id`, `timestamp`, `user{email,name,uuid,…}`, `organization{…}`, `five_hour`, `seven_day`, `seven_day_opus`, `extra_usage`, `limits[]`, `model`, `predicted_end` |
-| `session_start` | first fetch of a new 5h window | `session_id`, `timestamp`, `five_hour_window_end`, `seven_day_window_end` |
+| `session_start` | first fetch of a genuinely newer 5h window | `session_id`, `timestamp`, `five_hour_window_end`, `seven_day_window_end` |
 | `session_end` | 5h window rolled while a different session was last | `session_id`, `timestamp` |
+
+**Markers in logs written before this fix are noise.** The boundary test
+compared `resets_at` as a raw string, and the server jitters it
+(`06:00:00.515434` vs `06:00:00.087190`, and `05:59:59` vs `06:00:00`
+straddling one boundary), so nearly every fetch wrote a
+`session_end`/`session_start` pair: 26% of a measured 23 MiB log was
+markers for windows that never rolled — history the 32 MiB rotation cap
+then threw away. The test now compares window *instants* with 300 s of
+slack and requires the new window to be NEWER, so a stale sample opens
+nothing. Readers should treat a marker density near one-per-sample as a
+pre-fix log and ignore the markers.
 
 Since v0.20.0 each `usage` line also records what the learner will need
 later (learning lags logging — a field absent today is a pattern that
@@ -156,8 +206,32 @@ cannot be learned next month):
 | Field | Type | Meaning |
 |-------|------|---------|
 | `limits[]` | array | scoped limits verbatim (per-model weekly caps) |
-| `model` | string \| null | model id active in the logging session |
+| `model` | string \| null | model id active in the logging session, `[1m]` suffix included |
 | `predicted_end` | int \| null | the learned walk's end-of-week projection at sample time; null until the profile is warm. Compare against the window's observed final to measure forecast accuracy. |
+
+And a `session` object — the half of the picture `/api/oauth/usage` does
+not have. The quota endpoint answers "how full is the account" in
+percent and nothing else (`limit_dollars` is null on subscription
+plans); Claude Code hands the rest to the statusline on stdin, on every
+render, for free. Both writers (`api` and `source:"stdin"`) carry it;
+`null` when there is no stdin context (subcommands, tests).
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `session.cost_usd` | number | `cost.total_cost_usd` — **cumulative for that session** |
+| `session.dur_ms` / `session.api_ms` | int | wall and API duration, cumulative per session |
+| `session.lines_add` / `session.lines_del` | int | code written, cumulative per session |
+| `session.ctx_in` | int | `context_window.total_input_tokens` at sample time — a level, not a flow |
+| `session.ctx_size` | int | the session's context window (200k / 1M) |
+| `session.effort` | string \| null | reasoning effort (`low`…`max`) |
+| `session.fast` | bool | fast mode |
+| `session.cli` | string \| null | Claude Code version, so a schema change is datable |
+
+**Aggregating cost.** `cost_usd` is per session and cumulative, and
+consecutive samples routinely come from different sessions. Account
+spend over a period is the sum over `session_id` of each session's max
+`cost_usd` — never the sum, and never the delta, of the raw column.
+A session that spans a period boundary is attributed by its samples.
 
 Rotation keeps exactly one `.1` backup; readers wanting full history read
 `usage.jsonl.1` then `usage.jsonl`.
@@ -165,6 +239,54 @@ Rotation keeps exactly one `.1` backup; readers wanting full history read
 The `report` subcommand (`statusline.sh report [--days N]`) is the
 reference consumer: it replays this log and ledgers what each closed
 window expired unused.
+
+## Reading the quota series
+
+Four properties of the raw series that a naive reader gets wrong. Every
+one of them was measured against a real 23 MiB log, and each cost the
+forecast an order of magnitude before it was fixed.
+
+**1. `resets_at` is not a window-instance key for 7d.** It looks like
+one, and for 5h it behaves like one. But on 2026-08-17 an account's
+`seven_day.utilization` went `100.0 -> 0.0` and *stayed* there, sampled
+from two independent writers, with `seven_day.resets_at` unchanged at
+the same instant. The weekly counter can be reset out of band (grant,
+plan change, promo) without moving the window. A NEWER key is certainly
+a new window; an unchanged key proves nothing.
+
+**2. Utilization is monotone inside a window; a dip is a stale reading.**
+`rate_limits` on stdin is per session, and an idle session keeps
+reporting what it last saw. A sample below the running max is almost
+always that, not a refund. Burn is therefore the rise of a monotone
+ENVELOPE, not the sum of positive deltas — the naive sum re-earns every
+dip and read 146 points of burn against a real 50-point week.
+
+**3. Telling (2) from (1) needs two signals.** A stale reading is one
+sample and a small step back; a real reset sticks and is a long fall.
+The rule here: re-baseline the envelope only when the drop is both
+sustained (>= 2 consecutive samples below the envelope) and deep (>= 15
+points). The failure mode is a bounded under-count, which costs a missed
+warning — the over-count cost a false alarm on every render.
+
+**4. `source:"stdin"` samples are integer-truncated.** Claude Code sends
+`used_percentage` as an int; the API sends `utilization` as a float.
+Mixing them puts a +-1 sawtooth in the series, which (2) also absorbs.
+stdin samples additionally carry no `limits[]`, `extra_usage` or
+`organization` — the scoped (per-model) series has holes wherever a
+stdin sample is the only one in an interval.
+
+Two more things the series cannot tell you, worth stating so nobody
+infers them:
+
+- **Gaps are not idleness.** Samples exist only while a statusline
+  renders. A multi-hour gap means no session was running *on this
+  machine* — burn from other devices or claude.ai lands as a step at the
+  next sample, attributed to the wrong time.
+- **`model` is the logging session's, not the spender's.** Quota is
+  account-wide and many sessions share it; the model on a record is
+  whichever session happened to win the fetch. Per-model attribution
+  comes from `limits[]` (the scoped cap) or from Claude Code's own
+  transcripts, never from this field.
 
 ## Consumer rules
 
