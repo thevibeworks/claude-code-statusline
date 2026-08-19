@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## v0.27.0 — 2026-08-19 — row 2 mirrors line 1
+
+**The advisor moves up beside the ledgers.** Row 2 now mirrors line 1:
+advice on the left, evidence on the right, the gap between them
+absorbing the width, the right edge shared with line 1 —
+`- budget ~3x5h left · even 20%/win   5h ▂▅█▃▮▯▯▯▯▯ 0.9x @23:00  7d … 0.7x @Wed 09:00`.
+The sentence is compacted to the room line 1 leaves: weakest joint
+first (`;` the second voice, then `·` the tail clause, then `,` a
+sub-fact), the leading fact last — `! 5h caps ~05:18, 52m before reset;
+7d dry ~Thu 09:00 · then hard stop` → `! 5h caps ~05:18, 52m before
+reset` → `! 5h caps ~05:18`. A calm frame is two rows, not three. Under
+16 columns of room (narrow terminals) the rows hang as the v0.26.0 block
+instead: ledgers meeting line 1's edge, the full sentence flush-left
+beneath. Hero, README and the Pages demo follow.
+
 ## v0.26.0 — 2026-08-19 — the rows hang where they belong
 
 **Fixed: the rows beneath line 1 finally land under the badges.** Claude

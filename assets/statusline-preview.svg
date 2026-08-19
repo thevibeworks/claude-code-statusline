@@ -1,6 +1,6 @@
-<svg width="1400" height="430" viewBox="0 0 1400 430" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+<svg width="1400" height="400" viewBox="0 0 1400 400" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
   <title id="title">Claude Code Statusline preview</title>
-  <desc id="desc">Terminal-style preview of Claude Code Statusline: line 1 with project, branch, activity, cost, model, context, per-model weekly quota, tier, 5h and 7d windows; beneath it the 5h and 7d ledgers with pace and reset, and the budget line. Warm colors mark pressure; identity colors mark the model; everything else is neutral.</desc>
+  <desc id="desc">Terminal-style preview of Claude Code Statusline: line 1 with project, branch, trace chip, activity, cost, model, context, per-model weekly quota, tier, 5h and 7d windows; beneath it the advisor's budget line on the left and the 5h and 7d ledgers with pace and reset on the right. Warm colors mark pressure; identity colors mark the model; everything else is neutral.</desc>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#111827"/>
@@ -11,8 +11,8 @@
     </filter>
   </defs>
 
-  <rect width="1400" height="430" rx="28" fill="#f7f7f5"/>
-  <rect x="70" y="54" width="1260" height="322" rx="18" fill="url(#bg)" filter="url(#shadow)"/>
+  <rect width="1400" height="400" rx="28" fill="#f7f7f5"/>
+  <rect x="70" y="54" width="1260" height="292" rx="18" fill="url(#bg)" filter="url(#shadow)"/>
 
   <rect x="70" y="54" width="1260" height="46" rx="18" fill="#1f2937"/>
   <rect x="70" y="82" width="1260" height="18" fill="#1f2937"/>
@@ -22,15 +22,13 @@
   <text x="700" y="82" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" fill="#9ca3af">claude-code-statusline</text>
 
   <!-- line 1: identity left, numbers right. Neutral left; pressure lives right. -->
-  <text x="112" y="152" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18"><tspan fill="#94a3b8">myproject</tspan><tspan fill="#e6edf3"> (main*)</tspan>  <tspan fill="#22c55e">+84</tspan><tspan fill="#64748b">/</tspan><tspan fill="#ef4444">-14</tspan> <tspan fill="#94a3b8">8m $6.72</tspan></text>
-  <text x="1290" y="152" xml:space="preserve" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18"><tspan fill="#f87171">fabl5[1m]</tspan><tspan fill="#94a3b8">[</tspan><tspan fill="#22c55e">█</tspan><tspan fill="#64748b">░░░░░</tspan><tspan fill="#22c55e">26%</tspan><tspan fill="#94a3b8">]</tspan> <tspan fill="#94a3b8">fb</tspan><tspan fill="#eab308">[67%]</tspan> <tspan fill="#94a3b8">[</tspan><tspan fill="#f9fafb" font-weight="700">MAX</tspan><tspan fill="#94a3b8">|you]</tspan> <tspan fill="#94a3b8">5h</tspan><tspan fill="#22c55e">[38%</tspan><tspan fill="#94a3b8">@14:00</tspan><tspan fill="#22c55e">]</tspan> <tspan fill="#94a3b8">7d</tspan><tspan fill="#eab308">[55%</tspan><tspan fill="#94a3b8">@2d</tspan><tspan fill="#eab308">]</tspan></text>
+  <text x="112" y="152" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17"><tspan fill="#94a3b8">myproject</tspan><tspan fill="#e6edf3"> (main*)</tspan><tspan fill="#64748b"> [cctrace]</tspan>  <tspan fill="#22c55e">+84</tspan><tspan fill="#64748b">/</tspan><tspan fill="#ef4444">-14</tspan> <tspan fill="#94a3b8">8m $6.72</tspan></text>
+  <text x="1290" y="152" xml:space="preserve" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17"><tspan fill="#f87171">fabl5[1m]</tspan><tspan fill="#94a3b8">[</tspan><tspan fill="#22c55e">█</tspan><tspan fill="#64748b">░░░░░</tspan><tspan fill="#22c55e">26%</tspan><tspan fill="#94a3b8">]</tspan> <tspan fill="#94a3b8">fb</tspan><tspan fill="#eab308">[67%]</tspan> <tspan fill="#94a3b8">[</tspan><tspan fill="#f9fafb" font-weight="700">MAX</tspan><tspan fill="#94a3b8">|you]</tspan> <tspan fill="#94a3b8">5h</tspan><tspan fill="#22c55e">[38%</tspan><tspan fill="#94a3b8">@14:00</tspan><tspan fill="#22c55e">]</tspan> <tspan fill="#94a3b8">7d</tspan><tspan fill="#eab308">[55%</tspan><tspan fill="#94a3b8">@2d</tspan><tspan fill="#eab308">]</tspan></text>
 
-  <!-- row 2: the ledgers. 5h = this sitting as half hours, 7d = the week as 5h windows; pace + reset at each right edge. -->
-  <text x="1290" y="198" xml:space="preserve" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18"><tspan fill="#94a3b8">5h </tspan><tspan fill="#22c55e">▂▅█▃</tspan><tspan fill="#f9fafb" font-weight="700">▮</tspan><tspan fill="#64748b">▯▯▯▯▯</tspan><tspan fill="#94a3b8"> 0.8x @14:00</tspan>  <tspan fill="#94a3b8">7d </tspan><tspan fill="#eab308">▅▁▂ ▃▅ˍ▃▅ ▃▃▁▂▁ ▅ˍ▂▁▁ ˍˍˍ▃▅ ▆▆</tspan><tspan fill="#f9fafb" font-weight="700">▮</tspan><tspan fill="#64748b">▯▯▯▯▯▯▯▯</tspan><tspan fill="#94a3b8"> 0.7x @Wed 09:00</tspan></text>
+  <!-- row 2 mirrors line 1: advice left (compacted to the room), evidence right — the 5h + 7d ledgers with pace + reset. -->
+  <text x="112" y="196" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17"><tspan fill="#64748b">- budget ~10x5h left</tspan></text>
+  <text x="1290" y="196" xml:space="preserve" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17"><tspan fill="#94a3b8">5h </tspan><tspan fill="#22c55e">▂▅█▃</tspan><tspan fill="#f9fafb" font-weight="700">▮</tspan><tspan fill="#64748b">▯▯▯▯▯</tspan><tspan fill="#94a3b8"> 0.8x @14:00</tspan>  <tspan fill="#94a3b8">7d </tspan><tspan fill="#eab308">▅▁▂ ▃▅ˍ▃▅ ▃▃▁▂▁ ▅ˍ▂▁▁ ˍˍˍ▃▅ ▆▆</tspan><tspan fill="#f9fafb" font-weight="700">▮</tspan><tspan fill="#64748b">▯▯▯▯▯▯▯▯</tspan><tspan fill="#94a3b8"> 0.7x @Wed 09:00</tspan></text>
 
-  <!-- row 3: the advisor's calm budget line, flush-left with the ledgers (one block under the badges). -->
-  <text x="1290" y="236" xml:space="preserve" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18"><tspan fill="#64748b">- budget ~10x5h left · even 4.5%/win · heading ~72%                                  </tspan></text>
-
-  <text x="112" y="318" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="17" fill="#9ca3af">One bash file. Line 1: how much of each window is left. Beneath it: where it went, and what to do about it.</text>
-  <text x="112" y="344" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="15" fill="#6b7280">5h / 7d quota with wall-clock resets · per-model weekly limit · context + cost · ledgers with pace · advisor · no daemon, no telemetry</text>
+  <text x="112" y="286" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="17" fill="#9ca3af">One bash file. Line 1: how much of each window is left. Row 2: what to do about it, and where it went.</text>
+  <text x="112" y="312" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="15" fill="#6b7280">5h / 7d quota with wall-clock resets · per-model weekly limit · context + cost · ledgers with pace · advisor · no daemon, no telemetry</text>
 </svg>

@@ -246,9 +246,21 @@ echo '{"model":{"id":"claude-opus-4-8[1m]","display_name":"Opus"},"cwd":"/tmp/pr
 ## Week row
 
 Line 1 says how much of each window is left; the week row says where it
-went — one grammar at two scales, directly under the badges. The rows
-beneath line 1 hang as one block: its right edge meets the edge the
-stats cluster ends at, and every row in it shares one left edge:
+went — one grammar at two scales, directly under the badges. Row 2
+mirrors line 1: advice on the left, evidence on the right, the gap
+between them absorbing the width, the right edge shared with line 1:
+
+```text
+proj (main*)       +84/-14 8m $6.72 fabl5[1m][██░░42%] fb[66%] [MAX|@work] 5h[38%@23:00] 7d[39%]
+- budget ~3x5h left · even 20%/win   5h ▂▅█▃▮▯▯▯▯▯ 0.9x @23:00  7d ▅▁▂ ▃▅ˍ▃▅ ▃▃▁▂▁ ▅ˍ▂▁▁ ˍˍˍ▃▅ ˍˍˍ▅ ▆▆ˍ▂▮▯▯ 0.7x @Wed 09:00
+```
+
+The advisor sentence is compacted to the room line 1 leaves beside the
+ledgers — weakest joint first (`;` the second voice, then `·` the tail
+clause, then `,` a sub-fact), the leading fact last — so a calm frame is
+two rows, not three. When fewer than 16 columns are left (narrow
+terminals) the rows hang as a block instead: the ledgers meet line 1's
+edge and the full sentence sits flush-left beneath them:
 
 ```text
 proj (main*)   fabl5[1m][██░░42%] fb[66%] [MAX|@work] 5h[38%@23:00] 7d[39%]
@@ -318,11 +330,13 @@ ways, with a voice per direction:
 
 Quiet means no row at all: a healthy session stays one line. Alone, the
 row right-aligns to the edge the stats cluster ends at, so the advice
-sits directly beneath the badges it interprets; under the
-[week row](#week-row) it shares that row's left edge instead (evidence,
-then interpretation, one block). Claude Code trims every row it renders,
-so the padding rides behind a zero-width reset code — a bare-space row
-would land flush-left.
+sits directly beneath the badges it interprets. With the
+[week row](#week-row) showing it moves onto that row's left side,
+compacted to fit (row 2 then mirrors line 1: advice left, evidence
+right); only when no honest room is left does it drop to a third row,
+flush-left under the ledgers. Claude Code trims every row it renders,
+so any leading padding rides behind a zero-width reset code — a
+bare-space row would land flush-left.
 
 ```text
 proj (main*)   fabl5[1m][██░░42%] fb[86%] [MAX|@work] 5h[95%@06:00] 7d[44%@07:00]

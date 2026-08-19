@@ -6,19 +6,21 @@ change breaks a rule, the rule wins or the rule changes here first.
 ## Rows
 
 ```
-line 1   where · what · how much is left            (always)
-row 2    where it went: 5h + 7d ledgers             (--week, auto = once there is a past)
-row 3    what to do about it: the advisor           (--advisor, auto = pressure or surplus)
+line 1   where · what · how much is left             (always)
+row 2    what to do about it  |  where it went        (advisor left, 5h + 7d ledgers right)
+row 3    the advisor, full, when row 2 has no room   (narrow terminals only)
 ```
 
-Evidence above interpretation. Rows 2–3 hang as one block under the
-badges: the block's right edge is line 1's edge (never `COLUMNS`), every
-row in it shares one left edge — the widest row touches the badges, the
-rest read flush-left beside it. A lone row is the block. Line 1 must fit:
-Claude Code truncates or wraps a wider row and every anchor beneath it
-goes wrong. Degrade in value order before overflowing — trace URL →
-`[cctrace]` OSC 8 link, then the path/stats gap → 1. Quiet is a row that
-does not exist.
+Row 2 mirrors line 1: advice left, evidence right, the gap absorbs the
+width, the right edge is line 1's edge (never `COLUMNS`). The advisor
+sentence compacts to the room the ledgers leave — weakest joint first
+(`;` voice, `·` clause, `,` sub-fact), leading fact last; under 16
+columns it drops to row 3 instead, and the rows hang as a block: the
+widest meets line 1's edge, the rest share its left edge. A lone row is
+the block. Line 1 must fit: Claude Code truncates or wraps a wider row
+and every anchor beneath it goes wrong. Degrade in value order before
+overflowing — trace URL → `[cctrace]` OSC 8 link, then the path/stats
+gap → 1. Quiet is a row that does not exist.
 
 Claude Code trims each row it renders (`.trim()` per line, 2.1.234), so
 a block's padding rides behind a zero-width `\e[0m`: not whitespace, so
@@ -95,10 +97,11 @@ colored. `▮` moves at cell boundaries; every other cell is history — the
 row is freeze-safe by construction. Same glyphs, same math as
 [ccpace](https://github.com/thevibeworks/ccpace)'s ledger.
 
-## Advisor (row 3)
+## Advisor (row 2 left, or row 3)
 
 Speaks when line 1's numbers don't mean what they look like, and — while
-the ledgers are showing — says the calm numbers they imply. Three voices,
+the ledgers are showing — says the calm numbers they imply, on their
+left. Three voices,
 one hue each: `!` pressure (yellow/red), `+` opportunity (cyan), `-`
 budget (dim: windows left · even · heading). Every clause derives from a badge
 already shown; max two clauses; the 7d window gets one voice per frame.

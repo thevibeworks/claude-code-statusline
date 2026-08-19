@@ -54,8 +54,8 @@
   .term:hover .bar i:nth-child(3) { background: #28c840; }
   .term .bar span { margin-left: auto; color: var(--dim2); font-size: 12px; font-family: var(--mono); }
   .term .screen {
-    padding: 18px 18px 14px; font-family: var(--mono); font-size: 14.5px;
-    white-space: pre; overflow-x: auto; min-height: 4.9em;
+    padding: 18px 18px 14px; font-family: var(--mono); font-size: 12.5px;
+    white-space: pre; overflow-x: auto; min-height: 3.6em;
   }
   .term .screen .w2 { color: #eceef1; font-weight: bold; }
   .term .caption {
@@ -130,7 +130,7 @@
   <div class="wrap">
     <h1>Claude Code Statusline</h1>
     <p class="sub">Quota, context, cost, model, and git — live in your Claude Code prompt.
-    Line 1: how much of each window is left. Beneath it: where it went (5h + 7d ledgers with pace), and what to do about it.</p>
+    Line 1: how much of each window is left. Row 2: what to do about it, and where it went (5h + 7d ledgers with pace).</p>
     <p class="facts">one bash file &middot; 383 tests &middot; deps: jq + curl &middot; no daemon &middot; no telemetry</p>
 
     <div class="term">
@@ -168,7 +168,7 @@
       <tr><td><span class="d">7d</span> <span class="y">▅▁▂ ▃▅ˍ▃▅ … ▆▆</span><span class="w">▮</span><span class="d2">▯▯▯▯</span> <span class="d">0.7x @Wed 09:00</span></td>
           <td class="desc"><b>7d ledger.</b> The week as its 5h windows (34 cells, oldest left, a gap at each local midnight in history only), height = the 7d points each burned; <code>×</code> where the pool runs dry at your pace. Reconstructed from your own usage log — the same history <a href="https://github.com/thevibeworks/ccpace">ccpace</a> reads.</td></tr>
       <tr><td><span class="d2">- budget ~10x5h left · even 4.5%/win · heading ~72%</span></td>
-          <td class="desc"><b>Advisor.</b> Under the ledgers: the calm numbers they imply (runway, what even looks like, where you land). Under pressure or surplus it speaks instead — <code>! 5h caps ~05:18, 42m before reset</code>, <code>+ 7d resets @07:00, 56% unused · spend it</code>. Rows hang as one block under the badges; a quiet row is no row.</td></tr>
+          <td class="desc"><b>Advisor.</b> Left of the ledgers, compacted to the room line 1 leaves (weakest joint first: <code>;</code> voice, <code>·</code> clause, <code>,</code> sub-fact): the calm numbers the ledgers imply, or under pressure / surplus — <code>! 5h caps ~05:18, 42m before reset</code>, <code>+ 7d resets @07:00, 56% unused · spend it</code>. Row 2 mirrors line 1: advice left, evidence right. No room (narrow terminal) drops it to a third row; a quiet row is no row.</td></tr>
       <tr><td><span class="mono"><span class="br">≡!419k</span>&nbsp; <span class="y">≡~</span>&nbsp; <span class="d">!net</span></span></td>
           <td class="desc"><b>Truth badges.</b> <code>≡!419k</code> — prompt-cache break on resume (bold red past 200k); <code>≡~</code> — rebuilding; stale-data markers say <i>why</i> a fetch failed. Silent while healthy.</td></tr>
     </table>
@@ -225,7 +225,7 @@
   // s() = plain segment, f() = flash segment (reverse video, pop-in).
   function s(c, t) { return '<span class="' + c + '">' + t + '</span>'; }
   function f(c, t) { return '<span class="' + c + ' flash">' + t + '</span>'; }
-  var P = s('d', 'my-project') + '&nbsp;&nbsp;';
+  var P = s('d', 'my-project') + s('d2', ' [cctrace]') + '&nbsp;&nbsp;';
 
   // Rows beneath line 1 hang as one block: its right edge meets line 1's
   // edge, every row shares one left edge — exactly how the script pads them.
@@ -239,7 +239,7 @@
   var frames = [
     { d: 2200, c: 'session starts — fresh context, quota from the shared account cache',
       h: P + s('w','fabl5[1m]') + s('d','xh') + s('g','[░░░░░░0%]') + ' ' + s('d','fb') + s('y','[64%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[38%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[55%') + s('d','@2d') + s('y',']') },
-    { d: 3400, c: 'the ledgers appear — this sitting as half hours, the week as its 5h windows; the budget line rides with them',
+    { d: 3400, c: 'row 2 appears: the budget line left, the ledgers right — this sitting as half hours, the week as its 5h windows',
       h: P + s('dg','+12') + s('d','/') + s('dr','-3') + ' ' + s('d','2m $0.48') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[█░░░░░6%]') + ' ' + s('d','fb') + s('y','[64%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[38%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[55%') + s('d','@2d') + s('y',']'),
       r: [LEDGER, BUDGET] },
     { d: 3000, c: 'refresh changes a value → it flashes the delta for 60s: <b>+.31 cost, +9 context</b>',
@@ -272,14 +272,34 @@
   var meter = document.createElement('div');
   function vis(html) { meter.innerHTML = html; return meter.textContent.length; }
   function pad(n) { return new Array(n + 1).join(' '); }
+  // the script's rule: row 2 mirrors line 1 — advice left, compacted to the
+  // room the ledgers leave (weakest joint first), evidence right; under 16
+  // columns the rows hang as a block instead.
+  function compact(text, avail) {
+    if (avail < 16) return null;
+    var seps = ['; ', ' · ', ', '];
+    for (var i = 0; i < seps.length; i++) {
+      while (text.length > avail && text.indexOf(seps[i]) >= 0) text = text.slice(0, text.lastIndexOf(seps[i]));
+    }
+    if (text.length > avail) text = text.slice(0, avail - 1) + '…';
+    return text;
+  }
   function render(fr) {
     var out = fr.h, rows = fr.r || [];
-    if (rows.length) {
-      var anchor = vis(fr.h), widest = 0;
-      for (var k = 0; k < rows.length; k++) widest = Math.max(widest, vis(rows[k]));
-      var left = Math.max(0, anchor - widest);
-      for (var k2 = 0; k2 < rows.length; k2++) out += '\n' + pad(left) + rows[k2];
+    if (!rows.length) return out;
+    var anchor = vis(fr.h);
+    if (rows.length === 2) {
+      var ledger = rows[0], adviceHtml = rows[1], adviceText = (meter.innerHTML = adviceHtml, meter.textContent);
+      var short = compact(adviceText, anchor - vis(ledger) - 2);
+      if (short !== null) {
+        var cls = /class="([^"]+)"/.exec(adviceHtml)[1];
+        return out + '\n' + s(cls, short) + pad(anchor - vis(ledger) - short.length) + ledger;
+      }
     }
+    var widest = 0;
+    for (var k = 0; k < rows.length; k++) widest = Math.max(widest, vis(rows[k]));
+    var left = Math.max(0, anchor - widest);
+    for (var k2 = 0; k2 < rows.length; k2++) out += '\n' + pad(left) + rows[k2];
     return out;
   }
 
