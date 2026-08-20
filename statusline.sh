@@ -78,6 +78,16 @@ ADVISOR_UNDERUSE_MIN_5H=25       # underuse advice only in an engaged session (5
 # font tofus it.
 CACHE_GLYPH="${CACHE_GLYPH:-≡}"
 
+# Multiplication sign for the ledger rows' two factors: the folded-future
+# count (`...▯5h✕28`) and the pace (`0.6✕`). NOT × (U+00D7) — that glyph is
+# already a strip cell, the one the pool will not cover, so reusing it would
+# print `...×5h×28` and make an operator look like a reading. U+2715 is the
+# lighter mark of the pair by design: cells are the ink, the operator is
+# punctuation. eaw=N and not an emoji, so it stays one column and the padding
+# math holds — ╳ (U+2573) is ambiguous-width (double under a CJK locale) and
+# ✖ (U+2716) is Emoji=Yes (colour-font fallback); either would overhang row 2.
+MULT_GLYPH="${MULT_GLYPH:-✕}"
+
 # Unobserved-TTL default for the cache expiry deadline. Mirrors the CLI's own
 # rule (should1hCacheTTL, CC source): claude.ai subscribers in the REPL get
 # cache_control ttl:"1h" (confirmed on every breakpoint in live traces);
@@ -2443,7 +2453,7 @@ run_usage_report() {
             esac
             if [ -n "$ppw" ]; then
                 wins=$(awk -v w="$waste" -v p="$ppw" 'BEGIN{printf "%.1f", w / p}')
-                printf '  %s  used %s%%  expired %s%% (~%s x 5h windows unused)\n' \
+                printf '  %s  used %s%%  expired %s%% (~%s '"$MULT_GLYPH"' 5h windows unused)\n' \
                     "$when" "$used_i" "$waste" "$wins"
             else
                 printf '  %s  used %s%%  expired %s%%\n' "$when" "$used_i" "$waste"
@@ -2623,7 +2633,7 @@ run_session_summary() {
 #   ▮         the window you are in now
 #   ▯         a window still ahead of you
 #   ×         a window the pool will not cover at the current pace
-# Count ▮ and what follows for the budget line's own "~Nx5h left". Past
+# Count ▮ and what follows for the budget line's own "~N✕5h left". Past
 # cells come from usage.jsonl; unknown and idle stay different glyphs
 # because drawing a gap in the record as an idle session is the one lie
 # this row must not tell. The prospective glance beside report's
@@ -2642,8 +2652,9 @@ run_session_summary() {
 #   ▮         the cell you are in now
 #   ▯         a cell still ahead of you (the hollow of ▮: an empty slot)
 #   ×         a cell the pool will not cover at the current pace
-#   ...▯5hx28 the folded future: 28 more 5h slots to the reset, all alike
-#             (× red when the tail projects dry) — live 7d strip only
+#   ...▯5h✕28 the folded future: 28 more 5h slots to the reset, all alike
+#             (× red when the tail projects dry) — live 7d strip only.
+#             ✕ is the operator, × is a cell: the two never mean the same.
 # Unknown and idle are deliberately different glyphs: drawing a gap in the
 # record as an idle session is the one lie this row must not tell.
 # Shared by the live `--week` row and the `week` subcommand, so the two
@@ -2654,7 +2665,7 @@ FIVE_CELLS=5
 FIVE_CELL_SECS=3600
 WEEK_CACHE_TTL_SECS=300
 # The live row compresses the 7d strip's future run: after the now-marker it
-# keeps WEEK_FUTURE_KEEP hollow cells, then folds the rest into `...▯5hx28`
+# keeps WEEK_FUTURE_KEEP hollow cells, then folds the rest into `...▯5h✕28`
 # (count = slots to the reset; × red when the tail projects dry). History is
 # information, the future is all the same cell — but only fold when it hides
 # enough to matter, so a closing week still draws to its edge.
@@ -2799,7 +2810,7 @@ build_ledger_strip() {
     tzoff_s=$(date +%z | awk '{ s=substr($0,1,1)=="-"?-1:1; h=substr($0,2,2)+0; m=substr($0,4,2)+0; print s*(h*3600+m*60) }')
     awk -v w="$cells_n" -v cs="$cell_secs" -v ps="$ps" -v now="$now" -v dry="$dry" \
         -v gaps="$gaps" -v tz="$tzoff_s" -v fut="$fut" \
-        -v minhide="$WEEK_FUTURE_MIN_HIDE" -v unit="$unit" \
+        -v minhide="$WEEK_FUTURE_MIN_HIDE" -v unit="$unit" -v mult="$MULT_GLYPH" \
         -v lo="${span_lo:--1}" -v hi="${span_hi:--1}" -v cells="$cells" \
         -v C_FILL="$fill_color" -v C_DIM="$DIM" -v C_NOW="$BOLD" \
         -v C_DRY="$RED" -v C_OFF="$RESET" '
@@ -2848,20 +2859,20 @@ build_ledger_strip() {
                 # dries before the reset), count = slots left to the reset
                 if (dry >= 0 && dry < w) { tg = "×"; tc = C_DRY }
                 else                     { tg = "▯"; tc = C_DIM }
-                s = s C_OFF tc "..." tg unit "x" (w - lim)
+                s = s C_OFF tc "..." tg unit mult (w - lim)
             }
             print s C_OFF
         }'
 }
 
-# 7d strip: 34 x 5h cells from the period start, day-gapped. $5 is
+# 7d strip: 34 ✕ 5h cells from the period start, day-gapped. $5 is
 # week_history_cells' line; $6 folds the future tail after that many kept
 # cells (the live row passes WEEK_FUTURE_KEEP; the `week` report draws all).
 build_week_strip() {
     build_ledger_strip "$1" "$2" "$3" "$4" "$5" "$WEEK_CELLS" 18000 1 "${6:-0}" 5h
 }
 
-# 5h strip: 5 x 1h cells of the current window. $5 is
+# 5h strip: 5 ✕ 1h cells of the current window. $5 is
 # five_history_cells' line.
 build_five_strip() {
     build_ledger_strip "$1" "$2" "$3" "$4" "$5" "$FIVE_CELLS" "$FIVE_CELL_SECS" 0
@@ -2907,8 +2918,8 @@ five_period_start() {
 }
 
 # Tail of a strip: pace and the axis label of its right end (the reset).
-# pace = used / elapsed-fraction; >1x means the pool caps before the reset.
-# Dim below 1x, pressure-tinted from 1x (status lane), hidden while the
+# pace = used / elapsed-fraction; >1✕ means the pool caps before the reset.
+# Dim below 1✕, pressure-tinted from 1✕ (status lane), hidden while the
 # window is too young to judge (ADVISOR_PACE_MIN_ELAPSED). Reset is wall
 # clock: `@04:00` inside 24h, `@Wed 09:00` beyond — an axis label for a
 # timeline that ends there. $5 = "hide" drops it: when the badge above
@@ -2922,7 +2933,7 @@ strip_tail() {
         pace=$(awk -v u="$pct" -v e="$elapsed" -v l="$length" 'BEGIN{ printf "%.1f", (u/100)/(e/l) }')
         band=$(awk -v p="$pace" 'BEGIN{ print (p>=1.5?2:(p>=1.0?1:0)) }')
         case "$band" in 2) tint="$RED" ;; 1) tint="$YELLOW" ;; *) tint="$DIM" ;; esac
-        out=" ${tint}${pace}x${RESET}"
+        out=" ${tint}${pace}${MULT_GLYPH}${RESET}"
     fi
     if [ "$reset_mode" = "hide" ]; then
         printf '%s' "$out"
@@ -2937,7 +2948,7 @@ strip_tail() {
     printf '%s %s@%s%s' "$out" "$DIM" "$when" "$RESET"
 }
 
-# The live row: `5h ▂▅█▃▮▯▯▯▯▯ 0.6x @04:00  7d ▅▁▂▃▅ ˍ▃▅▃▃ …▮▯▯ 0.7x @Wed 09:00` under the badges — this
+# The live row: `5h ▂▅█▃▮▯▯▯▯▯ 0.6✕ @04:00  7d ▅▁▂▃▅ ˍ▃▅▃▃ …▮▯▯ 0.7✕ @Wed 09:00` under the badges — this
 # sitting at the left, the week at the right, one grammar. Prints nothing
 # when there is no live window, or — in auto mode — when the log holds no
 # sample for either period yet (a row of ░░░▮▯▯ says nothing the badges do
@@ -3535,7 +3546,7 @@ build_advisor_fleet_hint() {
 #                                         mid-week underuse, engaged sessions
 #                                         only — reaches exactly the users
 #                                         who can act on it
-#   budget ~19x5h left · even 1.1%/win · heading ~52%
+#   budget ~19✕5h left · even 1.1%/win · heading ~52%
 #                                         always-mode calm line (shared
 #                                         budget frame with claude.py's
 #                                         watch advisor); in the last
@@ -4061,9 +4072,9 @@ notice_collect() {
             else
                 local even
                 even=$(awk -v h="$surplus" -v w="$windows" 'BEGIN{printf "%.1f", h/w}')
-                notice_add 10 '-' acct "acct.budget.${windows}" "${windows}x5h" \
-                    "${windows}x5h left · ${even}%/win" \
-                    "budget ~${windows}x5h left · even ${even}%/win${heading_part}"
+                notice_add 10 '-' acct "acct.budget.${windows}" "${windows}${MULT_GLYPH}5h" \
+                    "${windows}${MULT_GLYPH}5h left · ${even}%/win" \
+                    "budget ~${windows}${MULT_GLYPH}5h left · even ${even}%/win${heading_part}"
             fi
         fi
     fi
