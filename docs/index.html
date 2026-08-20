@@ -3,206 +3,288 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Claude Code Statusline — quota, ledgers, notices. Live, in one bash file.</title>
-<meta name="description" content="Live 5h/7d quota with reset times, per-model weekly limits, context pressure, session cost, prompt-cache expiry detection, git activity, 5h/7d ledgers with pace, and a notice engine that says which limit binds first, in your Claude Code prompt. One bash file, 384 tests, no daemon, no telemetry.">
+<title>Claude Code Statusline — a meter for your Claude Code plan</title>
+<meta name="description" content="Your plan is metered; this is the meter. Live 5h/7d quota with reset times, per-model weekly limits, context pressure, session cost, burn ledgers with a learned dry-out forecast, and a notice engine that says which limit binds first — in your Claude Code prompt. One bash file, 417 tests, no daemon, no telemetry.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Mono&text=%E2%96%81%E2%96%82%E2%96%83%E2%96%84%E2%96%85%E2%96%86%E2%96%87%E2%96%88%E2%96%91%E2%96%AE%E2%96%AF%CB%8D%E2%89%A1%C3%97%E2%84%96&display=swap" rel="stylesheet">
 <style>
+  /* the ledger glyphs are the proof: pull block elements + bar marks from a
+     local mono that actually carries them, under the same family name */
+  @font-face {
+    font-family: "IBM Plex Mono";
+    src: local("Menlo"), local("DejaVu Sans Mono"), local("Noto Sans Mono");
+    unicode-range: U+2580-259F, U+25AE-25AF, U+02CD;
+  }
   :root {
-    --bg: #0b0c0e;
-    --panel: #101216;
-    --panel-edge: rgba(255,255,255,.07);
-    --fg: #d6d8dc;
-    --dim: #6f7480;
-    --dim2: #4c515c;
-    --grn: #7ec699;
-    --dgrn: #4f8a66;
-    --ylw: #e2c08d;
-    --red: #e06c75;
-    --dred: #9e5a61;
-    --cyn: #74b8c7;
-    --acc: #d0a215;
-    --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    /* housing — warm graphite, one seed hue (amber, h75) traced through every neutral */
+    --bg:    oklch(0.17 0.010 75);
+    --panel: oklch(0.20 0.012 75);
+    --well:  oklch(0.13 0.012 75);
+    --edge:  oklch(0.34 0.018 75 / .45);
+    --edge2: oklch(0.34 0.018 75 / .22);
+    --fg:    oklch(0.92 0.015 85);
+    --dim:   oklch(0.64 0.025 80);
+    --dim2:  oklch(0.47 0.020 80);
+    --amber: oklch(0.78 0.130 75);
+    --sel:   oklch(0.78 0.130 75 / .28);   /* the seed, spent sparingly: action, focus, selection */
+    --red:   oklch(0.64 0.170 25);   /* pressure lane */
+    --dred:  oklch(0.50 0.110 25);
+    --grn:   oklch(0.73 0.120 150);  /* ok lane */
+    --dgrn:  oklch(0.55 0.090 150);
+    --ylw:   oklch(0.80 0.110 90);   /* caution lane */
+    --cyn:   oklch(0.75 0.090 210);  /* opportunity lane */
+    --white: oklch(0.96 0.010 85);
+    --mono: "IBM Plex Mono", "Noto Sans Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --sans: "IBM Plex Sans", -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --r: 8px;
+    --t-roll: 120ms;
+    --t-pop: 460ms;
+    --t-warm: 160ms;
+    --shadow: oklch(0.06 0.010 75 / .55);
+    --well-inset: inset 0 2px 10px var(--shadow), inset 0 0 0 1px var(--edge2);
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; }
   body {
     background: var(--bg); color: var(--fg);
-    font: 16px/1.6 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font: 16px/1.65 var(--sans);
+    font-variant-numeric: tabular-nums;
   }
-  .wrap { max-width: 880px; margin: 0 auto; padding: 0 20px; }
-  a { color: var(--cyn); text-decoration: none; }
-  a:hover { text-decoration: underline; }
+  ::selection { background: var(--sel); color: var(--white); }
+  :focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; border-radius: 2px; }
+  * { scrollbar-width: thin; scrollbar-color: var(--edge) transparent; }
+  a { color: var(--amber); text-decoration: none; }
+  a:hover { text-decoration: underline; text-underline-offset: 3px; }
   code, .mono { font-family: var(--mono); }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 0 20px; }
 
-  header.hero { padding: 72px 0 28px; text-align: center; }
-  .hero h1 { font-size: 28px; margin: 0 0 10px; letter-spacing: -.01em; }
-  .hero p.sub { color: var(--dim); margin: 0 auto 8px; max-width: 620px; }
-  .hero .facts { color: var(--dim2); font-size: 14px; font-family: var(--mono); }
+  /* nameplate — one line, left; tariff stub right */
+  .plate { display: grid; grid-template-columns: 1fr auto; align-items: baseline; gap: 6px 16px; padding-top: 34px; padding-bottom: 26px; }
+  .plate h1 { font: 600 15px/1.4 var(--mono); margin: 0; letter-spacing: .02em; color: var(--white); }
+  @media (min-width: 901px) { .plate h1 { white-space: nowrap; } }
+  .plate h1 span { color: var(--dim); font-weight: 400; }
+  .plate .tariff { font: 400 12px/1.6 var(--mono); color: var(--dim2); letter-spacing: .06em; text-transform: lowercase; white-space: nowrap; }
+  @media (max-width: 900px) { .plate { grid-template-columns: 1fr; } .plate .tariff { white-space: normal; } }
 
-  /* terminal */
-  .term {
-    background: #0e0f12; border: 1px solid var(--panel-edge);
-    border-radius: 10px; overflow: hidden; margin: 28px 0 10px;
-    text-align: left; box-shadow: 0 12px 40px rgba(0,0,0,.45);
+  /* the register — a recessed well, no window chrome */
+  .register {
+    background: var(--well); border-radius: var(--r);
+    box-shadow: var(--well-inset);
+    padding: 22px 20px 16px; margin: 0 0 8px;
+    position: relative;
   }
-  .term .bar {
-    display: flex; align-items: center; gap: 6px;
-    padding: 10px 14px; border-bottom: 1px solid rgba(255,255,255,.05);
+  @media (min-width: 1240px) {
+    .register { width: 1180px; margin-left: calc((100% - 1180px) / 2); }
   }
-  .term .bar i { width: 10px; height: 10px; border-radius: 50%; background: rgba(255,255,255,.14); }
-  .term:hover .bar i:nth-child(1) { background: #ff5f57; }
-  .term:hover .bar i:nth-child(2) { background: #febc2e; }
-  .term:hover .bar i:nth-child(3) { background: #28c840; }
-  .term .bar span { margin-left: auto; color: var(--dim2); font-size: 12px; font-family: var(--mono); }
-  .term .screen {
-    padding: 18px 18px 14px; font-family: var(--mono); font-size: 12.5px;
-    white-space: pre; overflow-x: auto; min-height: 4.8em;
+  @media (max-width: 900px) {
+    .register .screen { font-size: 11px; }
   }
-  .term .screen .w2 { color: #eceef1; font-weight: bold; }
-  .term .caption {
-    padding: 0 18px 14px; color: var(--dim2); font-size: 12.5px;
-    font-family: var(--mono); min-height: 1.6em;
+  .register .screen {
+    font: 400 12.5px/1.75 var(--mono); white-space: pre; overflow-x: auto;
+    min-height: 5.4em; color: var(--fg);
+    /* scroll shadows: visible only while columns hide beyond an edge */
+    background:
+      linear-gradient(to right, var(--well), transparent 22px) left / 40px 100%,
+      linear-gradient(to left,  var(--well), transparent 22px) right / 40px 100%,
+      linear-gradient(to right, var(--shadow), transparent 18px) left / 18px 100%,
+      linear-gradient(to left,  var(--shadow), transparent 18px) right / 18px 100%;
+    background-repeat: no-repeat;
+    background-attachment: local, local, scroll, scroll;
   }
-  .term .caption b { color: var(--dim); font-weight: 500; }
+  .register .code {
+    position: absolute; top: 8px; right: 12px;
+    font: 400 11px var(--mono); color: var(--dim2); letter-spacing: .12em;
+  }
+  .cols-hint { display: none; font: 400 11px/1.6 var(--mono); color: var(--dim2); letter-spacing: .04em; padding: 6px 4px 0 10px; }
+  @media (max-width: 700px) { .cols-hint { display: block; } }
+  .caption {
+    display: flex; gap: 10px; align-items: baseline;
+    font: 400 13px/1.6 var(--mono); color: var(--dim2);
+    min-height: 3.4em; padding: 8px 4px 0 10px;
+  }
+  @media (max-width: 767px) { .caption { min-height: 5.2em; } }
+  .caption.pressure .code { color: var(--red); }
+  .caption b { color: var(--dim); font-weight: 500; }
+  .caption .code { font-size: 11px; letter-spacing: .12em; color: var(--dim2); flex: none; }
 
-  /* ANSI palette for the simulated line */
-  .d  { color: var(--dim); }
-  .d2 { color: var(--dim2); }
-  .g  { color: var(--grn); }
-  .dg { color: var(--dgrn); }
-  .y  { color: var(--ylw); }
-  .r  { color: var(--red); }
-  .dr { color: var(--dred); }
-  .br { color: var(--red); font-weight: bold; }
-  .c  { color: var(--cyn); }
-  .w  { color: #eceef1; }
-  .rev-g { color: #0e0f12; background: var(--grn); border-radius: 2px; padding: 0 1px; }
-  .rev-y { color: #0e0f12; background: var(--ylw); border-radius: 2px; padding: 0 1px; }
-  .rev-d { color: #0e0f12; background: var(--dim);  border-radius: 2px; padding: 0 1px; }
-  .flash { animation: pop .46s ease-out; display: inline-block; }
+  /* screen roles (the line's own lanes — product facts) */
+  .d  { color: var(--dim); }  .d2 { color: var(--dim2); }
+  .g  { color: var(--grn); }  .dg { color: var(--dgrn); }
+  .y  { color: var(--ylw); }  .r  { color: var(--red); }  .dr { color: var(--dred); }
+  .br { color: var(--red); font-weight: 600; }
+  .c  { color: var(--cyn); }  .w  { color: var(--white); font-weight: 600; }
+  .rev-g { color: var(--well); background: var(--grn); border-radius: 2px; padding: 0 1px; }
+  .rev-y { color: var(--well); background: var(--ylw); border-radius: 2px; padding: 0 1px; }
+  .rev-d { color: var(--well); background: var(--dim); border-radius: 2px; padding: 0 1px; }
+  .flash { animation: pop var(--t-pop) ease-out; display: inline-block; }
   @keyframes pop { 0% { transform: translateY(4px); opacity: 0; } 100% { transform: none; opacity: 1; } }
-  @media (prefers-reduced-motion: reduce) { .flash { animation: none; } }
-
-  .install {
-    display: flex; align-items: center; gap: 10px; justify-content: center;
-    margin: 22px auto 0; flex-wrap: wrap;
+  /* the odometer: only the digits that changed roll up, 120ms, nothing reflows */
+  .odo { display: inline-block; overflow: hidden; vertical-align: bottom; }
+  .odo > span { display: inline-block; animation: odo var(--t-roll) ease-out; }
+  @keyframes odo { 0% { transform: translateY(.95em); } 100% { transform: none; } }
+  @media (prefers-reduced-motion: reduce) {
+    .flash, .odo > span { animation: none; }
   }
-  .install code {
-    background: var(--panel); border: 1px solid var(--panel-edge);
-    border-radius: 8px; padding: 10px 14px; font-size: 13.5px; color: var(--fg);
-    overflow-x: auto; max-width: 100%;
+
+  /* connect — the service line */
+  .connect { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 26px 0 0; }
+  .connect .lbl { font: 600 12px var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--dim2); flex: none; }
+  .connect code {
+    background: var(--panel); border: 1px solid var(--edge2);
+    border-radius: var(--r); padding: 11px 14px; font-size: 13px; color: var(--fg);
+    overflow-x: auto; white-space: nowrap; flex: 1 1 0; min-width: 0;
   }
-  .install button {
-    background: var(--panel); color: var(--dim); border: 1px solid var(--panel-edge);
-    border-radius: 8px; padding: 10px 14px; font: 13px var(--mono); cursor: pointer;
+  .connect button {
+    background: var(--panel); color: var(--dim); border: 1px solid var(--edge2);
+    border-radius: var(--r); padding: 11px 16px; font: 600 12.5px var(--mono);
+    letter-spacing: .04em; cursor: pointer; transition: color var(--t-warm), border-color var(--t-warm);
   }
-  .install button:hover { color: var(--fg); border-color: rgba(255,255,255,.2); }
+  .connect button:hover { color: var(--amber); border-color: var(--edge); }
 
-  section { padding: 44px 0 8px; }
-  section h2 { font-size: 15px; letter-spacing: .14em; text-transform: uppercase; color: var(--dim); margin: 0 0 18px; }
+  section { padding: 64px 0 0; }
+  section:last-of-type { padding-bottom: 8px; }
+  section > h2 {
+    font: 600 12px var(--mono); letter-spacing: .16em; text-transform: uppercase;
+    color: var(--dim2); margin: 0 0 6px; padding-bottom: 8px;
+    border-bottom: 1px solid var(--edge2);
+  }
+  section > p.lede { color: var(--dim); font-size: 14.5px; max-width: 640px; margin: 12px 0 20px; }
 
-  /* anatomy */
-  .anatomy { border: 1px solid var(--panel-edge); border-radius: 10px; overflow: hidden; }
-  .anatomy .line { padding: 16px 18px; font: 14.5px var(--mono); white-space: nowrap; overflow-x: auto; background: #0e0f12; border-bottom: 1px solid var(--panel-edge); }
-  .anatomy table { width: 100%; border-collapse: collapse; font-size: 14px; }
-  .anatomy td { padding: 10px 18px; border-top: 1px solid rgba(255,255,255,.04); vertical-align: top; }
-  .anatomy td:first-child { font-family: var(--mono); white-space: nowrap; width: 1%; padding-right: 24px; }
-  .anatomy tr:first-child td { border-top: 0; }
-  .anatomy td.desc { color: var(--dim); }
-  .anatomy td.desc b { color: var(--fg); font-weight: 500; }
+  /* the anatomy — answering pairs: left states the reading, right answers */
+  .rows { border-top: 1px solid var(--edge2); }
+  .row {
+    display: grid; grid-template-columns: minmax(220px, 38%) 1fr; gap: 20px;
+    padding: 14px 2px; border-bottom: 1px solid var(--edge2); align-items: baseline;
+  }
+  .row .reading { font: 400 13.5px var(--mono); white-space: nowrap; overflow-x: auto; }
+  .row .reading .cite { display: block; font-size: 11px; color: var(--dim2); letter-spacing: .12em; margin-top: 3px; }
+  .row .answer { color: var(--dim); font-size: 14px; }
+  .row .answer b { color: var(--fg); font-weight: 600; }
+  @media (max-width: 700px) {
+    .row { grid-template-columns: 1fr; gap: 6px; }
+  }
 
-  /* values */
-  .vals { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 14px; }
-  .val { background: var(--panel); border: 1px solid var(--panel-edge); border-radius: 10px; padding: 18px; }
-  .val h3 { margin: 0 0 8px; font-size: 15px; }
+  /* three plates */
+  .vals { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-top: 18px; }
+  .val { background: var(--panel); border: 1px solid var(--edge2); border-radius: var(--r); padding: 18px; }
+  .val h3 { margin: 0 0 8px; font: 600 14px var(--sans); color: var(--fg); }
   .val p { margin: 0; color: var(--dim); font-size: 14px; }
   .val p code { font-size: 12.5px; color: var(--fg); }
 
-  .not { color: var(--dim); font-size: 14.5px; max-width: 640px; }
+  .not { color: var(--dim); font-size: 14.5px; max-width: 640px; margin: 14px 0 0; padding-left: 20px; }
   .not li { margin: 6px 0; }
 
-  footer { padding: 48px 0 56px; color: var(--dim2); font-size: 13.5px; text-align: center; }
-  footer a { color: var(--dim); margin: 0 8px; }
+  footer { padding: 64px 0 48px; color: var(--dim2); font: 400 12.5px var(--mono); }
+  footer a { color: var(--dim); margin-right: 14px; }
 </style>
 </head>
 <body>
+<!--
+THESIS: your Claude plan is metered and this page is the meter, read live —
+it refuses the category's fake-terminal-window hero and shows the product as
+the instrument it is: a register you read, a bill you get before it arrives.
+OWN-WORLD: warm graphite housing (oklch h75 traced through every neutral), a
+recessed register well with white tabular digits, amber spent only on action
+and focus, pressure red reserved for the notice slip; strip all content and
+the housing + well + edge-code still name the world.
+STORY: a terminal-native Claude user sees their own quota pain read back in
+one live line, understands each reading via answering pairs (the number
+states, the right column answers), and connects in one pasted command.
+FIRST VIEWPORT: nameplate one line top-left, tariff stub right; the register
+(the live simulation, largest object by 3x) left-of-center with a mono
+reading number in its margin; the narration caption beneath (red-edged when a
+notice fires); the connect line (command + copy) closes the viewport.
+FORM: the metered utility — candidate #4 of 7 resonance-ordered directions,
+roll a73a6e50 (scope=direction, mode=persuade); raised by three declined /
+competitive challengers: answering pairs (paired-couplets), one demonstration
+per viewport (garden-framed-view), margin edge-codes (film-slate-edge-code).
+-->
 
-<header class="hero">
-  <div class="wrap">
-    <h1>Claude Code Statusline</h1>
-    <p class="sub">Quota, context, cost, model, and git — live in your Claude Code prompt.
-    Line 1: how much of each window is left. Row 2: what to do about it, and where it went. Row 3 says it in full, then fades.</p>
-    <p class="facts">one bash file &middot; 384 tests &middot; deps: jq + curl &middot; no daemon &middot; no telemetry</p>
-
-    <div class="term">
-      <div class="bar"><i></i><i></i><i></i><span>claude</span></div>
-      <div class="screen" id="line" aria-live="off"></div>
-      <div class="caption" id="cap"></div>
-    </div>
-
-    <div class="install">
-      <code id="cmd">curl -fsSL https://raw.githubusercontent.com/thevibeworks/claude-code-statusline/main/install.sh | bash</code>
-      <button id="copy" type="button">copy</button>
-    </div>
-  </div>
+<header class="wrap plate">
+  <h1>claude-code-statusline <span>— a meter for your Claude Code plan</span></h1>
+  <div class="tariff">417 tests · jq + curl · no daemon · no telemetry</div>
 </header>
 
 <main class="wrap">
 
+  <div class="register">
+    <div class="code" id="code">№ 0000</div>
+    <div class="screen" id="line" aria-live="off"></div>
+  </div>
+  <div class="cols-hint">the line is built for a 90-column terminal — swipe the register to pan</div>
+  <div class="caption" id="capwrap"><span class="code" id="capcode"></span><span id="cap"></span></div>
+
+  <div class="connect">
+    <span class="lbl">connect</span>
+    <code id="cmd">curl -fsSL https://raw.githubusercontent.com/thevibeworks/claude-code-statusline/main/install.sh | bash</code>
+    <button id="copy" type="button">copy</button>
+  </div>
+
 <section>
-  <h2>Anatomy of the line</h2>
-  <div class="anatomy">
-    <div class="line"><span class="d">my-project</span>&nbsp;&nbsp;<span class="dg">+131</span><span class="d">/</span><span class="dr">-16</span> <span class="d">6m $7.53</span> <span class="w">fabl5[1m]</span><span class="d">xh</span><span class="g">[█░░░░░12%]</span> <span class="br">≡!419k</span> <span class="d">fb</span><span class="y">[67%]</span> <span class="d">[<span class="w">MAX</span>|you]</span> <span class="d">5h</span><span class="g">[38%<span class="d">@14:00</span>]</span> <span class="d">7d</span><span class="y">[55%<span class="d">@2d</span>]</span></div>
-    <table>
-      <tr><td><span class="dg">+131</span><span class="d">/</span><span class="dr">-16</span> <span class="d">6m $7.53</span></td>
-          <td class="desc"><b>Session activity.</b> Lines added/removed, API time, session cost — cost flashes its increment (<span class="mono rev-d">+.37</span>) for a minute after each jump.</td></tr>
-      <tr><td><span class="w">fabl5[1m]</span><span class="d">xh</span><span class="g">[█░░░░░12%]</span></td>
-          <td class="desc"><b>Model + context.</b> Abbreviated model, 1M-window tag, reasoning-effort badge, context pressure bar. On 1M models the bar also carries the premium-pricing band. After <code>/compact</code> the bar snaps to <code>[░░░░░░0%]</code> and flashes the drop.</td></tr>
-      <tr><td><span class="d">fb</span><span class="y">[67%]</span></td>
-          <td class="desc"><b>Model-scoped weekly quota.</b> When the API carries a per-model weekly limit for the model you're running (Fable here), it hugs the model block. Other models' limits stay hidden — only the one constraining <i>this</i> session is signal.</td></tr>
-      <tr><td><span class="d">5h</span><span class="g">[38%<span class="d">@14:00</span>]</span></td>
-          <td class="desc"><b>5-hour window.</b> Wall-clock reset time, deliberately not a countdown: the line only re-renders on activity, so <code>@1h38m</code> would decay into a lie during idle gaps. <code>@14:00</code> stays true in a frozen frame.</td></tr>
-      <tr><td><span class="d">7d</span><span class="y">[55%<span class="d">@2d</span>]</span></td>
-          <td class="desc"><b>7-day window, forecast-colored.</b> A learned per-weekday burn profile projects whether quota outlasts the window — your heavy Tuesday counts more than a generic average. Red means "at your pace, dry before the reset".</td></tr>
-      <tr><td><span class="d">5h</span> <span class="g">▂▅█▃</span><span class="w">▮</span><span class="d2">▯▯▯▯▯</span> <span class="d">0.8x @14:00</span></td>
-          <td class="desc"><b>5h ledger.</b> This sitting as ten half hours, height = the 5h points each cell cost; <code>▮</code> now, <code>▯</code> ahead, <code>ˍ</code> ran-but-negligible, <code>░</code> no sample. Ends with its pace (used ÷ elapsed) and the reset its right edge stands for — axis labels, not badges restated.</td></tr>
-      <tr><td><span class="d">7d</span> <span class="y">▅▁▂ ▃▅ˍ▃▅ … ▆▆</span><span class="w">▮</span><span class="d2">▯▯▯▯</span> <span class="d">0.7x @Wed 09:00</span></td>
-          <td class="desc"><b>7d ledger.</b> The week as its 5h windows (34 cells, oldest left, a gap at each local midnight in history only), height = the 7d points each burned; <code>×</code> where the pool runs dry at your pace. Reconstructed from your own usage log — the same history <a href="https://github.com/thevibeworks/ccpace">ccpace</a> reads.</td></tr>
-      <tr><td><span class="c">+ <b>fb 91%</b> vs 7d 55% · go op</span></td>
-          <td class="desc"><b>The pin.</b> Left of the ledgers, compacted to the room line 1 leaves (cut at the rightmost joint, so it gives up as little as possible). It stays while the condition holds. The number you act on is bold; the hue is the stance — <span class="c">cyan</span> opportunity, yellow/red pressure, dim budget.</td></tr>
-      <tr><td><span class="c">+ fb weekly 91% against 7d 55% · the model caps first…</span></td>
-          <td class="desc"><b>The flash.</b> Row 3: the same notice in full, for ~90&nbsp;s after the condition first appears in this session — then it disappears and leaves the pin. What it knows: which limit binds first (<code>fb 91% vs 7d 55%</code> = the <i>model</i> caps before the account), an out-of-band quota re-base (<code>7d rebased 53%→12%</code>), the last 5h window of the week, expiring surplus checked against your own burn ratio. <code>--notice off</code> keeps row 3 quiet.</td></tr>
-      <tr><td><span class="mono"><span class="br">≡!419k</span>&nbsp; <span class="y">≡~</span>&nbsp; <span class="d">!net</span></span></td>
-          <td class="desc"><b>Truth badges.</b> <code>≡!419k</code> — prompt-cache break on resume (bold red past 200k); <code>≡~</code> — rebuilding; stale-data markers say <i>why</i> a fetch failed. Silent while healthy.</td></tr>
-    </table>
+  <h2>Read the meter</h2>
+  <p class="lede">Every reading answers twice: the left column states the number, the right column says what to do about it. The № cites the register frame above where it appears.</p>
+  <div class="rows">
+    <div class="row">
+      <div class="reading"><span class="dg">+131</span><span class="d">/</span><span class="dr">-16</span> <span class="d">6m $7.53</span><span class="cite">№ 0002</span></div>
+      <div class="answer"><b>Session activity and cost.</b> Lines added and removed, API time, dollars — the cost flashes its increment (<span class="mono rev-d">+.37</span>) for a minute after each jump, so a spike is seen, not discovered.</div>
+    </div>
+    <div class="row">
+      <div class="reading"><span class="w">fabl5[1m]</span><span class="d">xh</span><span class="g">[█░░░░░12%]</span><span class="cite">№ 0002</span></div>
+      <div class="answer"><b>Model and context pressure.</b> Abbreviated model, 1M-window tag, effort badge, context bar. Yellow means think about compacting; on 1M models the bar also carries the premium-pricing band the calm percentage hides.</div>
+    </div>
+    <div class="row">
+      <div class="reading"><span class="d">fb</span><span class="y">[67%]</span><span class="cite">№ 0006</span></div>
+      <div class="answer"><b>The model's own weekly cap.</b> Shown only for the model you are running — when it outruns the account, the pin below says so and names the way out: spread the bulk to a cooler model.</div>
+    </div>
+    <div class="row">
+      <div class="reading"><span class="d">5h</span><span class="g">[38%<span class="d">@14:00</span>]</span><span class="cite">№ 0000</span></div>
+      <div class="answer"><b>The 5-hour window.</b> Wall-clock reset, deliberately not a countdown: the line only re-renders on activity, and <code>@14:00</code> stays true in a frozen frame where <code>@1h38m</code> would decay into a lie.</div>
+    </div>
+    <div class="row">
+      <div class="reading"><span class="d">7d</span><span class="y">[55%<span class="d">@2d</span>]</span><span class="cite">№ 0000</span></div>
+      <div class="answer"><b>The 7-day window, forecast-colored.</b> A learned per-weekday burn profile projects whether the pool outlasts the window — your heavy Tuesday counts more than a generic average. Red answers: at your pace, dry before the reset.</div>
+    </div>
+    <div class="row">
+      <div class="reading"><span class="d">5h</span> <span class="g">▂▅█</span><span class="w">▮</span><span class="d2">▯</span> <span class="d">0.8x</span><span class="cite">№ 0001</span></div>
+      <div class="answer"><b>The 5h ledger — this sitting by the hour.</b> Height is what each hour cost; <code>▮</code> now, <code>▯</code> ahead, <code>ˍ</code> ran-but-negligible, <code>░</code> no sample. Ends with its pace: above 1x you cap before the reset.</div>
+    </div>
+    <div class="row">
+      <div class="reading"><span class="d">7d</span> <span class="y">▃▅ˍ▃▅ ▃▃▁▂▁</span><span class="w">▮</span><span class="d2">▯▯...▯5hx14</span> <span class="d">0.7x</span><span class="cite">№ 0001</span></div>
+      <div class="answer"><b>The week ledger — history in full, the future folded.</b> Each cell one 5h window, day-gapped; after the now-marker the empty run folds to a counted tail: <code>...▯5hx14</code> answers "14 slots to the reset", and <code>×</code> red answers "the tail runs dry".</div>
+    </div>
+    <div class="row">
+      <div class="reading"><span class="r">! <b>7d dry ~Tue 04:00</b> · hard stop</span><span class="cite">№ 0008</span></div>
+      <div class="answer"><b>The projection letter, before the bill.</b> The learned forecast can warn on a calm Friday about your heavy Tuesday. The pin stays while the condition holds; row 3 explains once, then fades.</div>
+    </div>
+    <div class="row">
+      <div class="reading"><span class="c">+ <b>fb 91%</b> vs 7d 55% · go op</span><span class="cite">№ 0006</span></div>
+      <div class="answer"><b>The pin.</b> One notice, compacted to the room line 1 leaves, cut at its weakest joint. The number you act on is bold; the hue is the stance — cyan opportunity, yellow and red pressure, dim budget.</div>
+    </div>
+    <div class="row">
+      <div class="reading"><span class="br">≡!419k</span> <span class="y">≡~</span> <span class="d">!net</span><span class="cite">№ 0010</span></div>
+      <div class="answer"><b>Truth badges.</b> A prompt-cache break on resume (<code>≡!419k</code> — a full-prefix rewrite at 20× the read rate), a rebuild in progress, a fetch that failed and why. Silent while healthy: zero width spent on a warm cache.</div>
+    </div>
   </div>
 </section>
 
 <section>
-  <h2>Built like it matters</h2>
+  <h2>Built like a meter should be</h2>
   <div class="vals">
     <div class="val"><h3>An advisor, not a dashboard</h3>
-      <p>A second row that interprets the badges: <code>! 5h caps ~05:18, 42m before reset</code> when you'll hit a wall, <code>+ 7d resets @07:00, 56% unused &middot; spend it</code> when paid capacity is about to expire unused. Quiet means no row at all.</p></div>
+      <p>Row 2 interprets the badges: <code>! 5h caps ~05:18, 42m before reset</code> when you will hit a wall, <code>+ 7d resets @07:00, 56% unused · spend it</code> when paid capacity is about to expire. Quiet means no row at all.</p></div>
     <div class="val"><h3>Numbers that don't lie</h3>
-      <p>Wall-clock resets instead of decaying countdowns. A visible <code>[░░░░░░0%]</code> instead of a hidden bar. Stale data is always badged, never passed off as fresh.</p></div>
-    <div class="val"><h3>Cache break detection</h3>
-      <p>Resume after an idle gap longer than the TTL and <code>≡!419k</code> fires — the full-prefix rewrite you can't see coming, sized and colored by severity. Silent while healthy; no width wasted on a warm cache.</p></div>
-    <div class="val"><h3>Polite to the API</h3>
-      <p>N concurrent Claude Code instances share one cached fetch behind an atomic lock — at most one usage request per account per TTL window. Escalating backoff honors <code>Retry-After</code>.</p></div>
-    <div class="val"><h3>Works behind TLS inspection</h3>
-      <p>Corporate mitm proxy or a local tracer: it builds a combined CA bundle from <code>NODE_EXTRA_CA_CERTS</code> automatically, so fetches survive where plain curl dies.</p></div>
-    <div class="val"><h3>Documented wire contract</h3>
-      <p>The <a href="https://github.com/thevibeworks/claude-code-statusline/blob/main/docs/api/oauth-usage.md">observed <code>/api/oauth/usage</code> schema</a> is versioned in-repo and re-synced against CLI captures, so parser changes check against ground truth.</p></div>
-    <div class="val"><h3>384 tests on one bash file</h3>
-      <p>bats suite covering quota math, lock contention (20-contender single-winner), forecast pacing, ANSI rendering, and the installer. CI on every push.</p></div>
+      <p>Wall-clock resets instead of decaying countdowns. A visible <code>[░░░░░░0%]</code> after <code>/compact</code> instead of a hidden bar. Stale data is badged, never passed off as fresh. Burn is a monotone envelope, never a re-earned dip.</p></div>
     <div class="val"><h3>Nothing running in the background</h3>
-      <p>No daemon, no telemetry, no npm. It runs when Claude Code renders the prompt, reads stdin + one cached API call, prints a line, exits.</p></div>
+      <p>No daemon, no telemetry, no npm. It runs when Claude Code renders the prompt, reads stdin plus one shared cached API call, prints its rows, exits. 417 bats tests on the one file.</p></div>
   </div>
 </section>
 
 <section>
   <h2>What it is not</h2>
   <ul class="not">
-    <li>Not a general-purpose prompt framework — it renders one status line (plus an optional advisor row) for Claude Code's <code>statusLine</code> hook, nothing else.</li>
+    <li>Not a prompt framework — it renders the status rows for Claude Code's <code>statusLine</code> hook, nothing else.</li>
     <li>Quota badges need an OAuth (subscription) login; API-key accounts get everything except the quota cluster.</li>
     <li>Bash + jq + curl on Linux/macOS. No Windows-native support (WSL works).</li>
   </ul>
@@ -210,10 +292,11 @@
 
 </main>
 
-<footer>
-  <a href="https://github.com/thevibeworks/claude-code-statusline">GitHub</a> ·
-  <a href="https://github.com/thevibeworks/claude-code-statusline/blob/main/CHANGELOG.md">Changelog</a> ·
-  <a href="https://github.com/thevibeworks/claude-code-statusline/blob/main/docs/api/oauth-usage.md">Wire contract</a> ·
+<footer class="wrap">
+  <a href="https://github.com/thevibeworks/claude-code-statusline">GitHub</a>
+  <a href="https://github.com/thevibeworks/claude-code-statusline/blob/main/CHANGELOG.md">Changelog</a>
+  <a href="https://github.com/thevibeworks/claude-code-statusline/blob/main/docs/api/oauth-usage.md">Wire contract</a>
+  <a href="https://github.com/thevibeworks/claude-code-statusline/blob/main/docs/api/state-dir.md">State dir</a>
   MIT © thevibeworks
 </footer>
 
@@ -221,63 +304,83 @@
 (function () {
   var line = document.getElementById('line');
   var cap = document.getElementById('cap');
+  var capcode = document.getElementById('capcode');
+  var capwrap = document.getElementById('capwrap');
+  var codeEl = document.getElementById('code');
 
   // One simulated session, rendered exactly like the real line renders:
-  // a new frame per refresh, +X flashes appearing when values jump.
-  // s() = plain segment, f() = flash segment (reverse video, pop-in).
+  // a new frame per refresh, +X flashes appearing when values jump, the
+  // changed quota digits rolling like a register wheel (odometer).
+  // s() = plain segment, f() = flash segment, o() = odometer-rolled segment.
   function s(c, t) { return '<span class="' + c + '">' + t + '</span>'; }
   function f(c, t) { return '<span class="' + c + ' flash">' + t + '</span>'; }
-  var P = s('d', 'my-project') + s('d2', ' [cctrace]') + '&nbsp;&nbsp;';
+  function o(c, t) { return '<span class="odo"><span>' + s(c, t) + '</span></span>'; }
+  var frames;
+  function makeFrames() {
+  // narrow registers compact line 1 exactly like the real script does:
+  // the trace chip collapses first, then the user chip gives
+  var narrow = window.matchMedia('(max-width: 900px)').matches;
+  var P = narrow ? s('d', 'my-project') + '&nbsp;&nbsp;'
+                 : s('d', 'my-project') + s('d2', ' [cctrace]') + '&nbsp;&nbsp;';
+  var U = narrow ? '' : ' ' + s('d','[') + s('w','MAX') + s('d','|you]');
 
   // Rows beneath line 1 hang as one block: its right edge meets line 1's
   // edge, every row shares one left edge — exactly how the script pads them.
-  var L5 = s('d','5h ') + s('g','▂▅█▃') + s('w2','▮') + s('d2','▯▯▯▯▯') + s('d',' 0.8x');
-  var L5b = s('d','5h ') + s('g','▂▅█▄') + s('w2','▮') + s('d2','▯▯▯▯▯') + s('d',' 0.9x');
-  var L7 = s('d','7d ') + s('y','▅▁▂ ▃▅ˍ▃▅ ▃▃▁▂▁ ▅ˍ▂▁▁ ˍˍˍ▃▅ ▆▆') + s('w2','▮') + s('d2','▯▯▯▯▯▯▯▯') + s('d',' 0.7x @Wed 09:00');
+  // 5h ledger: 5 hour cells. 7d ledger: history in full, future folded.
+  var L5  = s('d','5h ') + s('g','▂▅█') + s('w','▮') + s('d2','▯') + s('d',' 0.8x');
+  var L5b = s('d','5h ') + s('g','▂▅█▄') + s('w','▮') + s('d',' 0.9x');
+  var L7  = s('d','7d ') + s('y','▅▁▂ ▃▅ˍ▃▅ ▃▃▁▂▁ ') + s('w','▮') + s('d2','▯▯...▯5hx14') + s('d',' 0.7x @Wed 09:00');
+  var L7x = s('d','7d ') + s('y','▅▁▂ ▃▅ˍ▃▅ ▃▃▁▂▁ ') + s('w','▮') + s('d2','▯▯') + s('r','...×5hx14') + s('d',' 0.9x @Wed 09:00');
   // the 5h strip prints no reset: line 1's 5h badge already carries it
-  var LEDGER = L5 + '  ' + L7, LEDGER_B = L5b + '  ' + L7;
+  var LEDGER = L5 + '  ' + L7, LEDGER_B = L5b + '  ' + L7, LEDGER_X = L5b + '  ' + L7x;
   var BUDGET = s('d2','- 10x5h left · 4.5%/win');
   var BUDGET_B = s('d2','- 10x5h left · 4.3%/win');
   var PIN = s('c','+ ') + s('c','<b>fb 91%</b>') + s('c',' vs 7d 55% · go op');
   var FLASH = s('c','+ fb weekly 91% against 7d 55% · the model caps first, not the account');
+  var PIN_DRY = s('r','! ') + s('r','<b>7d dry ~Tue 04:00</b>') + s('r',' · hard stop');
+  var FLASH_DRY = s('r','! 7d dry ~Tue 04:00, 16h before reset · then hard stop');
 
-  var frames = [
+  frames = [
     { d: 2200, c: 'session starts — fresh context, quota from the shared account cache',
-      h: P + s('w','fabl5[1m]') + s('d','xh') + s('g','[░░░░░░0%]') + ' ' + s('d','fb') + s('y','[64%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[38%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[55%') + s('d','@2d') + s('y',']') },
-    { d: 3400, c: 'row 2 appears: the budget line left, the ledgers right — this sitting as half hours, the week as its 5h windows',
-      h: P + s('dg','+12') + s('d','/') + s('dr','-3') + ' ' + s('d','2m $0.48') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[█░░░░░6%]') + ' ' + s('d','fb') + s('y','[64%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[38%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[55%') + s('d','@2d') + s('y',']'),
+      h: P + s('w','fabl5[1m]') + s('d','xh') + s('g','[░░░░░░0%]') + ' ' + s('d','fb') + s('y','[64%]') + U + ' ' + s('d','5h') + s('g','[38%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[55%') + s('d','@2d') + s('y',']') },
+    { d: 3400, c: 'row 2 appears: the budget line left, the ledgers right — this sitting by the hour, the week with its future folded',
+      h: P + s('dg','+12') + s('d','/') + s('dr','-3') + ' ' + s('d','2m $0.48') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[█░░░░░6%]') + ' ' + s('d','fb') + s('y','[64%]') + U + ' ' + s('d','5h') + s('g','[38%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[55%') + s('d','@2d') + s('y',']'),
       r: [LEDGER, BUDGET] },
     { d: 3000, c: 'refresh changes a value → it flashes the delta for 60s: <b>+.31 cost, +9 context</b>',
-      h: P + s('dg','+58') + s('d','/') + s('dr','-11') + ' ' + s('d','4m $0.79') + f('rev-d','+.31') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[█░░░░░15%]') + f('rev-g','+9') + ' ' + s('d','fb') + s('y','[64%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[38%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[55%') + s('d','@2d') + s('y',']'),
+      h: P + s('dg','+58') + s('d','/') + s('dr','-11') + ' ' + s('d','4m $0.79') + f('rev-d','+.31') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[█░░░░░15%]') + f('rev-g','+9') + ' ' + s('d','fb') + s('y','[64%]') + U + ' ' + s('d','5h') + s('g','[38%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[55%') + s('d','@2d') + s('y',']'),
       r: [LEDGER, BUDGET] },
-    { d: 3000, c: 'quota climbs between renders → <b>5h[40%]+2</b> — "you just burned 2%"; the now-cell grows',
-      h: P + s('dg','+58') + s('d','/') + s('dr','-11') + ' ' + s('d','9m $2.14') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[██░░░░34%]') + ' ' + s('d','fb') + s('y','[65%]') + f('rev-y','+1') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[40%') + s('d','@14:00') + s('g',']') + f('rev-g','+2') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']'),
+    { d: 3000, c: 'quota climbs between renders → the register rolls: <b>5h[40%]+2</b> — "you just burned 2%"',
+      h: P + s('dg','+58') + s('d','/') + s('dr','-11') + ' ' + s('d','9m $2.14') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[██░░░░34%]') + ' ' + s('d','fb') + o('y','[65%]') + f('rev-y','+1') + U + ' ' + s('d','5h') + o('g','[40%') + s('d','@14:00') + s('g',']') + f('rev-g','+2') + ' ' + s('d','7d') + o('y','[56%') + s('d','@2d') + s('y',']'),
       r: [LEDGER_B, BUDGET_B] },
     { d: 2600, c: 'context pressure turns the bar yellow — time to think about compacting',
-      h: P + s('dg','+131') + s('d','/') + s('dr','-16') + ' ' + s('d','14m $5.90') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('y','[█████░86%]') + ' ' + s('d','fb') + s('y','[65%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[41%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']'),
+      h: P + s('dg','+131') + s('d','/') + s('dr','-16') + ' ' + s('d','14m $5.90') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('y','[█████░86%]') + ' ' + s('d','fb') + s('y','[65%]') + U + ' ' + s('d','5h') + s('g','[41%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']'),
       r: [LEDGER_B, BUDGET_B] },
     { d: 3400, c: '/compact — the bar snaps visibly to 0% and flashes the drop: <b>-86</b>',
-      h: P + s('dg','+131') + s('d','/') + s('dr','-16') + ' ' + s('d','14m $5.90') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[░░░░░░0%]') + f('rev-g','-86') + ' ' + s('d','fb') + s('y','[65%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[41%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']'),
+      h: P + s('dg','+131') + s('d','/') + s('dr','-16') + ' ' + s('d','14m $5.90') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[░░░░░░0%]') + f('rev-g','-86') + ' ' + s('d','fb') + s('y','[65%]') + U + ' ' + s('d','5h') + s('g','[41%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']'),
       r: [LEDGER_B, BUDGET_B] },
     { d: 3600, c: 'the model quota outruns the account: <b>fb 91% vs 7d 55%</b> — the pin says the way out, row 3 says why',
-      h: P + s('dg','+131') + s('d','/') + s('dr','-16') + ' ' + s('d','14m $5.90') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[█░░░░░9%]') + ' ' + s('d','fb') + f('rev-y','+3') + s('y','[91%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[41%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[55%') + s('d','@2d') + s('y',']'),
+      h: P + s('dg','+131') + s('d','/') + s('dr','-16') + ' ' + s('d','14m $5.90') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[█░░░░░9%]') + ' ' + s('d','fb') + f('rev-y','+3') + s('y','[91%]') + U + ' ' + s('d','5h') + s('g','[41%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[55%') + s('d','@2d') + s('y',']'),
       r: [LEDGER_B, PIN, FLASH] },
     { d: 3200, c: '~90s later the explanation fades and the pin stays — one row of advice, not a wall of text',
-      h: P + s('dg','+138') + s('d','/') + s('dr','-16') + ' ' + s('d','16m $6.40') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[██░░░░13%]') + ' ' + s('d','fb') + s('y','[91%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[42%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[55%') + s('d','@2d') + s('y',']'),
+      h: P + s('dg','+138') + s('d','/') + s('dr','-16') + ' ' + s('d','16m $6.40') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[██░░░░13%]') + ' ' + s('d','fb') + s('y','[91%]') + U + ' ' + s('d','5h') + s('g','[42%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[55%') + s('d','@2d') + s('y',']'),
       r: [LEDGER_B, PIN] },
-    { d: 3000, c: 'back to work — same lines, always current, never in the way',
-      h: P + s('dg','+142') + s('d','/') + s('dr','-19') + ' ' + s('d','17m $7.53') + f('rev-d','+1.63') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[█░░░░░7%]') + ' ' + s('d','fb') + s('y','[66%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[42%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']'),
+    { d: 3800, c: 'the learned forecast sees the week drying before the reset — the folded tail turns <b>×</b>, the letter arrives before the bill',
+      h: P + s('dg','+142') + s('d','/') + s('dr','-19') + ' ' + s('d','17m $7.10') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[██░░░░16%]') + ' ' + s('d','fb') + s('y','[91%]') + U + ' ' + s('d','5h') + s('g','[42%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + o('y','[58%') + s('d','@2d') + s('y',']') + f('rev-y','+2'),
+      p: 1, r: [LEDGER_X, PIN_DRY, FLASH_DRY] },
+    { d: 3000, c: 'back to work — same rows, always current, never in the way',
+      h: P + s('dg','+142') + s('d','/') + s('dr','-19') + ' ' + s('d','17m $7.53') + f('rev-d','+.43') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[█░░░░░7%]') + ' ' + s('d','fb') + s('y','[66%]') + U + ' ' + s('d','5h') + s('g','[42%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']'),
       r: [LEDGER_B, BUDGET_B] },
     { d: 3200, c: 'came back after 2h idle — cache expired, 419k-token rewrite at 20× the read rate: <b>≡!419k</b>',
-      h: P + s('dg','+142') + s('d','/') + s('dr','-19') + ' ' + s('d','17m $7.53') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[█░░░░░7%]') + ' ' + f('br','≡!419k') + ' ' + s('d','fb') + s('y','[66%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[42%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']'),
-      r: [LEDGER_B, BUDGET_B] },
-    { d: 2800, c: 'prefix rebuilding — ≡~ clears once the cache is warm again',
-      h: P + s('dg','+152') + s('d','/') + s('dr','-22') + ' ' + s('d','19m $8.71') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[██░░░░14%]') + ' ' + s('y','≡~') + ' ' + s('d','fb') + s('y','[67%]') + f('rev-y','+1') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[43%') + s('d','@14:00') + s('g',']') + f('rev-g','+1') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']'),
-      r: [LEDGER_B, BUDGET_B] },
-    { d: 3000, c: 'cache warm, indicator gone — auto stays silent while healthy, zero width',
-      h: P + s('dg','+168') + s('d','/') + s('dr','-25') + ' ' + s('d','22m $10.40') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[██░░░░21%]') + ' ' + s('d','fb') + s('y','[67%]') + ' ' + s('d','[') + s('w','MAX') + s('d','|you]') + ' ' + s('d','5h') + s('g','[43%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']'),
+      h: P + s('dg','+142') + s('d','/') + s('dr','-19') + ' ' + s('d','17m $7.53') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[█░░░░░7%]') + ' ' + f('br','≡!419k') + ' ' + s('d','fb') + s('y','[66%]') + U + ' ' + s('d','5h') + s('g','[42%') + s('d','@14:00') + s('g',']') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']'),
+      p: 1, r: [LEDGER_B, BUDGET_B] },
+    { d: 2800, c: 'prefix rebuilding — ≡~ clears once the cache is warm; healthy costs zero width',
+      h: P + s('dg','+152') + s('d','/') + s('dr','-22') + ' ' + s('d','19m $8.71') + ' ' + s('w','fabl5[1m]') + s('d','xh') + s('g','[██░░░░14%]') + ' ' + s('y','≡~') + ' ' + s('d','fb') + s('y','[67%]') + f('rev-y','+1') + U + ' ' + s('d','5h') + s('g','[43%') + s('d','@14:00') + s('g',']') + f('rev-g','+1') + ' ' + s('d','7d') + s('y','[56%') + s('d','@2d') + s('y',']'),
       r: [LEDGER_B, BUDGET_B] }
   ];
+  }
+  makeFrames();
+  var mq = window.matchMedia('(max-width: 900px)');
+  if (mq.addEventListener) mq.addEventListener('change', makeFrames);
 
   // visible width of a rendered fragment (tags stripped, entities decoded)
   var meter = document.createElement('div');
@@ -309,10 +412,10 @@
         var keep = pinHtml.indexOf(pinText) >= 0 ? pinHtml : null;
         var head = keep && short === pinText ? pinHtml : s(/class="([^"]+)"/.exec(pinHtml)[1], short);
         out += '\n' + head + pad(anchor - vis(ledger) - short.length) + ledger;
-        for (var f = 2; f < rows.length; f++) {
-          var flashText = (meter.innerHTML = rows[f], meter.textContent);
+        for (var f2 = 2; f2 < rows.length; f2++) {
+          var flashText = (meter.innerHTML = rows[f2], meter.textContent);
           var cut = compact(flashText, anchor - 1);
-          out += '\n' + (cut === flashText ? rows[f] : s('c', cut));
+          out += '\n' + (cut === flashText ? rows[f2] : s(/class="([^"]+)"/.exec(rows[f2])[1] || 'c', cut));
         }
         return out;
       }
@@ -324,12 +427,16 @@
     return out;
   }
 
+  function num(n) { return '№ ' + ('000' + n).slice(-4); }
   var i = 0, timer = null;
   var reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   function show(n) {
     line.innerHTML = render(frames[n]);
     cap.innerHTML = frames[n].c;
+    codeEl.textContent = num(n);
+    capcode.textContent = num(n);
+    capwrap.className = 'caption' + (frames[n].p ? ' pressure' : '');
   }
   function step() {
     show(i);
@@ -337,7 +444,7 @@
     i = (i + 1) % frames.length;
     timer = setTimeout(step, d);
   }
-  if (reduced) { show(3); } else { step(); }
+  if (reduced) { show(8); } else { step(); }
 
   document.getElementById('copy').addEventListener('click', function () {
     var btn = this;

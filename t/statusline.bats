@@ -1324,7 +1324,7 @@ _seed_week_store() {
     iso=$(date -u -d "@$reset_5h" '+%Y-%m-%dT%H:%M:%SZ')
     : > "$tmpdir/usage.jsonl"
     # 20 -> 21 -> (stale 8) -> 23: the envelope credits 1 + 2, never +15
-    for spec in "600 20" "2400 21" "2500 8" "2600 23"; do
+    for spec in "600 20" "4200 21" "4300 8" "4400 23"; do
         set -- $spec
         printf '{"timestamp":%s,"five_hour":{"utilization":%s,"resets_at":"%s"},"seven_day":{"utilization":20}}\n' \
             "$((fs + $1))" "$2" "$iso" >> "$tmpdir/usage.jsonl"
@@ -1340,23 +1340,50 @@ _seed_week_store() {
     reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
     usage=$(printf '{"fetched_at":%s,"five_hour":{"utilization":9},"seven_day":{"utilization":20,"resets_at":"%s"}}' "$(date +%s)" "$reset_7d")
     plain=$(strip_ansi "$(build_week_row "$usage" always)" | sed 's/ [0-9.]*x @.*$//; s/ @.*$//')
-    # everything from ▮ to the end is one contiguous run
-    [[ "${plain#*▮}" =~ ^▯+$ ]]
+    # everything from ▮ to the end is one contiguous run: kept hollow cells,
+    # then the folded tail (no gap ever lands right after the now-marker)
+    [[ "${plain#*▮}" =~ ^▯+\.\.\.▯5hx[0-9]+$ ]]
     rm -rf "$tmpdir"
 }
 
-@test "build_week_row: the 5h strip credits each half hour with the points it added" {
+@test "build_week_row: the folded 7d tail still accounts for all 34 slots" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
+    usage=$(printf '{"fetched_at":%s,"five_hour":{"utilization":9},"seven_day":{"utilization":20,"resets_at":"%s"}}' "$(date +%s)" "$reset_7d")
+    plain=$(strip_ansi "$(build_week_row "$usage" always)" | sed 's/ [0-9.]*x @.*$//; s/ @.*$//' | tr -d ' ')
+    strip="${plain#7d}"
+    [[ "$strip" =~ ^(.*)\.\.\.▯5hx([0-9]+)$ ]]
+    drawn=$(printf '%s' "${BASH_REMATCH[1]}" | grep -o . | wc -l)
+    [ $((drawn + BASH_REMATCH[2])) -eq 34 ]
+    # exactly WEEK_FUTURE_KEEP hollow cells stay visible before the fold
+    [[ "${BASH_REMATCH[1]}" == *"▮▯▯" ]]
+    rm -rf "$tmpdir"
+}
+
+@test "build_week_row: a dry tail folds as × — the wall of dry cells is one glyph" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    _write_profile_cache "$tmpdir" 21 30 0     # 30%/day learned: dries days early
+    reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
+    usage=$(printf '{"fetched_at":%s,"five_hour":{"utilization":9},"seven_day":{"utilization":50,"resets_at":"%s"}}' "$(date +%s)" "$reset_7d")
+    plain=$(strip_ansi "$(build_week_row "$usage" always)" | sed 's/ [0-9.]*x @.*$//; s/ @.*$//' | tr -d ' ')
+    [[ "$plain" =~ \.\.\.×5hx[0-9]+$ ]]
+    rm -rf "$tmpdir"
+}
+
+@test "build_week_row: the 5h strip credits each hour with the points it added" {
     tmpdir=$(mktemp -d)
     CLAUDE_ACCOUNT_DIR="$tmpdir"
     now=$(date +%s)
-    reset_5h=$((now + 3 * 3600 - 400))    # window started 2h+ ago: we sit in cell 4
+    reset_5h=$((now + 3600 - 400))    # window started 4h+ ago: we sit in cell 4
     fs=$(( ( (reset_5h - 18000 + 150) / 300 ) * 300 ))
     reset_5h_iso=$(date -u -d "@$reset_5h" '+%Y-%m-%dT%H:%M:%SZ')
     reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
     usage=$(printf '{"fetched_at":%s,"five_hour":{"utilization":30,"resets_at":"%s"},"seven_day":{"utilization":20,"resets_at":"%s"}}' "$now" "$reset_5h_iso" "$reset_7d")
     : > "$tmpdir/usage.jsonl"
-    # +10m 5%, +40m 15%, +70m 15% (idle), +100m 40%: cells 0:5 1:10 2:0 3:25
-    for spec in "600 5" "2400 15" "4200 15" "6000 40"; do
+    # +30m 5%, +1h30 15%, +2h30 15% (idle), +3h30 40%: cells 0:5 1:10 2:0 3:25
+    for spec in "1800 5" "5400 15" "9000 15" "12600 40"; do
         set -- $spec
         printf '{"timestamp":%s,"five_hour":{"utilization":%s,"resets_at":"%s"},"seven_day":{"utilization":20}}\n' \
             "$((fs + $1))" "$2" "$reset_5h_iso" >> "$tmpdir/usage.jsonl"
@@ -1364,8 +1391,8 @@ _seed_week_store() {
     plain=$(strip_ansi "$(build_week_row "$usage" auto)")
     [[ "$plain" == "5h "* ]]
     five="${plain#5h }"; five="${five%%  7d*}"; five=$(printf '%s' "$five" | sed 's/ [0-9.]*x @.*$//; s/ @.*$//')
-    [ "$five" = "▃▅ˍ█▮▯▯▯▯▯" ]
-    # 30% in 2h -> dry past the reset: holds, so no × in this window
+    [ "$five" = "▃▅ˍ█▮" ]
+    # 30% in 4h+ -> dry past the reset: holds, so no × in this window
     [[ "$five" != *×* ]]
     rm -rf "$tmpdir"
 }
@@ -1377,7 +1404,7 @@ _seed_week_store() {
     usage=$(printf '{"fetched_at":%s,"five_hour":{"utilization":9},"seven_day":{"utilization":20,"resets_at":"%s"}}' "$(date +%s)" "$reset_7d")
     [ -z "$(build_week_row "$usage" auto)" ]
     plain=$(strip_ansi "$(build_week_row "$usage" always)" | sed 's/ [0-9.]*x @.*$//; s/ @.*$//' | tr -d ' ')
-    [[ "$plain" =~ ^7d░+▮▯+$ ]]
+    [[ "$plain" =~ ^7d░+▮▯+\.\.\.▯5hx[0-9]+$ ]]
     [ -z "$(build_week_row "$usage" off)" ]
     # no live 7d window: nothing, even in always mode
     [ -z "$(build_week_row '{"seven_day":{"utilization":20}}' always)" ]
@@ -1465,7 +1492,9 @@ _seed_week_store() {
     reset_5h=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
     reset_7d=$(jq -r .seven_day.resets_at "$tmpdir/.claude/statusline/usage.cache")
     input=$(printf '{"session_id":"wk","model":{"id":"claude-opus-4-8","display_name":"Opus"},"cwd":"/t","workspace":{"current_dir":"/t"},"cost":{"total_cost_usd":0},"context_window":{"used_percentage":10,"context_window_size":200000},"rate_limits":{"five_hour":{"used_percentage":85,"resets_at":"%s"},"seven_day":{"used_percentage":55,"resets_at":"%s"}}}' "$reset_5h" "$reset_7d")
-    out=$(printf '%s' "$input" | HOME="$tmpdir" COLUMNS=96 setsid -w bash "$SCRIPT_DIR/statusline.sh" --notice off)
+    # 88 cols: the merged form needs ~92 since the strips narrowed (5-cell 5h,
+    # folded 7d tail), so the advisor falls back to a row of its own
+    out=$(printf '%s' "$input" | HOME="$tmpdir" COLUMNS=88 setsid -w bash "$SCRIPT_DIR/statusline.sh" --notice off)
     [ "$(printf '%s\n' "$out" | wc -l)" -eq 3 ]
     l1=$(printf '%s\n' "$out" | sed -n 1p | sed "s/\x1b\[[0-9;]*m//g")
     l2=$(printf '%s\n' "$out" | sed -n 2p | sed "s/\x1b\[[0-9;]*m//g")
@@ -1630,6 +1659,34 @@ EOF
     tmpdir=$(mktemp -d)
     CLAUDE_ACCOUNT_DIR="$tmpdir"
     [ -z "$(seven_day_forecast 50 432000)" ]
+    rm -rf "$tmpdir"
+}
+
+@test "seven_day_forecast: a corrupt profile (>100%/day weekday) says nothing" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    # 145%/day of a 100-point pool is not a rate, it is a broken writer.
+    # Measured live 2026-08-19: a pre-envelope build wrote thu=145 /
+    # recent=343 into a shared home and the walk called a 2%-used fresh
+    # window dry in 30h, red, on every render.
+    cat > "$tmpdir/forecast.cache" <<EOF
+{"computed_at":$(date +%s),"days_history":22,"recent_24h":343,"recent_48h":380,
+ "weekday_profile":{"0":9,"1":15,"2":28,"3":145,"4":21,"5":16,"6":13}}
+EOF
+    [ -z "$(seven_day_forecast 2 518400)" ]
+    rm -rf "$tmpdir"
+}
+
+@test "seven_day_forecast: recent_24h spanning a reset clamps to the pool" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    # 180 points in 24h is legitimate across a reset, but this window cannot
+    # burn faster than 100/day: 50% used, 3d left dries in 12h (gap 60h),
+    # not in 6.7h (gap 65h) at the unclamped rate.
+    _write_profile_cache "$tmpdir" 21 5 180
+    read -r level gap <<<"$(seven_day_forecast 50 259200)"
+    [ "$level" = "red" ]
+    [ "$gap" -ge 59 ] && [ "$gap" -le 60 ]
     rm -rf "$tmpdir"
 }
 
