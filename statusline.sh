@@ -2260,8 +2260,16 @@ _profile_walk() {
     {
         ndays = $1 + 0; r24 = $2 + 0
         if (r24 < 0) r24 = 0               # unlearned recent: no blend, no lie
+        if (r24 > 100) r24 = 100           # a reset can double the envelope in
+                                           # 24h; THIS window still cannot lose
+                                           # more than everything in a day
         for (i = 0; i <= 6; i++) prof[i] = $(i + 3) + 0
         if (ndays < 14) exit               # cold start: not enough history
+        # No weekday can AVERAGE above the whole pool per day. A profile that
+        # claims one came from a broken accountant (measured: a pre-envelope
+        # writer sharing this home put 145 in Thursday and the walk called a
+        # 2%-used fresh window dry in 30h). Corrupt input earns silence.
+        for (i = 0; i <= 6; i++) if (prof[i] > 100) exit
         # fallback rate for never-seen weekdays: mean of known ones
         known = 0; sum = 0
         for (i = 0; i <= 6; i++) if (prof[i] >= 0) { sum += prof[i]; known++ }
@@ -2625,25 +2633,33 @@ run_session_summary() {
 # One grammar at two scales. The 7d strip: one cell per 5h slot of the 7d
 # period (34; the last a 3h stub) on a fixed grid from the period start, a
 # thin gap at each local midnight so days read as clusters without a ruler.
-# The 5h strip: one cell per 30 min of the CURRENT 5h window (10 cells).
+# The 5h strip: one cell per hour of the CURRENT 5h window (5 cells).
 #   ▁▂▃▄▅▆▇█  a cell that ran, height ∝ points it burned (7d points per
-#             5h window; 5h points per half hour — same scale, so a full
-#             window reads the same height in both)
+#             5h window; 5h points per hour)
 #   ˍ         ran, burned under a point, or idle inside the log's coverage — a
 #             bar of height zero, on the baseline
 #   ░         unknown — outside the sample log's coverage
 #   ▮         the cell you are in now
 #   ▯         a cell still ahead of you (the hollow of ▮: an empty slot)
 #   ×         a cell the pool will not cover at the current pace
+#   ...▯5hx28 the folded future: 28 more 5h slots to the reset, all alike
+#             (× red when the tail projects dry) — live 7d strip only
 # Unknown and idle are deliberately different glyphs: drawing a gap in the
 # record as an idle session is the one lie this row must not tell.
 # Shared by the live `--week` row and the `week` subcommand, so the two
 # surfaces cannot disagree.
 
 WEEK_CELLS=34
-FIVE_CELLS=10
-FIVE_CELL_SECS=1800
+FIVE_CELLS=5
+FIVE_CELL_SECS=3600
 WEEK_CACHE_TTL_SECS=300
+# The live row compresses the 7d strip's future run: after the now-marker it
+# keeps WEEK_FUTURE_KEEP hollow cells, then folds the rest into `...▯5hx28`
+# (count = slots to the reset; × red when the tail projects dry). History is
+# information, the future is all the same cell — but only fold when it hides
+# enough to matter, so a closing week still draws to its edge.
+WEEK_FUTURE_KEEP=2
+WEEK_FUTURE_MIN_HIDE=10
 
 # The period start on the same 5-min grid the window keys are rounded to.
 # resets_at is jittered by the API (15:59:59.76 one fetch, 16:00:00.47 the
@@ -2665,7 +2681,7 @@ week_period_start() {
 #   2. the 5h strip: samples of the current 5h window (same key), sorted,
 #      walked as a monotone envelope (running max — utilization only climbs
 #      inside a window; a dip is a stale reading, never a refund), each
-#      step credited to the half-hour cell the sample fell in.
+#      step credited to the hour cell the sample fell in.
 week_scan() {
     local period_start="$1" five_start="${2:-0}"
     local ujl="$CLAUDE_ACCOUNT_DIR/usage.jsonl" wc="$CLAUDE_ACCOUNT_DIR/week.cache"
@@ -2771,17 +2787,19 @@ week_dry_slot() {
 
 # The colored strip. Args: fill percent (for the pressure tint), now,
 # period start, dry cell (-1 none), history line ("lo hi slot:cost,..."),
-# cell count, cell seconds, day-gaps flag. Cells and gaps come out of one awk
-# so the row is one string with a color run per role.
+# cell count, cell seconds, day-gaps flag, future cells kept before folding
+# (0 = draw all), cell-unit label for the fold token. Cells and gaps come out
+# of one awk so the row is one string with a color run per role.
 build_ledger_strip() {
-    local pct="$1" now="$2" ps="$3" dry="$4" hist="$5" cells_n="$6" cell_secs="$7" gaps="${8:-0}"
+    local pct="$1" now="$2" ps="$3" dry="$4" hist="$5" cells_n="$6" cell_secs="$7" gaps="${8:-0}" fut="${9:-0}" unit="${10:-}"
     local span_lo="" span_hi="" cells=""
     [ -n "$hist" ] && read -r span_lo span_hi cells <<<"$hist"
     local fill_color tzoff_s
     fill_color=$(get_usage_color "$pct")
     tzoff_s=$(date +%z | awk '{ s=substr($0,1,1)=="-"?-1:1; h=substr($0,2,2)+0; m=substr($0,4,2)+0; print s*(h*3600+m*60) }')
     awk -v w="$cells_n" -v cs="$cell_secs" -v ps="$ps" -v now="$now" -v dry="$dry" \
-        -v gaps="$gaps" -v tz="$tzoff_s" \
+        -v gaps="$gaps" -v tz="$tzoff_s" -v fut="$fut" \
+        -v minhide="$WEEK_FUTURE_MIN_HIDE" -v unit="$unit" \
         -v lo="${span_lo:--1}" -v hi="${span_hi:--1}" -v cells="$cells" \
         -v C_FILL="$fill_color" -v C_DIM="$DIM" -v C_NOW="$BOLD" \
         -v C_DRY="$RED" -v C_OFF="$RESET" '
@@ -2795,8 +2813,14 @@ build_ledger_strip() {
             n = split(cells, a, ",")
             for (i = 1; i <= n; i++) { split(a[i], kv, ":"); cost[kv[1]] = kv[2] }
             nowslot = int((now - ps) / cs)
+            # fold the future tail: everything past the kept cells is the
+            # same hollow slot, so name it once with a count instead of
+            # drawing it N times
+            lim = w
+            if (fut > 0 && w - (nowslot + 1 + fut) >= minhide)
+                lim = nowslot + 1 + fut
             s = ""; prev = ""; pday = -1
-            for (i = 0; i < w; i++) {
+            for (i = 0; i < lim; i++) {
                 start = ps + i * cs
                 # a thin gap where a local calendar day begins, in HISTORY only:
                 # days read as clusters (a day with 5 windows shows it) without
@@ -2819,17 +2843,25 @@ build_ledger_strip() {
                 if (c != prev) { s = s C_OFF c; prev = c }
                 s = s g
             }
+            if (lim < w) {
+                # the fold: glyph = how the tail ends (× red when the pool
+                # dries before the reset), count = slots left to the reset
+                if (dry >= 0 && dry < w) { tg = "×"; tc = C_DRY }
+                else                     { tg = "▯"; tc = C_DIM }
+                s = s C_OFF tc "..." tg unit "x" (w - lim)
+            }
             print s C_OFF
         }'
 }
 
 # 7d strip: 34 x 5h cells from the period start, day-gapped. $5 is
-# week_history_cells' line.
+# week_history_cells' line; $6 folds the future tail after that many kept
+# cells (the live row passes WEEK_FUTURE_KEEP; the `week` report draws all).
 build_week_strip() {
-    build_ledger_strip "$1" "$2" "$3" "$4" "$5" "$WEEK_CELLS" 18000 1
+    build_ledger_strip "$1" "$2" "$3" "$4" "$5" "$WEEK_CELLS" 18000 1 "${6:-0}" 5h
 }
 
-# 5h strip: 10 x 30-min cells of the current window. $5 is
+# 5h strip: 5 x 1h cells of the current window. $5 is
 # five_history_cells' line.
 build_five_strip() {
     build_ledger_strip "$1" "$2" "$3" "$4" "$5" "$FIVE_CELLS" "$FIVE_CELL_SECS" 0
@@ -2957,7 +2989,7 @@ build_week_row() {
         local dry
         dry=$(week_dry_slot "$seven_int" "$seven_secs" "$now" "$period_start")
         [ -n "$parts" ] && parts="$parts  "
-        parts="${parts}${DIM}7d ${RESET}$(build_week_strip "$seven_int" "$now" "$period_start" "$dry" "$week_hist")$(strip_tail "$seven_int" "$seven_secs" "$SEVEN_DAY_WINDOW_SECS" "$now" "$seven_reset_mode")"
+        parts="${parts}${DIM}7d ${RESET}$(build_week_strip "$seven_int" "$now" "$period_start" "$dry" "$week_hist" "$WEEK_FUTURE_KEEP")$(strip_tail "$seven_int" "$seven_secs" "$SEVEN_DAY_WINDOW_SECS" "$now" "$seven_reset_mode")"
     fi
     printf '%b' "$parts"
 }

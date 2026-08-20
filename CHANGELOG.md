@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+## v0.30.0 — 2026-08-19 — the future folds
+
+**The 7d strip stopped drawing the future one cell at a time.** Thirty
+hollow cells after the now-marker carried one fact between them — "the
+week has room left" — and spent thirty columns saying it (thirty-one
+when the forecast painted them all `×`). The live row now keeps two
+cells after `▮` and folds the rest into `...▯5hx28`: the count of 5h
+slots to the reset, `×` red when the tail projects dry. History still
+draws in full — that is the information — and the fold only engages
+when it hides at least ten cells, so a closing week still draws to its
+edge. The `week` subcommand's wide ledger is untouched.
+
+**The 5h strip reads by the hour.** Ten half-hour cells were more
+resolution than a glance uses; five hour cells tell the same story in
+half the width, and the freed columns go to the notice beside them.
+
+**The live demo became the instrument it demos.** The GitHub Pages
+site dropped the fake macOS terminal window for a meter: a recessed
+register carrying the same frame-by-frame simulation (now with the
+folded week tail, hour cells, and a dry-forecast frame), a mono
+reading number the anatomy table cites (№ 0008), answering-pair
+anatomy rows — the left column states the reading, the right says
+what to do about it — and an odometer roll on quota digits that
+change. Narrow screens get a truthfully compacted line, the same way
+the script itself gives up the trace chip first. Stale claims fixed
+across the surfaces: 417 tests everywhere (README said 383, the site
+384, llms.txt 379), and llms.txt learned the new week-row grammar.
+
+**The forecast refuses a corrupt profile.** A weekday that claims to
+average more than the whole pool per day (`145%/day` of a 100-point
+week) can only come from a broken accountant — measured live when a
+pre-v0.29.0 build sharing the same home wrote `recent_24h: 343` and the
+walk called a 2%-used fresh window dry in 30 hours, red, on every
+render. Impossible input now earns silence, not a siren; `recent_24h`
+alone clamps to 100 (legitimately larger across a reset, but this
+window cannot lose more than everything in a day).
+
 ## v0.29.0 — 2026-08-19 — the store learns to count
 
 **Fixed: burn was counted wrong, by a factor of three.** The weekday
