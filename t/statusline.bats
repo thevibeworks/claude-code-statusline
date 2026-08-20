@@ -1013,7 +1013,7 @@ _write_ledger_fixture() { # dir
     run run_usage_report 28
     [ "$status" -eq 0 ]
     # 38% expired / 10 ppw = 3.8 windows' worth
-    [[ "$output" == *"(~3.8 x 5h windows unused)"* ]]
+    [[ "$output" == *"(~3.8 ✕ 5h windows unused)"* ]]
     [[ "$output" == *"one full 5h window = ~10.00% of the week"* ]]
     [[ "$output" == *"week in progress: 44% used"* ]]
     # 44% + 4d x 10%/day: heading ~83-84%
@@ -1120,7 +1120,7 @@ _write_ledger_fixture() { # dir
     # the row carries its own remaining/reset; no ruler, no day labels
     [[ "$plain" =~ ▯+\ +[0-9]+[dhm].*@[A-Z][a-z][a-z]\ [0-9]{2}:[0-9]{2} ]]
     [[ "$plain" != *"'-------'"* ]]
-    [[ "$plain" == *"budget ~24x5h left"* ]]
+    [[ "$plain" == *"budget ~24✕5h left"* ]]
     [[ "$plain" != *"stale"* ]]
     rm -rf "$tmpdir"
 }
@@ -1136,7 +1136,7 @@ _write_ledger_fixture() { # dir
     [ "$status" -eq 0 ]
     plain=$(strip_ansi "$output")
     bar=$(echo "$plain" | head -1 | sed 's/^7d  55% //; s/  .*$//' | tr -d ' ')
-    stated=$(echo "$plain" | sed -n 's/.*budget ~\([0-9]*\)x5h left.*/\1/p')
+    stated=$(echo "$plain" | sed -n 's/.*budget ~\([0-9]*\)✕5h left.*/\1/p')
     counted=$(echo "$bar" | grep -o '▮.*' | grep -o . | wc -l)
     [ "$counted" -eq "$stated" ]
     rm -rf "$tmpdir"
@@ -1206,7 +1206,7 @@ _seed_week_store() {
     plain=$(strip_ansi "$row")
     # no live 5h window in the fixture: the 7d strip alone
     [[ "$plain" == "7d "* ]]
-    strip=$(printf '%s' "${plain#7d }" | sed 's/ [0-9.]*x @.*$//; s/ @.*$//')
+    strip=$(printf '%s' "${plain#7d }" | sed 's/ [0-9.]*✕ @.*$//; s/ @.*$//')
     bar=$(printf '%s' "$strip" | tr -d ' ')
     [ "$(echo "$bar" | grep -o . | wc -l)" -eq 34 ]
     [[ "$bar" =~ [▁▂▃▄▅▆▇█]ˍ[▁▂▃▄▅▆▇█] ]]
@@ -1240,17 +1240,17 @@ _seed_week_store() {
     rm -rf "$tmpdir"
 }
 
-@test "strip_tail: pace from 1x tints, below 1x dims, young window hides it; reset is an axis label" {
+@test "strip_tail: pace from 1✕ tints, below 1✕ dims, young window hides it; reset is an axis label" {
     now=$(date +%s)
-    # 50% used, 2h30 into a 5h window -> 1.0x (yellow); reset inside 24h -> @HH:MM
+    # 50% used, 2h30 into a 5h window -> 1.0✕ (yellow); reset inside 24h -> @HH:MM
     t=$(strip_tail 50 9000 18000 "$now")
     plain=$(strip_ansi "$t")
-    [[ "$plain" =~ ^\ 1\.0x\ @[0-9]{2}:[0-9]{2}$ ]]
-    [[ "$t" == *"${YELLOW}1.0x"* ]]
-    # 10% at 2h30 -> 0.2x dim
-    t=$(strip_tail 10 9000 18000 "$now"); [[ "$t" == *"${DIM}0.2x"* ]]
-    # 80% at 2h30 -> 1.6x red
-    t=$(strip_tail 80 9000 18000 "$now"); [[ "$t" == *"${RED}1.6x"* ]]
+    [[ "$plain" =~ ^\ 1\.0✕\ @[0-9]{2}:[0-9]{2}$ ]]
+    [[ "$t" == *"${YELLOW}1.0✕"* ]]
+    # 10% at 2h30 -> 0.2✕ dim
+    t=$(strip_tail 10 9000 18000 "$now"); [[ "$t" == *"${DIM}0.2✕"* ]]
+    # 80% at 2h30 -> 1.6✕ red
+    t=$(strip_tail 80 9000 18000 "$now"); [[ "$t" == *"${RED}1.6✕"* ]]
     # 10 minutes in: too young for a pace, the reset still labels the edge
     plain=$(strip_ansi "$(strip_tail 10 17400 18000 "$now")")
     [[ "$plain" =~ ^\ @[0-9]{2}:[0-9]{2}$ ]]
@@ -1268,7 +1268,7 @@ _seed_week_store() {
     usage=$(jq -c --arg r "$reset_5h" '.five_hour.resets_at = $r | .five_hour.utilization = 40' "$tmpdir/usage.cache")
     plain=$(strip_ansi "$(build_week_row "$usage" auto)")
     # 5h resets inside 24h -> @HH:MM; 7d resets in 31h -> @Ddd HH:MM
-    [[ "$plain" =~ ^5h\ .*▮.*\ [0-9]\.[0-9]x\ @[0-9]{2}:[0-9]{2}\ \ 7d\ .*▮.*\ [0-9]\.[0-9]x\ @[A-Z][a-z][a-z]\ [0-9]{2}:[0-9]{2}$ ]]
+    [[ "$plain" =~ ^5h\ .*▮.*\ [0-9]\.[0-9]✕\ @[0-9]{2}:[0-9]{2}\ \ 7d\ .*▮.*\ [0-9]\.[0-9]✕\ @[A-Z][a-z][a-z]\ [0-9]{2}:[0-9]{2}$ ]]
     rm -rf "$tmpdir"
 }
 
@@ -1339,10 +1339,10 @@ _seed_week_store() {
     CLAUDE_ACCOUNT_DIR="$tmpdir"
     reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
     usage=$(printf '{"fetched_at":%s,"five_hour":{"utilization":9},"seven_day":{"utilization":20,"resets_at":"%s"}}' "$(date +%s)" "$reset_7d")
-    plain=$(strip_ansi "$(build_week_row "$usage" always)" | sed 's/ [0-9.]*x @.*$//; s/ @.*$//')
+    plain=$(strip_ansi "$(build_week_row "$usage" always)" | sed 's/ [0-9.]*✕ @.*$//; s/ @.*$//')
     # everything from ▮ to the end is one contiguous run: kept hollow cells,
     # then the folded tail (no gap ever lands right after the now-marker)
-    [[ "${plain#*▮}" =~ ^▯+\.\.\.▯5hx[0-9]+$ ]]
+    [[ "${plain#*▮}" =~ ^▯+\.\.\.▯5h✕[0-9]+$ ]]
     rm -rf "$tmpdir"
 }
 
@@ -1351,9 +1351,9 @@ _seed_week_store() {
     CLAUDE_ACCOUNT_DIR="$tmpdir"
     reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
     usage=$(printf '{"fetched_at":%s,"five_hour":{"utilization":9},"seven_day":{"utilization":20,"resets_at":"%s"}}' "$(date +%s)" "$reset_7d")
-    plain=$(strip_ansi "$(build_week_row "$usage" always)" | sed 's/ [0-9.]*x @.*$//; s/ @.*$//' | tr -d ' ')
+    plain=$(strip_ansi "$(build_week_row "$usage" always)" | sed 's/ [0-9.]*✕ @.*$//; s/ @.*$//' | tr -d ' ')
     strip="${plain#7d}"
-    [[ "$strip" =~ ^(.*)\.\.\.▯5hx([0-9]+)$ ]]
+    [[ "$strip" =~ ^(.*)\.\.\.▯5h✕([0-9]+)$ ]]
     drawn=$(printf '%s' "${BASH_REMATCH[1]}" | grep -o . | wc -l)
     [ $((drawn + BASH_REMATCH[2])) -eq 34 ]
     # exactly WEEK_FUTURE_KEEP hollow cells stay visible before the fold
@@ -1367,9 +1367,24 @@ _seed_week_store() {
     _write_profile_cache "$tmpdir" 21 30 0     # 30%/day learned: dries days early
     reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
     usage=$(printf '{"fetched_at":%s,"five_hour":{"utilization":9},"seven_day":{"utilization":50,"resets_at":"%s"}}' "$(date +%s)" "$reset_7d")
-    plain=$(strip_ansi "$(build_week_row "$usage" always)" | sed 's/ [0-9.]*x @.*$//; s/ @.*$//' | tr -d ' ')
-    [[ "$plain" =~ \.\.\.×5hx[0-9]+$ ]]
+    plain=$(strip_ansi "$(build_week_row "$usage" always)" | sed 's/ [0-9.]*✕ @.*$//; s/ @.*$//' | tr -d ' ')
+    [[ "$plain" =~ \.\.\.×5h✕[0-9]+$ ]]
+    # the dry cell and the operator sit side by side in this token and must
+    # never be the same mark: × is a reading, ✕ is punctuation
+    [[ "$plain" == *"×5h✕"* ]]
     rm -rf "$tmpdir"
+}
+
+@test "MULT_GLYPH: one column, distinct from the dry cell, overridable" {
+    # row 2 right-anchors the week row by ${#week_plain}, a character count —
+    # a glyph carrying a variation selector counts 1 and draws 2, overhanging
+    # the edge once per pace suffix. Guard the default, not the override.
+    [ "${#MULT_GLYPH}" -eq 1 ]
+    [ "$MULT_GLYPH" = "✕" ]
+    [ "$MULT_GLYPH" != "×" ]
+    now=$(date +%s)
+    t=$(MULT_GLYPH=╳; strip_ansi "$(strip_tail 50 9000 18000 "$now")")
+    [[ "$t" == *"1.0╳"* ]]
 }
 
 @test "build_week_row: the 5h strip credits each hour with the points it added" {
@@ -1390,7 +1405,7 @@ _seed_week_store() {
     done
     plain=$(strip_ansi "$(build_week_row "$usage" auto)")
     [[ "$plain" == "5h "* ]]
-    five="${plain#5h }"; five="${five%%  7d*}"; five=$(printf '%s' "$five" | sed 's/ [0-9.]*x @.*$//; s/ @.*$//')
+    five="${plain#5h }"; five="${five%%  7d*}"; five=$(printf '%s' "$five" | sed 's/ [0-9.]*✕ @.*$//; s/ @.*$//')
     [ "$five" = "▃▅ˍ█▮" ]
     # 30% in 4h+ -> dry past the reset: holds, so no × in this window
     [[ "$five" != *×* ]]
@@ -1403,8 +1418,8 @@ _seed_week_store() {
     reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
     usage=$(printf '{"fetched_at":%s,"five_hour":{"utilization":9},"seven_day":{"utilization":20,"resets_at":"%s"}}' "$(date +%s)" "$reset_7d")
     [ -z "$(build_week_row "$usage" auto)" ]
-    plain=$(strip_ansi "$(build_week_row "$usage" always)" | sed 's/ [0-9.]*x @.*$//; s/ @.*$//' | tr -d ' ')
-    [[ "$plain" =~ ^7d░+▮▯+\.\.\.▯5hx[0-9]+$ ]]
+    plain=$(strip_ansi "$(build_week_row "$usage" always)" | sed 's/ [0-9.]*✕ @.*$//; s/ @.*$//' | tr -d ' ')
+    [[ "$plain" =~ ^7d░+▮▯+\.\.\.▯5h✕[0-9]+$ ]]
     [ -z "$(build_week_row "$usage" off)" ]
     # no live 7d window: nothing, even in always mode
     [ -z "$(build_week_row '{"seven_day":{"utilization":20}}' always)" ]
@@ -1449,9 +1464,9 @@ _seed_week_store() {
     [ "$(compact_text "$t" 200)" = "$t" ]
     [ "$(compact_text "$t" 40)" = "! 5h caps ~05:18, 52m before reset" ]
     [ "$(compact_text "$t" 20)" = "! 5h caps ~05:18" ]
-    b="- budget ~3x5h left · even 20%/win · heading ~52%"
-    [ "$(compact_text "$b" 36)" = "- budget ~3x5h left · even 20%/win" ]
-    [ "$(compact_text "$b" 19)" = "- budget ~3x5h left" ]
+    b="- budget ~3✕5h left · even 20%/win · heading ~52%"
+    [ "$(compact_text "$b" 36)" = "- budget ~3✕5h left · even 20%/win" ]
+    [ "$(compact_text "$b" 19)" = "- budget ~3✕5h left" ]
     # no joint left: hard cut with an ellipsis, never a mid-word lie
     [ "$(compact_text "- budget last window is long" 16)" = "- budget last w…" ]
     # under 16 columns nothing honest fits
@@ -3406,10 +3421,10 @@ JSON
     reset_7d=$(date -u -d '+4 days 22 hours' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":20,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":21,\"resets_at\":\"$reset_7d\"}}"
     plain=$(strip_ansi "$(build_advisor_line "$usage" always)")
-    [[ "$plain" =~ ^-\ 24x5h\ left\ ·\ 3\.3%/win$ ]]
+    [[ "$plain" =~ ^-\ 24✕5h\ left\ ·\ 3\.3%/win$ ]]
     # the whole sentence is still there for surfaces with a line to spend
     long=$(strip_ansi "$(notice_long_line "$(notice_collect "$usage" always)")")
-    [[ "$long" =~ ^-\ budget\ ~24x5h\ left\ ·\ even\ 3\.3%/win\ ·\ heading\ ~70%$ ]]
+    [[ "$long" =~ ^-\ budget\ ~24✕5h\ left\ ·\ even\ 3\.3%/win\ ·\ heading\ ~70%$ ]]
 }
 
 @test "build_advisor_line: budget degrades to plain headroom in the last window" {
@@ -3602,8 +3617,8 @@ JSON
     now=$(date +%s)
     show=$(strip_ansi "$(strip_tail 50 3600 18000 "$now" show)")
     hide=$(strip_ansi "$(strip_tail 50 3600 18000 "$now" hide)")
-    [[ "$show" =~ ^\ [0-9]\.[0-9]x\ @[0-9]{2}:[0-9]{2}$ ]]
-    [[ "$hide" =~ ^\ [0-9]\.[0-9]x$ ]]
+    [[ "$show" =~ ^\ [0-9]\.[0-9]✕\ @[0-9]{2}:[0-9]{2}$ ]]
+    [[ "$hide" =~ ^\ [0-9]\.[0-9]✕$ ]]
     # default is still show: `--week` on its own has no badge above it
     [ "$(strip_ansi "$(strip_tail 50 3600 18000 "$now")")" = "$show" ]
 }
@@ -3621,7 +3636,7 @@ JSON
     l2=$(strip_ansi "$(printf '%s\n' "$out" | sed -n 2p)")
     # line 1 carries the 5h reset, so the 5h strip does not repeat it
     re_badge='5h\[40%@[0-9]{2}:[0-9]{2}\]'
-    re_strip='5h [^ ]+ [0-9]\.[0-9]x  7d'
+    re_strip='5h [^ ]+ [0-9]\.[0-9]✕  7d'
     re_seven='7d .*[0-9]{2}:[0-9]{2}$'
     [[ "$l1" =~ $re_badge ]]
     [[ "$l2" =~ $re_strip ]]

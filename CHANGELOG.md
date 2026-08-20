@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+## v0.31.0 — 2026-08-20 — the operator is not a reading
+
+**The ledger row was printing two different X's and calling them both
+`x`.** `×` (U+00D7) has always been a cell — the window the pool will
+not cover — and `x` was the ASCII letter standing in for multiplication.
+The folded tail put them one column apart in the same red: `...×5hx28`,
+where the first mark is a fact about your week and the second is
+punctuation. It read like a font failure. The multiplication sign is
+now `✕` (U+2715) everywhere the product multiplies: the folded future
+`...▯5h✕28`, the pace `0.7✕`, the budget notice `- 19✕5h left`, and
+`report`'s `(~4.1 ✕ 5h windows unused)`. Cells are the ink; the
+operator is punctuation, and it is deliberately the lighter of the two
+marks.
+
+**Why that codepoint and not a heavier one.** Row 2 right-anchors the
+week row to line 1's edge by counting characters, so a glyph that
+counts one and draws two overhangs the edge once per pace suffix — the
+same constraint that keeps `≡` and `☠` on their single column. `╳`
+(U+2573) is ambiguous-width and doubles under a CJK locale; `✖`
+(U+2716) is Emoji=Yes and can fall through to a colour font. `✕` is
+neutral-width and not an emoji. Both alternatives look stronger and are
+one `MULT_GLYPH=╳` away if your terminal disagrees.
+
 ## v0.30.0 — 2026-08-19 — the future folds
 
 **The 7d strip stopped drawing the future one cell at a time.** Thirty
