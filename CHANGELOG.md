@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+## v0.32.1 — 2026-08-23 — one projection, one floor
+
+**Row 3's gate was measuring the wrong thing.** It required the flash to
+beat the pin by `NOTICE_FLASH_MIN_GAIN` columns — the right question in
+v0.31.0, when row 3 restated row 2 and the only issue was whether
+truncation had left anything extra to say. Since v0.32.0 the flash is a
+*different* notice, so that subtraction compared two unrelated sentences
+and dropped a short one whenever the pin happened to be long: at 30
+columns `! 5h caps ~23:54` (16) beside `! 7d caps ~Tue 07:22` (20) is a
+gain of 4, and the second window lost its row for no reason a reader
+could name. The gate is now an absolute floor on the compacted flash
+itself (`NOTICE_FLASH_MIN_CHARS=16`, in `notice_flash_worth_row`): did
+truncation leave a sentence, or a stub? `7d dry ~Wed` says nothing you
+can act on; `7d dry ~Wed 19:50` still carries the number.
+
+**A ten-minute-old 5h window drew `▮▯×××`.** One big prompt front-loads
+burn — 7% in ten minutes — and `five_dry_cell` projected that as a rate
+and walled off the rest of the window. On the very same render the pace
+suffix hid itself (too young to judge) and the "5h caps" notice stayed
+silent (it waits 15 minutes): three surfaces, one linear projection,
+and only the loudest one spoke. The 5h dry cells now wait on the same
+evidence the other two do. `window_evidence_floor` is that rule in one
+place — 5% of the window's own length, so the 5h trio agrees at 15
+minutes and the 7d pace suffix keeps its ~8.4h — and
+`ADVISOR_PACE_MIN_ELAPSED` is retired into it, because a constant beside
+a formula is a drift waiting to happen.
+
 ## v0.32.0 — 2026-08-23 — say it once, and only when you know it
 
 **Row 3 was restating row 2 at greater length.** The flash reader

@@ -63,14 +63,13 @@ CACHE_BREAK_MIN_TOKENS=2000      # ignore cache drops below this (noise)
 CACHE_BREAK_DROP_PCT=5           # cache read must drop >5% to count as break
 CACHE_HEAVY_TOKENS=200000        # break badge turns bold-red past this: the
                                  # >200k premium-band prefix, an expensive rewrite
-ADVISOR_PACE_MIN_ELAPSED=900     # 5h cap projection needs >=15m of window aged
 ADVISOR_FLEET_FRESH_SECS=3600    # sibling account cache older than this is unknown
 ADVISOR_FLEET_FREE_PCT=40        # sibling counts as "free" at or under this 5h%
 ADVISOR_EXPIRY_HORIZON_SECS=86400 # 7d surplus clause: inside the last day of the week
 ADVISOR_SURPLUS_MIN_PCT=30       # unused weekly % that counts as expiring waste
 ADVISOR_UNDERUSE_END_PCT=60      # projected end-of-week <= this => underuse advice
 NOTICE_FLASH_SECS=90             # a new notice explains itself on row 3 this long
-NOTICE_FLASH_MIN_GAIN=12         # ...and only while it still says more than the pin
+NOTICE_FLASH_MIN_CHARS=16        # ...and only if truncation left a sentence, not a stub
 NOTICE_REBASE_SECS=1800          # an out-of-band 7d reset stays newsworthy this long
 NOTICE_REBASE_DROP_PCT=10        # 7d falling this much inside one window = re-based
 NOTICE_TAIL_SECS=3600            # "this 5h window is closing" horizon
@@ -2938,12 +2937,27 @@ ledger_has_past() {
     return 1
 }
 
+# How much of a window must have run before its own numbers may project:
+# 5% of its length (5h -> 15m, 7d -> ~8.4h, the fraction seven_day_elapsed
+# has always called the noise floor). One rule with one caller-supplied
+# length, because the alternative is a constant per surface and surfaces
+# that disagree about the same window — which is exactly how a 10-minute-old
+# 5h window came to draw `▮▯×××` while the pace suffix on the same row
+# judged itself too young to speak.
+window_evidence_floor() {
+    echo $(( $1 / 20 ))
+}
+
 # The 5h window's own dry cell: linear pace, the same projection the 5h
-# badge and the advisor's "5h caps ~14:20" use. -1 when it holds to reset.
+# badge and the advisor's "5h caps ~14:20" use — so it waits for the same
+# evidence they do. One prompt front-loading 7% ten minutes in is not a rate
+# yet, and a wall of × is the loudest way to say it. -1 when it holds to
+# reset, and while the window is too young to judge.
 five_dry_cell() {
     local five_int="$1" five_secs="$2" now="$3" five_start="$4"
-    local elapsed=$(( now - five_start ))
-    [ "$five_int" -gt 0 ] 2>/dev/null && [ "$elapsed" -gt 0 ] || { echo -1; return 0; }
+    local elapsed=$(( now - five_start )) floor
+    floor=$(window_evidence_floor 18000)
+    [ "$five_int" -gt 0 ] 2>/dev/null && [ "$elapsed" -ge "$floor" ] || { echo -1; return 0; }
     local dry_epoch=$(( now + elapsed * (100 - five_int) / five_int ))
     if [ "$dry_epoch" -lt $(( now + five_secs )) ]; then
         echo $(( (dry_epoch - five_start) / FIVE_CELL_SECS ))
@@ -2961,18 +2975,20 @@ five_period_start() {
 # Tail of a strip: pace and the axis label of its right end (the reset).
 # pace = used / elapsed-fraction; >1✕ means the pool caps before the reset.
 # Dim below 1✕, pressure-tinted from 1✕ (status lane), hidden while the
-# window is too young to judge — and young is a FRACTION of the window, not a
-# clock reading: 5% of its own length, so 5h still waits 15m and 7d waits
-# ~8.4h (the same fraction seven_day_elapsed calls noisy). A flat 15m was
-# right for 5h and nonsense for a week: an hour into a fresh window, 2% of
-# the pool divided by 0.6% of the time printed 3✕ in red. Reset is wall
+# window is too young to judge — window_evidence_floor, the one rule the 5h
+# dry cells and the caps notice also wait on: 5% of the window's own length,
+# so 5h waits 15m and 7d waits ~8.4h (the fraction seven_day_elapsed calls
+# noisy). A flat 15m was right for 5h and nonsense for a week: an hour into a
+# fresh window, 2% of the pool divided by 0.6% of the time printed 3✕ in red.
+# Reset is wall
 # clock: `@04:00` inside 24h, `@Wed 09:00` beyond — an axis label for a
 # timeline that ends there. $5 = "hide" drops it: when the badge above
 # already carries that reset, printing it again spends columns to say
 # nothing (one badge per fact, in both directions).
 strip_tail() {
     local pct="$1" secs_left="$2" length="$3" now="$4" reset_mode="${5:-show}"
-    local out="" elapsed=$(( length - secs_left )) min_elapsed=$(( length / 20 ))
+    local out="" elapsed=$(( length - secs_left )) min_elapsed
+    min_elapsed=$(window_evidence_floor "$length")
     if [ "$elapsed" -ge "$min_elapsed" ] && [ "$pct" -gt 0 ] 2>/dev/null; then
         local pace tint band
         pace=$(awk -v u="$pct" -v e="$elapsed" -v l="$length" 'BEGIN{ printf "%.1f", (u/100)/(e/l) }')
@@ -3732,6 +3748,17 @@ notice_flash_line() {
     return 0
 }
 
+# Is the flash still worth a row after the width took its bite? The old rule
+# asked whether it beat the PIN by NOTICE_FLASH_MIN_GAIN columns, which made
+# sense only while row 3 restated row 2 — once the flash became a different
+# notice, that subtraction compared two unrelated sentences and dropped a
+# short one whenever the pin happened to be long. The question is absolute:
+# `7d dry ~Wed` has spent a row to say nothing you can act on, `7d dry ~Wed
+# 19:50` still carries the number.
+notice_flash_worth_row() {
+    [ "${#1}" -ge "$NOTICE_FLASH_MIN_CHARS" ]
+}
+
 # Read the account's live numbers and emit every notice they justify.
 # Order below is the order the old advisor spoke in — pressure first, so the
 # `pressure` gate still mutes the "go heavier" family; rank decides what the
@@ -3842,8 +3869,9 @@ notice_collect() {
     # says capped; only the fleet hint still helps there.
     if [ "$five_int" -ge 80 ] && [ "$five_int" -lt 100 ] \
        && [ -n "$five_secs" ] && [ "$five_secs" -gt "$FIVE_HOUR_RECOVERY_SECS" ] 2>/dev/null; then
-        local elapsed=$((18000 - five_secs))
-        if [ "$elapsed" -ge "$ADVISOR_PACE_MIN_ELAPSED" ]; then
+        local elapsed=$((18000 - five_secs)) floor
+        floor=$(window_evidence_floor 18000)
+        if [ "$elapsed" -ge "$floor" ]; then
             local cap_secs=$(( (100 - five_int) * elapsed / five_int ))
             if [ "$cap_secs" -lt "$five_secs" ]; then
                 local cap_hhmm gap voice='!yellow'
@@ -5221,10 +5249,8 @@ if [ -n "$notice_flash" ]; then
     [ "$flash_anchor" -gt "$term_width" ] 2>/dev/null && flash_anchor=$term_width
     notice_flash=$(compact_text "$notice_flash" $((flash_anchor - 1)) || printf '%s' "$notice_flash")
     flash_plain=$(plain_text "$notice_flash")
-    pin_plain=$(plain_text "${advisor_short:-$advisor_line}")
-    # once truncation has eaten the explanation, row 3 is only the pin again:
-    # cheaper to say nothing than to spend a row restating it
-    if [ $(( ${#flash_plain} - ${#pin_plain} )) -ge "$NOTICE_FLASH_MIN_GAIN" ]; then
+    # a stub is not an explanation; see notice_flash_worth_row
+    if notice_flash_worth_row "$flash_plain"; then
         queue_row "${notice_flash}${RESET}" "FLASH"
     fi
 fi
