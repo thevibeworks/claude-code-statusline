@@ -102,7 +102,7 @@ at most daily, only from the usage fetch path.
 Output of the hourly usage.jsonl scan (EWMA half-life 14 days):
 
 ```json
-{"computed_at": 1785000000, "days_history": 21,
+{"schema": 2, "computed_at": 1785000000, "days_history": 21,
  "recent_24h": 14.20, "recent_48h": 22.10,
  "pct_per_window": 11.83,
  "weekday_profile": {"0": 5.1, "1": 27.3, "…": 0, "6": -1},
@@ -111,6 +111,30 @@ Output of the hourly usage.jsonl scan (EWMA half-life 14 days):
  "cost": {"usd_24h": 12.40, "usd_7d": 84.10,
           "usd_per_pct": 1.6820, "paired_pct": 50.0}}
 ```
+
+#### The co-writer contract
+
+`schema` is the version of the MODEL, not of the file: bump it when how
+burn is counted or what a profile value means changes; adding a field
+does not, because readers already tolerate a missing one via `// -1`.
+
+This is the one derived cache more than one tool wants to write, so the
+rule is explicit and it cuts both ways:
+
+- **Writers** stamp the schema they actually implement, and either emit
+  the full key set or merge into what is already there. Rebuilding only
+  the fields you know and dropping the rest is a truncating write.
+- **Readers** treat freshness as necessary, not sufficient. A cache whose
+  `schema` is missing or lower than the reader's own gets rebuilt on
+  sight, no matter how recently it was written.
+
+Freshness alone was the gate until a co-writer that summed raw positive
+deltas published `149.11` into Thursday and dropped `pct_per_window`,
+`scoped_*` and `cost` on the way past. The walk's corrupt-profile guard
+caught the 149 and went silent — the right reflex, the wrong resting
+state: the account had a sound profile ten minutes earlier and no way
+back to it until the hour turned. Silence is a defence against a bad
+model; it is not a substitute for knowing whose model you are reading.
 
 `weekday_profile` keys are days-of-week `0`=Sun..`6`=Sat, values are
 percent-of-7d-quota burned per day; `-1` = never observed.

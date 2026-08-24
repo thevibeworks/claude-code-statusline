@@ -93,6 +93,16 @@ CACHE_GLYPH="${CACHE_GLYPH:-≡}"
 # ✖ (U+2716) is Emoji=Yes (colour-font fallback); either would overhang row 2.
 MULT_GLYPH="${MULT_GLYPH:-✕}"
 
+# The ledger strips' baseline: a cell that ran and cost nothing. ▁ (U+2581
+# LOWER ONE EIGHTH BLOCK) is the shortest bar in the same Block Elements run
+# as ▂▃▄▅▆▇█, so the zero line and the bars share one font, one advance width
+# and one baseline. The old baseline was ˍ (U+02CD MODIFIER LETTER LOW
+# MACRON): a spacing modifier LETTER, resolved through the text font while
+# the bars fall back to the box-drawing face — visibly a different height and
+# width mid-strip. Burn therefore starts one rung up, at ▂; the ladder above
+# ▅ is untouched, so a fully burned window still reads the same.
+LEDGER_BASE_GLYPH="${LEDGER_BASE_GLYPH:-▁}"
+
 # Unobserved-TTL default for the cache expiry deadline. Mirrors the CLI's own
 # rule (should1hCacheTTL, CC source): claude.ai subscribers in the REPL get
 # cache_control ttl:"1h" (confirmed on every breakpoint in live traces);
@@ -2016,6 +2026,18 @@ get_seven_day_color() {
 
 USAGE_LOG_MAX_BYTES="${USAGE_LOG_MAX_BYTES:-33554432}"  # 32 MiB cap
 
+# forecast.cache contract version. Bump when the MODEL changes (how burn is
+# counted, what a profile value means) — not when a field is added, which
+# readers already tolerate via `// -1`.
+#   2  envelope burn + the full key set (pct_per_window, scoped_*, cost)
+#   -  absent/lower: an unversioned or partial cache. Rebuild on sight.
+# `~/.claude/statusline/` is a shared store (docs/api/state-dir.md) and this
+# file is the one derived cache more than one tool wants to write. The
+# version is what lets a reader tell "computed an hour ago by a writer that
+# counts burn the way I do" from "recently overwritten by one that does
+# not", without either tool having to know the other exists.
+FORECAST_SCHEMA=2
+
 # Rotate usage.jsonl when it exceeds the cap. Single .1 backup; the profile
 # builder reads .1 + current, so rotation never costs learned history.
 rotate_usage_log() {
@@ -2034,10 +2056,11 @@ rotate_usage_log() {
 # Rebuild forecast.cache from usage.jsonl (at most hourly; called from the
 # fetch path, which is itself TTL-gated). Output: one small JSON the renders
 # can read for free:
-#   { computed_at, days_history, recent_24h, recent_48h,
-#     weekday_profile: {"0":sun.. "6":sat, unknown days = -1} }
-# Daily burn = sum of positive deltas of seven_day.utilization within a local
-# calendar day (negative deltas = window reset; ignored by construction).
+#   { schema, computed_at, days_history, recent_24h, recent_48h,
+#     pct_per_window, weekday_profile: {"0":sun.. "6":sat, unknown = -1},
+#     scoped_name, scoped_recent_24h, scoped_profile, cost }
+# Daily burn is the rise of a MONOTONE ENVELOPE, never the sum of raw
+# positive deltas (see seven_env below and docs/api/state-dir.md).
 build_seven_day_profile() {
     local jsonl="$CLAUDE_ACCOUNT_DIR/usage.jsonl"
     local out="$CLAUDE_ACCOUNT_DIR/forecast.cache"
@@ -2045,11 +2068,23 @@ build_seven_day_profile() {
     local acct
     acct=$(jq -r '.account.uuid // empty' "$CLAUDE_ACCOUNT_DIR/profile.cache" 2>/dev/null)
     [ -n "$acct" ] || return 0
+    # Freshness is not enough: this cache is SHARED, and an hour of trusting
+    # a foreign shape is an hour of forecasting from it. A cooperating writer
+    # that keeps the contract stamps its own FORECAST_SCHEMA and preserves
+    # keys it does not compute; anything else — an older statusline, a tool
+    # that rebuilt only the fields it knew, a truncated write — is a cache
+    # this build must replace NOW, not in 59 minutes. Measured: a co-writer
+    # summing raw deltas published a profile with 149%/day in it and dropped
+    # pct_per_window, scoped_* and cost on the way past. The walk's
+    # corrupt-profile guard caught the 149 and went silent, which is the
+    # right reflex and the wrong resting state — the account had a good
+    # profile ten minutes earlier and no way back to it until the hour
+    # turned.
     if [ -f "$out" ]; then
-        local computed age
-        computed=$(jq -r '.computed_at // 0' "$out" 2>/dev/null)
+        local computed schema age
+        IFS=$'\t' read -r computed schema <<<"$(jq -r '[(.computed_at // 0), (.schema // 0)] | @tsv' "$out" 2>/dev/null)"
         age=$(( $(date +%s) - ${computed:-0} ))
-        [ "$age" -lt 3600 ] 2>/dev/null && return 0
+        [ "${schema:-0}" = "$FORECAST_SCHEMA" ] && [ "$age" -lt 3600 ] 2>/dev/null && return 0
     fi
     local now tzoff_s
     now=$(date +%s)
@@ -2076,7 +2111,7 @@ build_seven_day_profile() {
                ((.seven_day.resets_at // "") | norm),
                ($sc.percent // ""), ($sc.scope.model.display_name // ""),
                (.session.cost_usd // ""), (.session_id // "")] | @tsv' 2>/dev/null \
-        | sort -n | awk -F'\t' -v now="$now" -v tz="$tzoff_s" '
+        | sort -n | awk -F'\t' -v now="$now" -v tz="$tzoff_s" -v schema="$FORECAST_SCHEMA" '
         # Burn is the rise of a MONOTONE ENVELOPE, not the rise of the last
         # sample. Summing raw positive deltas counts every stale dip twice:
         # measured, that read 146 points of "burn" against a real 50-point
@@ -2215,7 +2250,7 @@ build_seven_day_profile() {
                 dw = (kp[2] + 4) % 7
                 cnum[dw] += cburn[k] * w; cden[dw] += w
             }
-            printf "{\"computed_at\":%d,\"days_history\":%d,", now, ndays
+            printf "{\"schema\":%d,\"computed_at\":%d,\"days_history\":%d,", schema, now, ndays
             printf "\"recent_24h\":%.2f,\"recent_48h\":%.2f,", r24, r48
             printf "\"pct_per_window\":%.2f,", ppw
             printf "\"weekday_profile\":{"
@@ -2532,7 +2567,7 @@ run_usage_report() {
             when=$(_fmt_epoch "${repoch:-0}" '%a %m-%d %H:%M')
             read -r gap end <<<"$(_seven_day_walk "$cur_su" "${secs:-0}")"
             if [ -n "$end" ]; then
-                printf '\nweek in progress: %.0f%% used, resets %s - heading ~%s%%\n' \
+                printf '\nweek in progress: %.0f%% used, resets %s - lands ~%s%%\n' \
                     "$cur_su" "$when" "$end"
             else
                 printf '\nweek in progress: %.0f%% used, resets %s\n' "$cur_su" "$when"
@@ -2647,8 +2682,8 @@ run_session_summary() {
 }
 
 # `statusline.sh week` — the 7d period as its 5h windows, one cell each:
-#   ▁▂▃▄▅▆▇█  a window that ran; height = 7d points it burned
-#   ·         ran, burned under 1%
+#   ▂▃▄▅▆▇█   a window that ran; height = 7d points it burned
+#   ▁         ran, burned under a point — the baseline
 #   ░         unknown: no samples on record for that window
 #   ▮         the window you are in now
 #   ▯         a window still ahead of you
@@ -2666,10 +2701,12 @@ run_session_summary() {
 # period (34; the last a 3h stub) on a fixed grid from the period start, a
 # thin gap at each local midnight so days read as clusters without a ruler.
 # The 5h strip: one cell per hour of the CURRENT 5h window (5 cells).
-#   ▁▂▃▄▅▆▇█  a cell that ran, height ∝ points it burned (7d points per
+#   ▂▃▄▅▆▇█   a cell that ran, height ∝ points it burned (7d points per
 #             5h window; 5h points per hour)
-#   ˍ         ran, burned under a point, or idle inside the log's coverage — a
-#             bar of height zero, on the baseline
+#   ▁         ran, burned under a point, or idle inside the log's coverage —
+#             the shortest bar in the same block, dim: the baseline. One
+#             Unicode run for the whole ladder (LEDGER_BASE_GLYPH); a
+#             modifier letter used to sit here and broke the row's metrics.
 #   ░         unknown — outside the sample log's coverage
 #   ▮         the cell you are in now
 #   ▯         a cell still ahead of you (the hollow of ▮: an empty slot)
@@ -2884,11 +2921,15 @@ build_ledger_strip() {
         -v nsin="$nowslot_in" \
         -v lo="${span_lo:--1}" -v hi="${span_hi:--1}" -v cells="$cells" \
         -v C_FILL="$fill_color" -v C_DIM="$DIM" -v C_NOW="$BOLD" \
-        -v C_DRY="$RED" -v C_OFF="$RESET" '
+        -v C_DRY="$RED" -v C_OFF="$RESET" -v BASE="$LEDGER_BASE_GLYPH" '
+        # One ladder, one Unicode block: BASE (▁) is the zero line and real
+        # burn starts at ▂ — see LEDGER_BASE_GLYPH for why the baseline may
+        # not come from a different block. Buckets above ▅ are unchanged, so
+        # a fully burned 5h window (~11 7d points) still reads ▆.
         function glyph(c) {
-            if (c < 1)  return "ˍ"
-            if (c <= 2) return "▁"; if (c <= 4)  return "▂"; if (c <= 6)  return "▃"
-            if (c <= 8) return "▄"; if (c <= 11) return "▅"; if (c <= 15) return "▆"
+            if (c < 1)  return BASE
+            if (c <= 2) return "▂"; if (c <= 4)  return "▃"; if (c <= 7)  return "▄"
+            if (c <= 11) return "▅"; if (c <= 15) return "▆"
             if (c <= 20) return "▇"; return "█"
         }
         BEGIN {
@@ -2916,8 +2957,8 @@ build_ledger_strip() {
                 if (i < nowslot) {
                     # a sampled sub-1% cell and an idle one both mean "cost
                     # nothing": one glyph, one tint, no colour-only meaning
-                    if (i in cost)                              { g = glyph(cost[i]); c = (g == "ˍ" ? C_DIM : C_FILL) }
-                    else if (lo >= 0 && lo <= start + cs && start <= hi) { g = "ˍ"; c = C_DIM }
+                    if (i in cost)                              { g = glyph(cost[i]); c = (g == BASE ? C_DIM : C_FILL) }
+                    else if (lo >= 0 && lo <= start + cs && start <= hi) { g = BASE; c = C_DIM }
                     else                                        { g = "░"; c = C_DIM }
                 } else if (i == nowslot)                        { g = "▮"; c = C_NOW }
                 else if (dry >= 0 && i >= dry)                  { g = "×"; c = C_DRY }
@@ -3045,7 +3086,7 @@ strip_tail() {
     printf '%s %s@%s%s' "$out" "$DIM" "$when" "$RESET"
 }
 
-# The live row: `5h ▂▅█▮▯ 0.6✕ @04:00  7d ▅▁▂▃▅ ˍ▃▅▃▃ …▮▯▯...▯(✕11) 0.7✕ @Wed 09:00` under the badges — this
+# The live row: `5h ▂▅█▮▯ 0.6✕ @04:00  7d ▅▁▂▃▅ ▁▃▅▃▃ …▮▯▯...▯(✕11) 0.7✕ @Wed 09:00` under the badges — this
 # sitting at the left, the week at the right, one grammar. Prints nothing
 # when there is no live window, or — in auto mode — when the log holds no
 # sample for either period yet (a row of ░░░▮▯▯ says nothing the badges do
@@ -3144,7 +3185,7 @@ run_week() {
     local indent="        " # 8 = width of the "7d NNN% " label column
 
     # the budget line under the strip: the advisor, always-mode, so calm
-    # weeks still show runway/even/heading; pressure clauses show as-is
+    # weeks still show runway/ration/landing; pressure clauses show as-is
     local last_model
     last_model=$(last_logged_model)
     local advisor
@@ -3643,12 +3684,12 @@ build_advisor_fleet_hint() {
 #                                         mid-week underuse, engaged sessions
 #                                         only — reaches exactly the users
 #                                         who can act on it
-#   budget ~19✕5h left · even 1.1%/win · heading ~52%
+#   budget ~19✕5h left · even 1.1%/win · lands ~52%
 #                                         always-mode calm line (shared
 #                                         budget frame with claude.py's
 #                                         watch advisor); in the last
 #                                         window: budget last window ·
-#                                         N% left · heading ~M%
+#                                         N% left · lands ~M%
 # ---------------------------------------------------------------------------
 # The notice engine. Readers below turn the account's live numbers into
 # NOTICES: one record per thing worth saying, each carrying both a short
@@ -4176,30 +4217,50 @@ notice_collect() {
         # need arbitrating. "left" means still to come.
         local windows elapsed7=$((SEVEN_DAY_WINDOW_SECS - seven_secs))
         windows=$(windows_ahead "$seven_secs" "${five_secs:-0}")
-        local heading="" heading_part="" walk_gap walk_end
+        # Where the week actually ends up. The learned walk answers it from
+        # YOUR weekday shape; linear pace is the fallback once a day has run,
+        # and it can only ever restate the week so far. Two different
+        # questions share this line and the grammar has to keep them apart:
+        # `even N%/win` is the RATION (spend this per window and the pool
+        # lands exactly on 100), `lands ~N%` is the PREDICTION (spend like
+        # you have been and you land here). "heading" said neither — a
+        # direction is not a destination, and the reader was left deciding
+        # which of the two numbers beside it was the forecast.
+        local lands="" lands_part="" walk_gap walk_end
         read -r walk_gap walk_end <<<"$(_seven_day_walk "$seven_int" "$seven_secs")"
         if [ -n "$walk_end" ]; then
-            heading="$walk_end"
+            lands="$walk_end"
         elif [ "$elapsed7" -ge 86400 ]; then
-            heading=$((seven_int * SEVEN_DAY_WINDOW_SECS / elapsed7))
-            [ "$heading" -gt 100 ] && heading=100
+            lands=$((seven_int * SEVEN_DAY_WINDOW_SECS / elapsed7))
+            [ "$lands" -gt 100 ] && lands=100
         fi
-        [ -n "$heading" ] && heading_part=" · heading ~${heading}%"
-        # 0 ahead is the only "last window": the week ends inside the one you
-        # are in, and there is nothing to divide the surplus across. At 1 the
-        # line keeps the count and the grammar — `1✕5h left · 25.0%/win` says
-        # the same thing the N-window form says, and calling two windows the
-        # last one to save a redundant clause is the wrong trade.
+        [ -n "$lands" ] && lands_part=" · lands ~${lands}%"
+        # Row 2 gets the runway and the LANDING, not the runway and the
+        # ration. Of the three clauses the long form carries, the landing is
+        # the only one the reader cannot derive from the badges above: the
+        # count is on the strip beside it (`...▯(✕9)`) and the ration is
+        # surplus ÷ that count. It is also the one that answers the question
+        # a calm week actually asks — not "how do I ration this" but "am I
+        # going to strand it". Cold, with no landing to state, the ration is
+        # the best short form there is and the line falls back to it.
+        local short_tail=""
         if [ "$windows" -le 0 ]; then
             notice_add 10 '-' acct "acct.budget.last" "${surplus}%" \
                 "last window · ${surplus}% left" \
-                "budget last window · ${surplus}% left${heading_part}"
+                "budget last window · ${surplus}% left${lands_part}"
         else
             local even
             even=$(awk -v h="$surplus" -v w="$windows" 'BEGIN{printf "%.1f", h/w}')
+            # 0 ahead is the only "last window": the week ends inside the one
+            # you are in, and there is nothing to divide the surplus across.
+            # At 1 the line keeps the count and the grammar — `1✕5h left ·
+            # 25.0%/win` says the same thing the N-window form says, and
+            # calling two windows the last one to save a redundant clause is
+            # the wrong trade.
+            if [ -n "$lands" ]; then short_tail="lands ~${lands}%"; else short_tail="${even}%/win"; fi
             notice_add 10 '-' acct "acct.budget.${windows}" "${windows}${MULT_GLYPH}5h" \
-                "${windows}${MULT_GLYPH}5h left · ${even}%/win" \
-                "budget ~${windows}${MULT_GLYPH}5h left · even ${even}%/win${heading_part}"
+                "${windows}${MULT_GLYPH}5h left · ${short_tail}" \
+                "budget ~${windows}${MULT_GLYPH}5h left · even ${even}%/win${lands_part}"
         fi
     fi
 

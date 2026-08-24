@@ -2,6 +2,61 @@
 
 ## Unreleased
 
+**The ledger is one typeface again.** The baseline — a cell that ran and
+cost nothing — was `ˍ` (U+02CD MODIFIER LETTER LOW MACRON). Every bar
+above it comes from Block Elements, and terminals resolve the two through
+different faces: the zero line sat at a different height and a different
+advance width than the bars beside it, and the seam showed on every row
+that held both. It is `▁` now, the shortest bar of the same run, so the
+whole ladder is one block. Burn therefore starts one rung up, at `▂`;
+`▅` and everything above it keep their old thresholds, so a fully burned
+window still reads the same height it always did. `LEDGER_BASE_GLYPH`
+overrides it.
+
+**A shared cache needs a version, not just a timestamp.** `forecast.cache`
+lives in `~/.claude/statusline/`, which is a published shared store, and
+it is the one derived file more than one tool wants to write. A
+co-writer that counted burn as the sum of raw positive deltas — the
+accounting this script abandoned two releases ago, because a stale dip
+gets refunded and then re-earned — published a profile with `149.11`
+into Thursday and dropped `pct_per_window`, `scoped_*` and `cost` on the
+way past.
+
+Everything downstream did the right thing and the result was still
+wrong. The walk's corrupt-profile guard saw 149%/day, judged it
+impossible and went silent. The exchange rate, the price and the scoped
+forecast lost their inputs and said "still learning". The budget line
+fell back to linear pace. Nothing lied; the account simply had a sound
+profile ten minutes earlier and no way back to it, because the rebuild
+gate asked only whether the file was fresh — and it was, having been
+overwritten seconds ago. Silence is a defence against a bad model. It is
+not a substitute for knowing whose model you are reading.
+
+So the cache carries `schema` now, the version of the MODEL rather than
+of the file, and freshness is necessary instead of sufficient: a cache
+whose schema is missing or lower is rebuilt on sight. The contract for
+co-writers is written down (`docs/api/state-dir.md`) and it cuts both
+ways — stamp the schema you actually implement, and either write the
+full key set or merge into what is there. Rebuilding the fields you know
+and dropping the rest is a truncating write.
+
+**`heading` was neither.** The budget line carried two futures with no
+grammar to tell them apart: `even 6.2%/win` is a RATION — spend that per
+window and the pool lands exactly on 100 — and the other number is a
+PREDICTION of where your own pattern takes you. A direction is not a
+destination, and the reader was left working out which of the two was
+the forecast. It reads `lands ~91%` now, in the budget line and in
+`report`'s week-in-progress alike.
+
+Row 2 states the landing rather than the ration. Of the three clauses
+the long form carries it is the only one not already on screen: the
+count is drawn on the strip beside it as `...▯(✕9)` and the ration is
+surplus ÷ that count, but where the week ends up is nowhere else. It is
+also the clause that answers what a calm week actually asks — not "how
+do I ration this" but "am I going to strand it". With no projection yet
+(a young week, a cold profile) there is no landing to state and the row
+falls back to the ration.
+
 ## v0.34.0 — 2026-08-24 — five slots, and a window you are in is not one you have left
 
 **The 5h strip is five cells again — but the future in them is empty, not
