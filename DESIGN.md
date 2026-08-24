@@ -82,17 +82,19 @@ own signal.
 ## The ledgers (row 2)
 
 ```
-5h ▃▄▮▯▯ 0.6x @04:00  7d ▅▁▂ ▃▅ˍ▃▅ ▃▃▁▂▁ ▮▯▯...▯5hx14 0.7x @Wed 09:00
+5h ▃▄▮▯▯ 0.6x @04:00  7d ▅▁▂ ▃▅ˍ▃▅ ▃▃▁▂▁ ▮▯▯...▯(x14) 0.7x @Wed 09:00
 ```
 
 One grammar, two scales. `5h` = this window as 5 hours; `7d` = the
 period as 34 five-hour slots, oldest left, a gap at each local midnight
 *in history only* — the run from `▮` on is contiguous. History draws in
 full; the live row folds the 7d future after two kept cells into
-`...▯5hx14` — the slots left to the reset, all alike, `×` red when the
-tail projects dry (the `week` report still draws every slot). Each strip ends
-with its pace (used ÷ elapsed; dim <1x, pressure ≥1x, hidden under 15 min)
-and the reset its right edge is — axis labels, not restated badges.
+`...▯(x14)` — the 5h windows left before the reset, all alike, `×` red
+when the tail projects dry (the `week` report still draws every slot). The
+count is the budget line's own, priced from the same instant. Each strip ends
+with its pace (used ÷ elapsed; dim <1x, pressure ≥1x, hidden until 5% of the
+window has run) and the reset its right edge is — axis labels, not restated
+badges.
 
 ```
 ▁▂▃▄▅▆▇█   burned; height = points that cell cost (▁ ≤2 … ▅ ≤11 … █ >20)
@@ -100,7 +102,7 @@ and the reset its right edge is — axis labels, not restated badges.
 ░          unknown — no sample; never drawn as idle
 ▮          now
 ▯          ahead — the hollow of ▮
-...▯5hx14  the folded future: 14 more 5h slots to the reset (live 7d row)
+...▯(x14)  the folded future: 14 more 5h windows before the reset (live 7d row)
 ×          pace won't cover it (7d: learned forecast, linear when cold; 5h: linear)
 ```
 

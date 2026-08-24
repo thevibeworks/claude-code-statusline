@@ -2,6 +2,58 @@
 
 ## Unreleased
 
+## v0.32.0 — 2026-08-23 — say it once, and only when you know it
+
+**Row 3 was restating row 2 at greater length.** The flash reader
+carried the pinned notice's key and never compared against it, so at
+session start the same sentence arrived twice, once short and once
+long: `- 12✕5h left · 5.8%/win` over `- budget ~12✕5h left · even
+5.8%/win · heading ~85%`. The function's own comment already promised
+it "never echoes the pin's own sentence" — now it skips record one and
+starts at record two, and row 3 shows the highest-ranked notice the pin
+is *not* already carrying. A calm start is two rows, the way it was
+supposed to be.
+
+**A 7d projection now needs a day of this window's own evidence.**
+Minutes after a weekly rollover the learned walk was projecting last
+week's Tuesday onto a pool 2% spent — measured: a 2.4h-old window with
+2% used came back `red, dry in 95h`, painted `×` across slot 14
+onward, and put `heading ~100%` on the budget line. Every input for
+that verdict predates the reset, including the trailing-24h blend the
+walk opens with, which describes a day lying on the far side of it.
+`SEVEN_DAY_YOUNG_SECS` (86400) silences the learned walk, the linear
+at-risk pace, and the dry-cell fallback until the window is a day old
+— one gate, so the forecast notices, the `×` cells, the heading, the
+accuracy logger and both subcommands go quiet together. Badges still
+report real percentages, and a young window that is genuinely spent
+still goes red on its own 85%+: the guard mutes pace, never facts. The
+5h window is untouched.
+
+**Pace waits for a fraction of its window, not a fixed 15 minutes.**
+One gate served both strips: 900 seconds, which is 5% of a 5h window
+and 0.1% of a week. An hour into a fresh week, 2% of the pool over
+0.6% of the time rendered `3.0✕` in red. The gate is now length/20 —
+5h still waits exactly 15 minutes, 7d waits ~8.4h, the same fraction
+`seven_day_elapsed` has always called the noise floor.
+
+**The fold token counts windows, not cells: `...▯(✕12)`.** The old
+`...▯5h✕10` counted hollow cells the fold hid, while the budget line
+beside it priced `12✕5h left` — two arithmetics on one row, and the
+reader was left to arbitrate. The 34-cell grid spans 170h against a
+168h period, which is where the two differed. The token is now
+parenthesized, drops the redundant `5h` unit, and counts the 5h
+windows remaining to the true reset: the same number the budget line
+prices, from the same instant. Dry tails still read `...×(✕12)` — `×`
+the cell, `✕` the operator, one column apart and never the same mark.
+
+**The budget voice drops its sigil.** `!` and `+` mark a notice that
+interrupts — you are about to hit something, or there is capacity to
+take. The week's resting reading interrupts nothing, and a leading `-`
+on a dim line reads as a bullet, which made rows 2 and 3 look like a
+two-item list. The pin now reads `12✕5h left · 5.8%/win`. Dim is the
+mark; the sentence carries itself. `--check` and `--week` still label
+their long form with the word `budget`.
+
 ## v0.31.0 — 2026-08-20 — the operator is not a reading
 
 **The ledger row was printing two different X's and calling them both

@@ -52,6 +52,12 @@ FIVE_HOUR_RECOVERY_SECS=1800     # recovery color when reset <= 30min
 SEVEN_DAY_RECOVERY_SECS=43200    # recovery color when reset <= 12h
 QUOTA_BUMP_NOTICE_SECS=60        # how long a quota "+N" bump flash stays up
 SEVEN_DAY_WINDOW_SECS=604800     # weekly quota window (fixed 7d) for pace math
+SEVEN_DAY_YOUNG_SECS=86400       # a 7d projection needs a day of THIS window's
+                                 # own evidence. Learned or linear, every pace
+                                 # read before that is last week's story told
+                                 # about a window that has barely started —
+                                 # and the trailing-24h blend is measuring a
+                                 # day that lies outside the window entirely
 EXTRA_AUTO_UTIL_PCT=50           # show extra when its own utilization >= 50%
 CACHE_BREAK_MIN_TOKENS=2000      # ignore cache drops below this (noise)
 CACHE_BREAK_DROP_PCT=5           # cache read must drop >5% to count as break
@@ -79,9 +85,9 @@ ADVISOR_UNDERUSE_MIN_5H=25       # underuse advice only in an engaged session (5
 CACHE_GLYPH="${CACHE_GLYPH:-≡}"
 
 # Multiplication sign for the ledger rows' two factors: the folded-future
-# count (`...▯5h✕28`) and the pace (`0.6✕`). NOT × (U+00D7) — that glyph is
+# count (`...▯(✕12)`) and the pace (`0.6✕`). NOT × (U+00D7) — that glyph is
 # already a strip cell, the one the pool will not cover, so reusing it would
-# print `...×5h×28` and make an operator look like a reading. U+2715 is the
+# print `...×(×12)` and make an operator look like a reading. U+2715 is the
 # lighter mark of the pair by design: cells are the ink, the operator is
 # punctuation. eaw=N and not an emoji, so it stays one column and the padding
 # math holds — ╳ (U+2573) is ambiguous-width (double under a CJK locale) and
@@ -1945,13 +1951,20 @@ weekend_secs_ahead() {
 #   level: green|yellow|red   runway_days: int, -1 when unknown   hint: 0|1
 # A 10% buffer keeps marginal overshoots quiet (warn only when you'll fall
 # >~10% short). Falls back to level thresholds when pace can't be judged
-# (no deadline, or the noisy first ~8h). $2 drives elapsed; $3 the deadline.
+# (no deadline, the noisy first ~8h, or a window younger than
+# SEVEN_DAY_YOUNG_SECS — two hours into a fresh week, 2% used extrapolates to
+# a 98h runway and calls the week at risk on nothing). A genuinely burned
+# young window still goes red on its own percentage; only the pace math waits.
+# $2 drives elapsed; $3 the deadline.
 #   $1 used%   $2 seconds_left   $3 effective deadline secs (optional)
 seven_day_pace() {
     local used; used=$(printf '%.0f' "$1" 2>/dev/null || echo 0)
     local secs_left="${2:-}" deadline="${3:-}"
     [ -z "$deadline" ] && deadline="$secs_left"
     local elapsed; elapsed=$(seven_day_elapsed "$secs_left")
+    if [ -n "$elapsed" ] && [ "$elapsed" -lt "$SEVEN_DAY_YOUNG_SECS" ] 2>/dev/null; then
+        elapsed=""
+    fi
     if [ -z "$elapsed" ] || [ "$used" -le 0 ] 2>/dev/null; then
         if   [ "$used" -ge 85 ] 2>/dev/null; then echo "red -1 0"
         elif [ "$used" -ge 70 ] 2>/dev/null; then echo "yellow -1 0"
@@ -2255,6 +2268,14 @@ _profile_walk() {
     local fc="$CLAUDE_ACCOUNT_DIR/forecast.cache"
     [ -f "$fc" ] || return 0
     [ -n "$secs_left" ] && [ "$secs_left" -gt 0 ] 2>/dev/null || return 0
+    # A young window has no evidence of its own. The profile is learned from
+    # the windows BEFORE this one, so minutes after a rollover the walk
+    # projects last week's Tuesday onto a pool that is 2% spent and calls it
+    # dry — and the L1 recent-24h blend it opens with describes a trailing day
+    # that sits on the far side of the reset. Silence until the window can
+    # speak for itself; the same silence a cold start earns.
+    local since_reset=$(( SEVEN_DAY_WINDOW_SECS - secs_left ))
+    [ "$since_reset" -ge "$SEVEN_DAY_YOUNG_SECS" ] 2>/dev/null || return 0
     local used_int
     used_int=$(printf '%.0f' "$used" 2>/dev/null || echo 0)
     [ "$used_int" -gt 0 ] 2>/dev/null || return 0
@@ -2633,10 +2654,11 @@ run_session_summary() {
 #   ▮         the window you are in now
 #   ▯         a window still ahead of you
 #   ×         a window the pool will not cover at the current pace
-# Count ▮ and what follows for the budget line's own "~N✕5h left". Past
-# cells come from usage.jsonl; unknown and idle stay different glyphs
-# because drawing a gap in the record as an idle session is the one lie
-# this row must not tell. The prospective glance beside report's
+# The report draws every slot, so ▮ and what follows IS the budget line's
+# "~N✕5h left" laid out cell by cell; the live row folds that same tail and
+# prints the count instead. Past cells come from usage.jsonl; unknown and
+# idle stay different glyphs because drawing a gap in the record as an idle
+# session is the one lie this row must not tell. The prospective glance beside report's
 # retrospective ledger; the same strip claude.py renders, so both
 # surfaces tell one story. Reads usage.cache; stale data renders but says so.
 # --- week row (the two windows as ledgers) ------------------------------------
@@ -2652,8 +2674,13 @@ run_session_summary() {
 #   ▮         the cell you are in now
 #   ▯         a cell still ahead of you (the hollow of ▮: an empty slot)
 #   ×         a cell the pool will not cover at the current pace
-#   ...▯5h✕28 the folded future: 28 more 5h slots to the reset, all alike
-#             (× red when the tail projects dry) — live 7d strip only.
+#   ...▯(✕12) the folded future: 12 more 5h windows before the reset, all
+#             alike (× red when the tail projects dry) — live 7d strip only.
+#             The count is windows-to-reset, the same number the budget line
+#             prices as "~12✕5h left" — one line, one arithmetic. (It is NOT
+#             the hidden-cell count: the 34-cell grid spans 170h and the
+#             period is 168h, and a row that says 10 beside a budget that
+#             says 12 makes the reader arbitrate between its own halves.)
 #             ✕ is the operator, × is a cell: the two never mean the same.
 # Unknown and idle are deliberately different glyphs: drawing a gap in the
 # record as an idle session is the one lie this row must not tell.
@@ -2665,10 +2692,10 @@ FIVE_CELLS=5
 FIVE_CELL_SECS=3600
 WEEK_CACHE_TTL_SECS=300
 # The live row compresses the 7d strip's future run: after the now-marker it
-# keeps WEEK_FUTURE_KEEP hollow cells, then folds the rest into `...▯5h✕28`
-# (count = slots to the reset; × red when the tail projects dry). History is
-# information, the future is all the same cell — but only fold when it hides
-# enough to matter, so a closing week still draws to its edge.
+# keeps WEEK_FUTURE_KEEP hollow cells, then folds the rest into `...▯(✕12)`
+# (count = 5h windows before the reset; × red when the tail projects dry).
+# History is information, the future is all the same cell — but only fold
+# when it hides enough to matter, so a closing week still draws to its edge.
 WEEK_FUTURE_KEEP=2
 WEEK_FUTURE_MIN_HIDE=10
 
@@ -2777,17 +2804,19 @@ five_history_cells() { week_scan "$1" "$2" | sed -n 2p; }
 # The slot where burn exhausts the pool before reset (-1 = none). The learned
 # walk speaks first (gap in HOURS before reset); with no trained forecast fall
 # back to the linear projection claude.py's cap_eta uses, so a wall visible on
-# one surface is visible on the other.
+# one surface is visible on the other. Both wait out SEVEN_DAY_YOUNG_SECS: a
+# row of × drawn across a window that opened an hour ago is drawn from last
+# week's burn, and this row does not draw what it cannot see.
 week_dry_slot() {
     local seven_int="$1" seven_secs="$2" now="$3" period_start="$4"
     local dry_epoch="" walk_gap walk_end elapsed7
     read -r walk_gap walk_end <<<"$(_seven_day_walk "$seven_int" "$seven_secs")"
+    elapsed7=$(( SEVEN_DAY_WINDOW_SECS - seven_secs ))
     if [ -n "$walk_gap" ] && [ "$walk_gap" != "-1" ] && [ "$walk_gap" -gt 0 ] 2>/dev/null; then
         dry_epoch=$(( now + seven_secs - walk_gap * 3600 ))
-    elif [ "$seven_int" -gt 0 ] 2>/dev/null; then
-        elapsed7=$(( SEVEN_DAY_WINDOW_SECS - seven_secs ))
-        [ "$elapsed7" -gt 0 ] && \
-            dry_epoch=$(( now + elapsed7 * (100 - seven_int) / seven_int ))
+    elif [ "$seven_int" -gt 0 ] 2>/dev/null \
+         && [ "$elapsed7" -ge "$SEVEN_DAY_YOUNG_SECS" ] 2>/dev/null; then
+        dry_epoch=$(( now + elapsed7 * (100 - seven_int) / seven_int ))
     fi
     if [ -n "$dry_epoch" ] && [ "$dry_epoch" -lt $(( now + seven_secs )) ] 2>/dev/null; then
         echo $(( (dry_epoch - period_start) / 18000 ))
@@ -2799,10 +2828,14 @@ week_dry_slot() {
 # The colored strip. Args: fill percent (for the pressure tint), now,
 # period start, dry cell (-1 none), history line ("lo hi slot:cost,..."),
 # cell count, cell seconds, day-gaps flag, future cells kept before folding
-# (0 = draw all), cell-unit label for the fold token. Cells and gaps come out
-# of one awk so the row is one string with a color run per role.
+# (0 = draw all), and the TRUE period length in seconds — the fold token
+# counts windows to the real reset, not cells on the grid, so it needs the
+# period, not the drawing. Defaults to the grid when a caller has nothing
+# truer to offer. Cells and gaps come out of one awk so the row is one string
+# with a color run per role.
 build_ledger_strip() {
-    local pct="$1" now="$2" ps="$3" dry="$4" hist="$5" cells_n="$6" cell_secs="$7" gaps="${8:-0}" fut="${9:-0}" unit="${10:-}"
+    local pct="$1" now="$2" ps="$3" dry="$4" hist="$5" cells_n="$6" cell_secs="$7" gaps="${8:-0}" fut="${9:-0}"
+    local plen="${10:-$(( cells_n * cell_secs ))}"
     local span_lo="" span_hi="" cells=""
     [ -n "$hist" ] && read -r span_lo span_hi cells <<<"$hist"
     local fill_color tzoff_s
@@ -2810,7 +2843,7 @@ build_ledger_strip() {
     tzoff_s=$(date +%z | awk '{ s=substr($0,1,1)=="-"?-1:1; h=substr($0,2,2)+0; m=substr($0,4,2)+0; print s*(h*3600+m*60) }')
     awk -v w="$cells_n" -v cs="$cell_secs" -v ps="$ps" -v now="$now" -v dry="$dry" \
         -v gaps="$gaps" -v tz="$tzoff_s" -v fut="$fut" \
-        -v minhide="$WEEK_FUTURE_MIN_HIDE" -v unit="$unit" -v mult="$MULT_GLYPH" \
+        -v minhide="$WEEK_FUTURE_MIN_HIDE" -v plen="$plen" -v mult="$MULT_GLYPH" \
         -v lo="${span_lo:--1}" -v hi="${span_hi:--1}" -v cells="$cells" \
         -v C_FILL="$fill_color" -v C_DIM="$DIM" -v C_NOW="$BOLD" \
         -v C_DRY="$RED" -v C_OFF="$RESET" '
@@ -2856,10 +2889,15 @@ build_ledger_strip() {
             }
             if (lim < w) {
                 # the fold: glyph = how the tail ends (× red when the pool
-                # dries before the reset), count = slots left to the reset
+                # dries before the reset), count = 5h windows still to come
+                # before the reset — the same number the budget line prices,
+                # not the number of cells this fold happens to hide.
+                # No apostrophes in here: this comment lives inside a
+                # single-quoted awk program.
                 if (dry >= 0 && dry < w) { tg = "×"; tc = C_DRY }
                 else                     { tg = "▯"; tc = C_DIM }
-                s = s C_OFF tc "..." tg unit mult (w - lim)
+                nleft = int((ps + plen - now + cs - 1) / cs)
+                s = s C_OFF tc "..." tg "(" mult nleft ")"
             }
             print s C_OFF
         }'
@@ -2868,8 +2906,11 @@ build_ledger_strip() {
 # 7d strip: 34 ✕ 5h cells from the period start, day-gapped. $5 is
 # week_history_cells' line; $6 folds the future tail after that many kept
 # cells (the live row passes WEEK_FUTURE_KEEP; the `week` report draws all).
+# The grid overshoots the period by design (34 ✕ 5h = 170h against a 168h
+# week), so the fold is told the period itself — its count ends at the reset,
+# where the week ends, not at the last cell it drew.
 build_week_strip() {
-    build_ledger_strip "$1" "$2" "$3" "$4" "$5" "$WEEK_CELLS" 18000 1 "${6:-0}" 5h
+    build_ledger_strip "$1" "$2" "$3" "$4" "$5" "$WEEK_CELLS" 18000 1 "${6:-0}" "$SEVEN_DAY_WINDOW_SECS"
 }
 
 # 5h strip: 5 ✕ 1h cells of the current window. $5 is
@@ -2920,15 +2961,19 @@ five_period_start() {
 # Tail of a strip: pace and the axis label of its right end (the reset).
 # pace = used / elapsed-fraction; >1✕ means the pool caps before the reset.
 # Dim below 1✕, pressure-tinted from 1✕ (status lane), hidden while the
-# window is too young to judge (ADVISOR_PACE_MIN_ELAPSED). Reset is wall
+# window is too young to judge — and young is a FRACTION of the window, not a
+# clock reading: 5% of its own length, so 5h still waits 15m and 7d waits
+# ~8.4h (the same fraction seven_day_elapsed calls noisy). A flat 15m was
+# right for 5h and nonsense for a week: an hour into a fresh window, 2% of
+# the pool divided by 0.6% of the time printed 3✕ in red. Reset is wall
 # clock: `@04:00` inside 24h, `@Wed 09:00` beyond — an axis label for a
 # timeline that ends there. $5 = "hide" drops it: when the badge above
 # already carries that reset, printing it again spends columns to say
 # nothing (one badge per fact, in both directions).
 strip_tail() {
     local pct="$1" secs_left="$2" length="$3" now="$4" reset_mode="${5:-show}"
-    local out="" elapsed=$(( length - secs_left ))
-    if [ "$elapsed" -ge "$ADVISOR_PACE_MIN_ELAPSED" ] && [ "$pct" -gt 0 ] 2>/dev/null; then
+    local out="" elapsed=$(( length - secs_left )) min_elapsed=$(( length / 20 ))
+    if [ "$elapsed" -ge "$min_elapsed" ] && [ "$pct" -gt 0 ] 2>/dev/null; then
         local pace tint band
         pace=$(awk -v u="$pct" -v e="$elapsed" -v l="$length" 'BEGIN{ printf "%.1f", (u/100)/(e/l) }')
         band=$(awk -v p="$pace" 'BEGIN{ print (p>=1.5?2:(p>=1.0?1:0)) }')
@@ -3476,6 +3521,8 @@ build_extra_usage_display() {
 #   opportunity  "+ ..." cyan        paid capacity is about to expire unused,
 #                                    or a sibling account is free while you're
 #                                    pinned — spend, don't conserve
+#   budget       no sigil, dim       the week's resting reading; it interrupts
+#                                    nothing, so it wears no mark
 # Cyan is reserved for opportunity: it can never mean pressure, so the color
 # alone carries the stance. Quiet = no row at all (Claude Code renders each
 # stdout line as its own row; printing nothing costs nothing). All times are
@@ -3561,7 +3608,7 @@ build_advisor_fleet_hint() {
 #   rank  voice  scope  key  hl  short  long
 #
 #   rank   value order; the top surviving record owns row 2
-#   voice  !red / !yellow pressure · + opportunity · - budget (dim)
+#   voice  !red / !yellow pressure · + opportunity · - budget (dim, no sigil)
 #   scope  5h / 7d / fb / acct — one voice per scope per frame, so two
 #          clauses about the same window can never disagree
 #   key    identity of the CONDITION, not of the text: row 3 shows a notice
@@ -3601,11 +3648,16 @@ notice_highlight() {
     printf '%s%s%s%s%s%s' "${text%%"$tok"*}" "$BOLD" "$tok" "$NO_BOLD" "$color" "${text#*"$tok"}"
 }
 
+# A sigil marks a voice that INTERRUPTS: `!` you are about to hit something,
+# `+` there is capacity to take. The budget voice interrupts nothing — it is
+# the week's resting reading — and a leading `-` on a dim line reads as a
+# bullet, which turned the pin into the first item of a list that had no
+# second item. Dim is the mark; the sentence carries itself.
 notice_render() {
-    local voice="$1" hl="$2" text="$3" color sigil
+    local voice="$1" hl="$2" text="$3" color sigil=''
     color=$(notice_voice_color "$voice")
-    case "$voice" in '!'*) sigil='!' ;; '+') sigil='+' ;; *) sigil='-' ;; esac
-    printf '%s%s %s%s' "$color" "$sigil" "$(notice_highlight "$text" "$hl" "$color")" "$RESET"
+    case "$voice" in '!'*) sigil='! ' ;; '+') sigil='+ ' ;; esac
+    printf '%s%s%s%s' "$color" "$sigil" "$(notice_highlight "$text" "$hl" "$color")" "$RESET"
 }
 
 # First time THIS session saw a condition (stamping it if new). Wall-clock
@@ -3657,7 +3709,10 @@ notice_long_line() {
 
 # Row 3: the same engine's long form, but only while the condition is new to
 # this session. It says the part that does not fit beside the ledgers, then
-# disappears and leaves the pin. Never echoes the pin's own sentence.
+# disappears and leaves the pin. Never echoes the pin's own sentence: record
+# one IS the pin, so the flash starts at record two. A calm start has one
+# thing to say and says it once — two rows, not the same sentence twice at
+# two lengths.
 notice_flash_line() {
     local records="$1" state="$2" now="${3:-$(date +%s)}"
     [ -n "$records" ] || return 0
@@ -3665,6 +3720,7 @@ notice_flash_line() {
     while IFS="$NOTICE_FS" read -r rank voice scope key hl short long; do
         [ -n "$key" ] || continue
         if [ "$first" = 1 ]; then pin_key="$key"; first=0; fi
+        [ "$key" = "$pin_key" ] && continue
         [ -n "$long" ] || continue
         local seen age
         seen=$(notice_first_seen "$key" "$state" "$now")

@@ -1259,6 +1259,19 @@ _seed_week_store() {
     [[ "$plain" =~ @[A-Z][a-z][a-z]\ [0-9]{2}:[0-9]{2}$ ]]
 }
 
+@test "strip_tail: young is a fraction of the window, not a clock reading" {
+    now=$(date +%s)
+    # 5h is unchanged: 15m is 5% of it, and the pace is legible from there
+    [[ "$(strip_ansi "$(strip_tail 5 $((18000 - 900)) 18000 "$now" hide)")" == *"✕"* ]]
+    [ -z "$(strip_tail 5 $((18000 - 899)) 18000 "$now" hide)" ]
+    # the same 15m is 0.1% of a week: 2% of the pool over 0.1% of the time
+    # printed 3.0✕ in red on an hour-old window. 7d now waits ~8.4h, the
+    # fraction seven_day_elapsed already calls the noise floor.
+    [ -z "$(strip_tail 2 $((604800 - 900)) 604800 "$now" hide)" ]
+    [ -z "$(strip_tail 2 $((604800 - 30239)) 604800 "$now" hide)" ]
+    [[ "$(strip_ansi "$(strip_tail 2 $((604800 - 30240)) 604800 "$now" hide)")" == *"✕"* ]]
+}
+
 @test "build_week_row: each strip ends with its pace and reset" {
     tmpdir=$(mktemp -d)
     CLAUDE_ACCOUNT_DIR="$tmpdir"
@@ -1342,22 +1355,48 @@ _seed_week_store() {
     plain=$(strip_ansi "$(build_week_row "$usage" always)" | sed 's/ [0-9.]*✕ @.*$//; s/ @.*$//')
     # everything from ▮ to the end is one contiguous run: kept hollow cells,
     # then the folded tail (no gap ever lands right after the now-marker)
-    [[ "${plain#*▮}" =~ ^▯+\.\.\.▯5h✕[0-9]+$ ]]
+    [[ "${plain#*▮}" =~ ^▯+\.\.\.▯\(✕[0-9]+\)$ ]]
     rm -rf "$tmpdir"
 }
 
-@test "build_week_row: the folded 7d tail still accounts for all 34 slots" {
+@test "build_week_row: the folded 7d tail counts windows to the reset, not cells hidden" {
     tmpdir=$(mktemp -d)
     CLAUDE_ACCOUNT_DIR="$tmpdir"
-    reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
-    usage=$(printf '{"fetched_at":%s,"five_hour":{"utilization":9},"seven_day":{"utilization":20,"resets_at":"%s"}}' "$(date +%s)" "$reset_7d")
+    now=$(date +%s)
+    # not a whole number of 5h windows out: the grid rounds the period start
+    # to 5 min, and an exact multiple would sit on the ceil boundary
+    reset_epoch=$((now + 5 * 86400 + 3600))
+    reset_7d=$(date -u -d "@$reset_epoch" '+%Y-%m-%dT%H:%M:%SZ')
+    usage=$(printf '{"fetched_at":%s,"five_hour":{"utilization":9},"seven_day":{"utilization":20,"resets_at":"%s"}}' "$now" "$reset_7d")
     plain=$(strip_ansi "$(build_week_row "$usage" always)" | sed 's/ [0-9.]*✕ @.*$//; s/ @.*$//' | tr -d ' ')
     strip="${plain#7d}"
-    [[ "$strip" =~ ^(.*)\.\.\.▯5h✕([0-9]+)$ ]]
+    [[ "$strip" =~ ^(.*)\.\.\.▯\(✕([0-9]+)\)$ ]]
     drawn=$(printf '%s' "${BASH_REMATCH[1]}" | grep -o . | wc -l)
-    [ $((drawn + BASH_REMATCH[2])) -eq 34 ]
     # exactly WEEK_FUTURE_KEEP hollow cells stay visible before the fold
     [[ "${BASH_REMATCH[1]}" == *"▮▯▯" ]]
+    # the count is 5h windows before the reset — the number the budget line
+    # prices — and NOT the cells the fold hid: the 34-cell grid spans 170h
+    # against a 168h period, so the two disagree by design
+    [ "${BASH_REMATCH[2]}" -eq $(( (reset_epoch - now + 17999) / 18000 )) ]
+    [ "${BASH_REMATCH[2]}" -ne $((34 - drawn)) ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_week_row: the fold token and the budget line count the same windows" {
+    # one line, one arithmetic: the row folded `...▯(✕N)` and the budget
+    # sentence beside it priced `~N✕5h left` from the same instant, and a
+    # reader must never have to arbitrate between the halves of one row
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    now=$(date +%s)
+    reset_7d=$(date -u -d "@$((now + 3 * 86400 + 7000))" '+%Y-%m-%dT%H:%M:%SZ')
+    usage=$(printf '{"fetched_at":%s,"five_hour":{"utilization":9},"seven_day":{"utilization":30,"resets_at":"%s"}}' "$now" "$reset_7d")
+    row=$(strip_ansi "$(build_week_row "$usage" always)")
+    [[ "$row" =~ \(✕([0-9]+)\) ]]
+    fold="${BASH_REMATCH[1]}"
+    pin=$(strip_ansi "$(build_advisor_line "$usage" always)")
+    [[ "$pin" =~ ^([0-9]+)✕5h\ left ]]
+    [ "$fold" -eq "${BASH_REMATCH[1]}" ]
     rm -rf "$tmpdir"
 }
 
@@ -1368,10 +1407,10 @@ _seed_week_store() {
     reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
     usage=$(printf '{"fetched_at":%s,"five_hour":{"utilization":9},"seven_day":{"utilization":50,"resets_at":"%s"}}' "$(date +%s)" "$reset_7d")
     plain=$(strip_ansi "$(build_week_row "$usage" always)" | sed 's/ [0-9.]*✕ @.*$//; s/ @.*$//' | tr -d ' ')
-    [[ "$plain" =~ \.\.\.×5h✕[0-9]+$ ]]
+    [[ "$plain" =~ \.\.\.×\(✕[0-9]+\)$ ]]
     # the dry cell and the operator sit side by side in this token and must
     # never be the same mark: × is a reading, ✕ is punctuation
-    [[ "$plain" == *"×5h✕"* ]]
+    [[ "$plain" == *"×(✕"* ]]
     rm -rf "$tmpdir"
 }
 
@@ -1419,7 +1458,7 @@ _seed_week_store() {
     usage=$(printf '{"fetched_at":%s,"five_hour":{"utilization":9},"seven_day":{"utilization":20,"resets_at":"%s"}}' "$(date +%s)" "$reset_7d")
     [ -z "$(build_week_row "$usage" auto)" ]
     plain=$(strip_ansi "$(build_week_row "$usage" always)" | sed 's/ [0-9.]*✕ @.*$//; s/ @.*$//' | tr -d ' ')
-    [[ "$plain" =~ ^7d░+▮▯+\.\.\.▯5h✕[0-9]+$ ]]
+    [[ "$plain" =~ ^7d░+▮▯+\.\.\.▯\(✕[0-9]+\)$ ]]
     [ -z "$(build_week_row "$usage" off)" ]
     # no live 7d window: nothing, even in always mode
     [ -z "$(build_week_row '{"seven_day":{"utilization":20}}' always)" ]
@@ -1464,11 +1503,11 @@ _seed_week_store() {
     [ "$(compact_text "$t" 200)" = "$t" ]
     [ "$(compact_text "$t" 40)" = "! 5h caps ~05:18, 52m before reset" ]
     [ "$(compact_text "$t" 20)" = "! 5h caps ~05:18" ]
-    b="- budget ~3✕5h left · even 20%/win · heading ~52%"
-    [ "$(compact_text "$b" 36)" = "- budget ~3✕5h left · even 20%/win" ]
-    [ "$(compact_text "$b" 19)" = "- budget ~3✕5h left" ]
+    b="budget ~3✕5h left · even 20%/win · heading ~52%"
+    [ "$(compact_text "$b" 34)" = "budget ~3✕5h left · even 20%/win" ]
+    [ "$(compact_text "$b" 17)" = "budget ~3✕5h left" ]
     # no joint left: hard cut with an ellipsis, never a mid-word lie
-    [ "$(compact_text "- budget last window is long" 16)" = "- budget last w…" ]
+    [ "$(compact_text "budget last window is long" 16)" = "budget last win…" ]
     # under 16 columns nothing honest fits
     run compact_text "$b" 15
     [ "$status" -eq 1 ]
@@ -1703,6 +1742,67 @@ EOF
     [ "$level" = "red" ]
     [ "$gap" -ge 59 ] && [ "$gap" -le 60 ]
     rm -rf "$tmpdir"
+}
+
+# --- the young-window guard: a 7d projection needs this window's evidence ---
+
+@test "young 7d window: nothing projects from last week onto a window hours old" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    now=$(date +%s)
+    # A heavy trained profile (30%/day, 40% in the trailing 24h) and a window
+    # that opened 2.4h ago with 2% on it. Every point of that profile — and
+    # every hour of that trailing day — belongs to the window BEFORE this one.
+    _write_profile_cache "$tmpdir" 21 30 40
+    young=$((604800 - 8640))
+    [ -z "$(seven_day_forecast 2 $young)" ]
+    [ -z "$(_seven_day_walk 2 $young)" ]
+    ps=$(week_period_start "$now" "$young")
+    [ "$(week_dry_slot 2 "$young" "$now" "$ps")" = "-1" ]
+    reset_7d=$(date -u -d "@$((now + young))" '+%Y-%m-%dT%H:%M:%SZ')
+    usage=$(printf '{"fetched_at":%s,"five_hour":{"utilization":9},"seven_day":{"utilization":2,"resets_at":"%s"}}' "$now" "$reset_7d")
+    row=$(strip_ansi "$(build_week_row "$usage" always)")
+    [[ "$row" != *×* ]]              # no wall of dry cells drawn from history
+    [[ "$row" != *"✕ @"* ]]          # and no pace on a 2.4h-old week
+    records=$(notice_collect "$usage" always)
+    [ -z "$(printf '%s\n' "$records" | grep -E '7d\.(dry|caps)')" ]
+    long=$(strip_ansi "$(notice_long_line "$records")")
+    [[ "$long" == budget* ]]
+    [[ "$long" != *heading* ]]       # nowhere to head yet
+    rm -rf "$tmpdir"
+}
+
+@test "young 7d window: a day in, the projections come back" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    now=$(date +%s)
+    _write_profile_cache "$tmpdir" 21 30 40
+    aged=$((604800 - 90000))         # 25h elapsed: the window can speak
+    [ -n "$(seven_day_forecast 2 $aged)" ]
+    ps=$(week_period_start "$now" "$aged")
+    [ "$(week_dry_slot 2 "$aged" "$now" "$ps")" != "-1" ]
+    reset_7d=$(date -u -d "@$((now + aged))" '+%Y-%m-%dT%H:%M:%SZ')
+    usage=$(printf '{"fetched_at":%s,"five_hour":{"utilization":9},"seven_day":{"utilization":2,"resets_at":"%s"}}' "$now" "$reset_7d")
+    row=$(strip_ansi "$(build_week_row "$usage" always)")
+    [[ "$row" == *×* ]]
+    records=$(notice_collect "$usage" always)
+    [ -n "$(printf '%s\n' "$records" | grep -E '7d\.(dry|caps)')" ]
+    [[ "$(strip_ansi "$(notice_long_line "$records")")" == *"7d dry"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "seven_day_pace: a window younger than a day has no pace of its own" {
+    # 8% burned 12h into a fresh week extrapolates to 16%/day and calls the
+    # week at risk — on half a day of evidence, most of it one session.
+    read -r level runway hint <<<"$(seven_day_pace 8 $((604800 - 43200)))"
+    [ "$level" = "green" ]; [ "$hint" = "0" ]; [ "$runway" = "-1" ]
+    # a day in, the same arithmetic is allowed to speak
+    read -r level runway hint <<<"$(seven_day_pace 20 $((604800 - 90000)))"
+    [ "$level" = "yellow" ]; [ "$hint" = "1" ]
+    # ...and a young window that is genuinely spent still goes red on its own
+    # percentage: the guard mutes pace, never facts
+    read -r level runway hint <<<"$(seven_day_pace 88 $((604800 - 43200)))"
+    [ "$level" = "red" ]
 }
 
 # --- is_1m_model ------------------------------------------------------------
@@ -3421,10 +3521,12 @@ JSON
     reset_7d=$(date -u -d '+4 days 22 hours' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":20,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":21,\"resets_at\":\"$reset_7d\"}}"
     plain=$(strip_ansi "$(build_advisor_line "$usage" always)")
-    [[ "$plain" =~ ^-\ 24✕5h\ left\ ·\ 3\.3%/win$ ]]
+    # the budget voice wears no sigil: it interrupts nothing, and a leading
+    # '-' on a dim line reads as a bullet in a list of one
+    [[ "$plain" =~ ^24✕5h\ left\ ·\ 3\.3%/win$ ]]
     # the whole sentence is still there for surfaces with a line to spend
     long=$(strip_ansi "$(notice_long_line "$(notice_collect "$usage" always)")")
-    [[ "$long" =~ ^-\ budget\ ~24✕5h\ left\ ·\ even\ 3\.3%/win\ ·\ heading\ ~70%$ ]]
+    [[ "$long" =~ ^budget\ ~24✕5h\ left\ ·\ even\ 3\.3%/win\ ·\ heading\ ~70%$ ]]
 }
 
 @test "build_advisor_line: budget degrades to plain headroom in the last window" {
@@ -3438,10 +3540,10 @@ JSON
     # 25% unused is under ADVISOR_SURPLUS_MIN_PCT, so the end-of-week voice
     # stays quiet and the budget line owns the row
     plain=$(strip_ansi "$(build_advisor_line "$usage" always)")
-    [[ "$plain" =~ ^-\ last\ window\ ·\ 25%\ left$ ]]
+    [[ "$plain" =~ ^last\ window\ ·\ 25%\ left$ ]]
     [[ "$plain" != *"/win"* ]]
     long=$(strip_ansi "$(notice_long_line "$(notice_collect "$usage" always)")")
-    [[ "$long" =~ ^-\ budget\ last\ window\ ·\ 25%\ left\ ·\ heading\ ~[0-9]+%$ ]]
+    [[ "$long" =~ ^budget\ last\ window\ ·\ 25%\ left\ ·\ heading\ ~[0-9]+%$ ]]
 }
 
 @test "build_advisor_line: hot 5h pace projects the cap wall-clock" {
@@ -3531,19 +3633,24 @@ JSON
     NOTICE_RECS=()
 }
 
-@test "notice_flash_line: explains a new condition, then fades and leaves the pin" {
+@test "notice_flash_line: the pin never flashes its own sentence; a second condition does" {
     state=$(mktemp -d)/notice_seen
     NOTICE_RECS=()
     notice_add 90 '!yellow' 5h '5h.caps.05:18' '~05:18' '5h caps ~05:18' '5h caps ~05:18, 42m before reset'
     records=$(notice_ranked)
     now=$(date +%s)
+    # one condition, one row: row 3 would only restate row 2 at more length
+    [ -z "$(notice_flash_line "$records" "$state" "$now")" ]
+    [ "$(strip_ansi "$(notice_pin_line "$records")")" = "! 5h caps ~05:18" ]
+    # a second, lower-ranked condition has something the pin does not say
+    notice_add 65 '+' 7d '7d.surplus.9' '47%' '47% unused' '7d resets @07:00, 47% unused · spend it'
+    records=$(notice_ranked)
     first=$(strip_ansi "$(notice_flash_line "$records" "$state" "$now")")
-    [ "$first" = "! 5h caps ~05:18, 42m before reset" ]
+    [ "$first" = "+ 7d resets @07:00, 47% unused · spend it" ]
     # same condition a minute later: still inside the flash window
     [ -n "$(notice_flash_line "$records" "$state" $((now + 60)))" ]
     # ...and past it the row is gone; row 2 keeps the pin
     [ -z "$(notice_flash_line "$records" "$state" $((now + NOTICE_FLASH_SECS + 1)))" ]
-    [ "$(strip_ansi "$(notice_pin_line "$records")")" = "! 5h caps ~05:18" ]
     NOTICE_RECS=()
     rm -rf "$(dirname "$state")"
 }
@@ -3840,17 +3947,23 @@ _write_ppw_fixture() { # dir ppw
     reset_5h=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
     reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
     _mk_input() {
-        printf '{"session_id":"adv","model":{"id":"claude-opus-4-8","display_name":"Opus"},"cwd":"/t","workspace":{"current_dir":"/t"},"cost":{"total_cost_usd":0},"context_window":{"used_percentage":10,"context_window_size":200000},"rate_limits":{"five_hour":{"used_percentage":%s,"resets_at":"%s"},"seven_day":{"used_percentage":10,"resets_at":"%s"}}}' "$1" "$reset_5h" "$reset_7d"
+        printf '{"session_id":"adv","model":{"id":"claude-opus-4-8","display_name":"Opus"},"cwd":"/t","workspace":{"current_dir":"/t"},"cost":{"total_cost_usd":0},"context_window":{"used_percentage":10,"context_window_size":200000},"rate_limits":{"five_hour":{"used_percentage":%s,"resets_at":"%s"},"seven_day":{"used_percentage":%s,"resets_at":"%s"}}}' "$1" "$reset_5h" "${2:-10}" "$reset_7d"
     }
     hot=$(_mk_input 85 | HOME="$tmpdir" bash "$SCRIPT_DIR/statusline.sh" --notice off)
     [ "$(printf '%s\n' "$hot" | wc -l)" -eq 2 ]
     [[ "$(strip_ansi "$hot")" == *"5h caps ~"* ]]
-    # a condition this session has not seen yet also explains itself on row 3
-    fresh=$(_mk_input 85 | HOME="$tmpdir" bash "$SCRIPT_DIR/statusline.sh")
-    [ "$(printf '%s\n' "$fresh" | wc -l)" -eq 3 ]
-    [[ "$(strip_ansi "$fresh")" == *"before reset"* ]]
+    # one condition is one row: row 3 does not restate the pin above it
+    lone=$(_mk_input 85 | HOME="$tmpdir" bash "$SCRIPT_DIR/statusline.sh")
+    [ "$(printf '%s\n' "$lone" | wc -l)" -eq 2 ]
     calm=$(_mk_input 20 | HOME="$tmpdir" bash "$SCRIPT_DIR/statusline.sh")
     [ "$(printf '%s\n' "$calm" | wc -l)" -eq 1 ]
+    # a SECOND condition this session has not seen earns row 3 with its own
+    # sentence — the 7d wall the 5h pin says nothing about. Last in the
+    # sequence on purpose: a later render at a lower 7d would read this
+    # window as re-based and speak about that instead.
+    fresh=$(_mk_input 85 95 | HOME="$tmpdir" bash "$SCRIPT_DIR/statusline.sh")
+    [ "$(printf '%s\n' "$fresh" | wc -l)" -eq 3 ]
+    [[ "$(strip_ansi "$fresh")" == *"before reset"* ]]
     rm -rf "$tmpdir"
 }
 
