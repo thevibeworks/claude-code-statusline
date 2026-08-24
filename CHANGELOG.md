@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+## v0.33.0 — 2026-08-23 — the strip is a record, not a forecast
+
+**The 5h strip stops at `▮`.** It used to draw the rest of the window as
+hollow cells and then, when linear pace said so, as a wall of `×` —
+`5h ▮▯××`, which a user could not read, and was right not to. Three
+things were saying one thing badly: the badge above already prints when
+this window ends (`5h[38%@23:00]`), the notice engine already names the
+wall with an exact time and its own gates (`5h caps ~14:20`), and the
+strip was dramatising both a third time in four columns. A 5h window is
+short enough that its future is a clock, not a shape. The strip now
+draws what happened and ends — no `▯`, no `×`, no projection at all, and
+`five_dry_cell` is gone rather than guarded. Strips carry history, badges
+carry state, notices do the warning.
+
+Both glyphs keep their meaning on the 7d strip, where the future is 34
+cells long and genuinely has a shape, and in the `week` report.
+
+**The 7d future folds as soon as folding hides two cells.** The old
+threshold was 10, justified by a column break-even that measured the
+wrong thing: eleven hollow cells read as "too much future" long before
+they got expensive. With two kept cells the tail is now at most `▯▯▯`
+drawn raw, or `▯▯...▯(✕N)` — and `N`, the windows you have left, is the
+part that has to survive mid-week, when a pressure notice owns the pin
+and this row is the only place that number appears. A closing week still
+draws to its edge with no special case: four cells or fewer leave
+nothing worth folding.
+
+Row 3's floor (`notice_flash_worth_row`) shipped in v0.32.1, below.
+
 ## v0.32.1 — 2026-08-23 — one projection, one floor
 
 **Row 3's gate was measuring the wrong thing.** It required the flash to

@@ -82,16 +82,22 @@ own signal.
 ## The ledgers (row 2)
 
 ```
-5h ▃▄▮▯▯ 0.6x @04:00  7d ▅▁▂ ▃▅ˍ▃▅ ▃▃▁▂▁ ▮▯▯...▯(x14) 0.7x @Wed 09:00
+5h ▃▄▮ 0.6x @04:00  7d ▅▁▂ ▃▅ˍ▃▅ ▃▃▁▂▁ ▮▯▯...▯(x14) 0.7x @Wed 09:00
 ```
 
-One grammar, two scales. `5h` = this window as 5 hours; `7d` = the
-period as 34 five-hour slots, oldest left, a gap at each local midnight
-*in history only* — the run from `▮` on is contiguous. History draws in
+One grammar, two scales. `5h` = the hours of this window that have
+happened; `7d` = the period as 34 five-hour slots, oldest left, a gap at
+each local midnight *in history only* — the run from `▮` on is
+contiguous. Only the 7d strip draws a future at all: the 5h one stops at
+`▮`, because when this window ends is the badge's job (`5h[38%@23:00]`)
+and whether it caps is the notice's (`5h caps ~14:20`). Strips carry
+history, badges carry state, notices do the warning. History draws in
 full; the live row folds the 7d future after two kept cells into
 `...▯(x14)` — the 5h windows left before the reset, all alike, `×` red
 when the tail projects dry (the `week` report still draws every slot). The
-count is the budget line's own, priced from the same instant. Each strip ends
+count is the budget line's own, priced from the same instant, and it folds
+as soon as folding hides two cells: the future is one fact, and the ink
+belongs to history. Each strip ends
 with its pace (used ÷ elapsed; dim <1x, pressure ≥1x, hidden until 5% of the
 window has run) and the reset its right edge is — axis labels, not restated
 badges.
@@ -100,11 +106,10 @@ badges.
 ▁▂▃▄▅▆▇█   burned; height = points that cell cost (▁ ≤2 … ▅ ≤11 … █ >20)
 ˍ          ran, negligible — a bar of height zero, on the baseline
 ░          unknown — no sample; never drawn as idle
-▮          now
-▯          ahead — the hollow of ▮
+▮          now — and the last cell of the 5h strip
+▯          ahead — the hollow of ▮ (7d only)
 ...▯(x14)  the folded future: 14 more 5h windows before the reset (live 7d row)
-×          pace won't cover it (7d: learned forecast, linear when cold; 5h: linear;
-           no projection before 5% of the window has run — same floor as the pace)
+×          pace won't cover it (7d only: learned forecast, linear when cold)
 ```
 
 Burn cells take their badge's pressure color; nothing else in the row is

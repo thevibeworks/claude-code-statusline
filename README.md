@@ -91,7 +91,7 @@ Every component earns its place:
 | User tier | Neutral white-weight (MAX bold, PRO normal, dim otherwise) — identity, never a status color. Truncated display name. |
 | Quota | Integer percentages. The 5h badge always carries its reset time while a window is live — `5h[42%@14:30]` reads "42% used, resets at 14:30" — because on a 5h horizon the reset is the number you plan the current sitting around. Wall-clock, not a countdown, on purpose: Claude Code only re-renders the statusline on activity, so a relative "@1h38m" silently decays into a lie during idle gaps, while "@14:30" stays true in a frozen frame. (The 7d badge is hybrid: day-relative `@5d` while the reset is >= 24h out — decays one day per day, mild and narrow — switching to the same wall-clock `@04:00` inside the last day, where an `@6h`/`@<1h` countdown decayed by the hour exactly when pressure keeps the suffix visible.) When a window's utilization climbs between renders, a reverse-video `+N` token appears right after the badge for ~60s: `5h[44%@14:32]+2` means "you just burned 2%". A drop (window reset) stays quiet — the fresh low number is its own signal. **7d is forecast, not leveled**: a learned per-weekday burn profile (EWMA over your own usage history) plus your recent 24h burn project whether the quota outlasts the window — your heavy Tuesday counts more than a generic average. The verdict is color alone; under pressure the badge shows when relief arrives: `7d[44%@5d]` red means "at your pace, dry days before the reset 5 days from now"; inside the last day it reads `7d[92%@04:00]` — resets at 04:00. Cold start (<14 days history) falls back to window-average pacing. Recovery color when reset is imminent. **Model-scoped weekly quota**: when the usage API carries a per-model weekly limit (`limits[]`, `kind=weekly_scoped`) for the model your session is running, it renders right after the model+context block — `fabl5[1m][12%] fb[67%]` on a Fable 5 session, `op[33%]` on Opus — because the quota is a property of the model you're running, not of the account-wide 5h/7d cluster. It's a weekly number (same reset as the 7d badge), scoped to one model. Other models' scoped quotas stay hidden: only the limit constraining *this* session is signal. Supersedes the legacy `seven_day_opus`/`seven_day_sonnet` fields, which the API now sends as null. |
 | Extra usage | Monthly spend, limit, prepaid balance. `--extra auto` shows when quota runs out. |
-| Week row | **A row of its own, under the badges**: `5h ▅█▃▮▯ 0.9✕ @23:00  7d ▅▁▂ ▃▅ˍ▃▅ …▮▯▯...▯(✕19) 0.7✕ @Wed 09:00` — this sitting by the hour, the week as its 5h windows (day-gapped, the far future folded to a counted `...▯(✕19)`), height = what each cell burned, `▮` now, `×` where the pool runs dry, each strip ending with its pace and reset. Reconstructed from your own usage log; `auto` shows it once there is history to show. See [Week row](#week-row). |
+| Week row | **A row of its own, under the badges**: `5h ▅█▃▮ 0.9✕ @23:00  7d ▅▁▂ ▃▅ˍ▃▅ …▮▯▯...▯(✕19) 0.7✕ @Wed 09:00` — this sitting by the hour, the week as its 5h windows (day-gapped, the far future folded to a counted `...▯(✕19)`), height = what each cell burned, `▮` now and, on the 5h strip, the end of it — that strip is history, the badge above already says when the window closes. `×` marks where the pool runs dry on the week; each strip ends with its pace and reset. Reconstructed from your own usage log; `auto` shows it once there is history to show. See [Week row](#week-row). |
 | Deadman | **Invisible until a switch is armed.** Surfaces [deadman](https://github.com/thevibeworks/deadman) — a dead man's switch that hands the session off when you stop responding. `[☠ armed 42m]` (dim) counts down to the auto-handoff; `[☠ warned 3m]` (yellow) means the phone warning went out; `[☠ due]` means the handoff fires imminently. Sits on the left lane next to the path — it describes this session's lifecycle, not a quota. One `command -v` when the tool is absent, one fast file read when present; nothing armed renders nothing. `--deadman off` disables it. |
 | Cache health | **Quiet until it bites.** Claude Code never re-renders an idle session, and while you work the prompt cache is always freshly ~1 TTL from expiry — so a proactive "expiring soon" isn't honestly observable, and `auto` spends no width on it. It speaks only when a rewrite actually happens: `≡!419k` the instant you resume onto a dead cache (idle longer than the TTL) or a mid-session prefix collapse — a 419k-token re-cache at ~20x the read rate (and the same burn on your 5h/7d quota on subscriptions). **Bold red past 200k** — the premium-band miss. `≡~` while a large prefix rebuilds. `--cache always` additionally keeps the freeze-safe deadline `≡@15:20` (last request + TTL; a past time in a frozen frame reads "expired at 15:20"). TTL defaults to 1h (claude.ai subscriber sessions) or 5m (API-key auth); an observed usage breakdown overrides it. The `≡` glyph (U+2261) reads as stacked cache layers — one terminal column, quiet and distinct. |
 
@@ -255,7 +255,7 @@ right edge shared with line 1:
 
 ```text
 proj (main*)       +84/-14 8m $6.72 fabl5[1m][██░░42%] fb[66%] [MAX|@work] 5h[38%@23:00] 7d[39%]
-3✕5h left · 20%/win   5h ▅█▃▮▯ 0.9✕  7d ▅▁▂ ▃▅ˍ▃▅ ▃▃▁▂▁ ▅ˍ▂▁▁ ˍˍˍ▃▅ ˍˍˍ▅ ▆▆ˍ▂▮▯▯ 0.7✕ @Wed 09:00
+3✕5h left · 20%/win   5h ▅█▃▮ 0.9✕  7d ▅▁▂ ▃▅ˍ▃▅ ▃▃▁▂▁ ▅ˍ▂▁▁ ˍˍˍ▃▅ ˍˍˍ▅ ▆▆ˍ▂▮▯▯ 0.7✕ @Wed 09:00
 ```
 
 The 5h strip prints no reset: line 1's `5h[38%@23:00]` already carries
@@ -272,7 +272,7 @@ edge and the full sentence sits flush-left beneath them:
 
 ```text
 proj (main*)   fabl5[1m][██░░42%] fb[66%] [MAX|@work] 5h[38%@23:00] 7d[39%]
-   5h ▅█▃▮▯ 0.9✕ @23:00  7d ▅▁▂ ▃▅ˍ▃▅ ▃▃▁▂▁ ▅ˍ▂▁▁ ˍˍˍ▃▅ ˍˍˍ▅ ▆▆ˍ▂▮▯▯ 0.7✕ @Wed 09:00
+   5h ▅█▃▮ 0.9✕ @23:00  7d ▅▁▂ ▃▅ˍ▃▅ ▃▃▁▂▁ ▅ˍ▂▁▁ ˍˍˍ▃▅ ˍˍˍ▅ ▆▆ˍ▂▮▯▯ 0.7✕ @Wed 09:00
    budget ~3✕5h left · even 20%/win · heading ~52%
 ```
 
@@ -285,18 +285,25 @@ budget line shows with it (windows left, what even looks like, where
 you land); pressure and surplus clauses still take its place when they
 fire.
 
-- **`5h`** — this sitting: the current 5h window as 5 hour cells,
-  height = the 5h points that hour added (each positive step between
-  consecutive samples credited to the hour the later sample fell in).
+- **`5h`** — this sitting: the hours of the current 5h window that have
+  happened, height = the 5h points that hour added (each positive step
+  between consecutive samples credited to the hour the later sample fell
+  in). It ends at `▮` and draws no future: when the window closes is what
+  the badge says (`5h[38%@23:00]`), and whether you will hit the wall is
+  what the notice says (`5h caps ~14:20`) — three hollow cells and a row
+  of `×` only said it a third time, louder.
 - **`7d`** — the week: the 7d period as its 5h windows (34 slots, oldest
   left, the last a 3h stub), height = the 7d points that window burned,
   with a thin gap at each local midnight so days read as clusters — and a
   day that held five windows shows it — without a ruler. History draws in
-  full; the future folds: two hollow cells after `▮`, then `...▯(✕28)` —
-  28 more 5h windows before the reset, all alike (`×` red when the tail
-  projects dry). That count is the budget line's own `~28✕5h left`, priced
-  from the same instant: one row, one arithmetic. The `week` subcommand's
-  wide ledger still draws every slot.
+  full; the future folds as soon as folding hides two cells: two hollow
+  cells after `▮`, then `...▯(✕28)` — 28 more 5h windows before the reset,
+  all alike (`×` red when the tail projects dry). That count is the budget
+  line's own `~28✕5h left`, priced from the same instant: one row, one
+  arithmetic. The future is one fact and the strip's ink belongs to
+  history; a closing week needs no help to draw to its edge, since four
+  cells or fewer leave nothing worth folding. The `week` subcommand's wide
+  ledger still draws every slot.
 
 | Cell | Meaning |
 |------|---------|
@@ -304,8 +311,8 @@ fire.
 | `ˍ` | ran, cost under a point — or ran idle inside the log's coverage; a bar of height zero, on the baseline |
 | `░` | unknown: the log has no sample for that cell (never drawn as idle — a gap in the record is not a quiet session) |
 | `▮` | the cell you are in now |
-| `▯` | a cell still ahead of you — the hollow of `▮`, an empty slot waiting |
-| `×` | a cell the pool will not cover at the current pace (7d: the learned forecast's dry point, linear when untrained; 5h: linear, the same projection as the badge). Waits on the same evidence the pace suffix does — 5% of the window — so one front-loaded prompt cannot wall off a window that just opened |
+| `▯` | a cell still ahead of you — the hollow of `▮`, an empty slot waiting. **7d only**: the 5h strip stops at `▮` |
+| `×` | a cell the pool will not cover at the current pace — **7d only**: the learned forecast's dry point, linear when untrained. The 5h window's wall belongs to the `5h caps ~14:20` notice, which states the time instead of shading cells |
 | `...▯(✕28)` | the folded 7d future: 28 more 5h windows before the reset, one token instead of a run of hollow cells (`×` red when the tail ends dry). The count is windows-to-reset — what the budget line prices — not the number of cells the fold happened to hide |
 | `✕` | not a cell — the multiplication sign, the row's one operator (`...▯(✕28)`, `0.7✕`, `19✕5h left`). Deliberately not `×` (U+00D7), which is already a reading: cells are the ink, the operator is punctuation, and `...×(×28)` has to say both at once. One terminal column and no emoji fallback, so the row still meets line 1's edge; override with `MULT_GLYPH` (`╳` and `✖` look stronger but are ambiguous-width and emoji-presentation respectively) |
 
@@ -318,7 +325,7 @@ projects the rest. Freeze-safe by construction: `▮` moves at cell
 boundaries and every other cell is history.
 
 `--week auto` (default) draws the row only once the log holds a sample
-for either period — a fresh install gets no `░░░▮▯▯` row that says nothing
+for either period — a fresh install gets no `░░░▮` row that says nothing
 the badges don't. `--week always` draws it whenever a window is live;
 `--week off` never. The 7d strip is the same one `statusline.sh week`
 prints; both are cached in `week.cache` and rebuilt only when the log
@@ -334,7 +341,7 @@ long one:
 
 ```text
 proj (main*)      +84/-14 8m $6.72 fabl5[1m][██░░42%] fb[91%] [MAX|@work] 5h[38%@23:00] 7d[55%]
-+ fb 91% vs 7d 55% · go op   5h ▅█▃▮▯ 0.9✕  7d ▅▁▂ ▃▅ˍ▃▅ … ▆▆ˍ▂▮▯▯ 0.6✕ @Wed 09:00
++ fb 91% vs 7d 55% · go op   5h ▅█▃▮ 0.9✕  7d ▅▁▂ ▃▅ˍ▃▅ … ▆▆ˍ▂▮▯▯ 0.6✕ @Wed 09:00
 + fb weekly 91% against 7d 55% · the model caps first, not the account; op sits at 33%, so run it for the bulk
 ```
 
@@ -513,7 +520,7 @@ run. Setting only `CLAUDE_CACHE_DIR` keeps the legacy single-dir behavior.
 npm exec --yes bats -- t/
 ```
 
-426 tests across `t/statusline.bats` (414 statusline + integration) and
+427 tests across `t/statusline.bats` (415 statusline + integration) and
 `t/install.bats` (12 installer). CI runs on push and PR to `main`.
 
 ## Project Structure
