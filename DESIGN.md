@@ -82,22 +82,28 @@ own signal.
 ## The ledgers (row 2)
 
 ```
-5h ▃▄▮ 0.6x @04:00  7d ▅▁▂ ▃▅ˍ▃▅ ▃▃▁▂▁ ▮▯▯...▯(x14) 0.7x @Wed 09:00
+5h ▃▄▮▯▯ 0.6x @04:00  7d ▅▁▂ ▃▅ˍ▃▅ ▃▃▁▂▁ ▮▯▯...▯(x14) 0.7x @Wed 09:00
 ```
 
-One grammar, two scales. `5h` = the hours of this window that have
-happened; `7d` = the period as 34 five-hour slots, oldest left, a gap at
-each local midnight *in history only* — the run from `▮` on is
-contiguous. Only the 7d strip draws a future at all: the 5h one stops at
-`▮`, because when this window ends is the badge's job (`5h[38%@23:00]`)
-and whether it caps is the notice's (`5h caps ~14:20`). Strips carry
-history, badges carry state, notices do the warning. History draws in
-full; the live row folds the 7d future after two kept cells into
-`...▯(x14)` — the 5h windows left before the reset, all alike, `×` red
-when the tail projects dry (the `week` report still draws every slot). The
-count is the budget line's own, priced from the same instant, and it folds
-as soon as folding hides two cells: the future is one fact, and the ink
-belongs to history. Each strip ends
+One grammar, two scales. `5h` = this window as five hour cells; `7d` =
+the period as 34 five-hour slots, oldest left, a gap at each local
+midnight *in history only* — the run from `▮` on is contiguous. Both
+strips draw their whole grid, so a strip is an axis and not a bar that
+grows at you: it holds its width for the life of the window and `▮` walks
+it. On the 5h strip that makes the hollow run the answer to *how long
+have I got* — `▃▄▮▯▯` is two whole hours after this one.
+
+What neither strip draws on 5h is a *forecast*. An empty cell is a fact;
+a `×` is a guess, and on a 5h window the guess is owned twice already —
+the badge states the end (`5h[38%@23:00]`) and the notice names the wall
+(`5h caps ~14:20`). Cells carry the shape, badges carry state, notices do
+the warning. History draws in full; the live row folds the 7d future
+after two kept cells into `...▯(x14)` — the 5h windows *after* the one
+you are in, all alike, `×` red when the tail projects dry (the `week`
+report still draws every slot). The count is the budget line's own,
+priced from the same instant, and it folds as soon as folding hides two
+cells: the future is one fact, and the ink belongs to history. Each strip
+ends
 with its pace (used ÷ elapsed; dim <1x, pressure ≥1x, hidden until 5% of the
 window has run) and the reset its right edge is — axis labels, not restated
 badges.
@@ -106,9 +112,9 @@ badges.
 ▁▂▃▄▅▆▇█   burned; height = points that cell cost (▁ ≤2 … ▅ ≤11 … █ >20)
 ˍ          ran, negligible — a bar of height zero, on the baseline
 ░          unknown — no sample; never drawn as idle
-▮          now — and the last cell of the 5h strip
-▯          ahead — the hollow of ▮ (7d only)
-...▯(x14)  the folded future: 14 more 5h windows before the reset (live 7d row)
+▮          now
+▯          ahead — the hollow of ▮; on 5h, the hours left in the window
+...▯(x14)  the folded future: 14 more 5h windows after this one (live 7d row)
 ×          pace won't cover it (7d only: learned forecast, linear when cold)
 ```
 

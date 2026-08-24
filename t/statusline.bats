@@ -1267,37 +1267,69 @@ _seed_week_store() {
     [[ "$plain" =~ @[A-Z][a-z][a-z]\ [0-9]{2}:[0-9]{2}$ ]]
 }
 
-@test "build_five_strip: the 5h strip is history — it ends at ▮, always" {
-    # The user could not read `5h ▮▯××`, and they were right: the future of a
-    # 5h window is a clock the badge already prints (`5h[7%@04:20]`) and the
-    # dry projection duplicates the rank-90 "5h caps" notice, which owns that
-    # warning with its own gates and its own exact time.
+@test "build_five_strip: five slots, always — the hollow run is the hours left" {
+    # An axis, not a growing bar: five cells for five hours, ▮ walking them,
+    # so "how long have I got" is a count of ▯ and never a second glance at
+    # the clock — and the row holds its width for the life of the window.
+    # What the strip still refuses to draw is a FORECAST: no × wall. The badge
+    # (`5h[7%@04:20]`) states the end and the rank-90 "5h caps" notice owns
+    # the warning with its own gates and its own exact time.
     tmpdir=$(mktemp -d)
     CLAUDE_ACCOUNT_DIR="$tmpdir"
     now=$(date +%s)
-    # (1) a hot young window: one prompt front-loaded 7% ten minutes in —
-    # the fixture that used to draw ▮▯×××
-    _five_of() {
-        local reset_5h; reset_5h=$(date -u -d "@$1" '+%Y-%m-%dT%H:%M:%SZ')
+    _five_of() {   # $1 = seconds still on the window, $2 = utilization
+        local reset_5h; reset_5h=$(date -u -d "@$((now + $1))" '+%Y-%m-%dT%H:%M:%SZ')
         local u=$(printf '{"fetched_at":%s,"five_hour":{"utilization":%s,"resets_at":"%s"},"seven_day":{"utilization":20}}' "$now" "$2" "$reset_5h")
         local p; p=$(strip_ansi "$(build_week_row "$u" always)")
         p="${p#5h }"; p="${p%%  7d*}"
         printf '%s' "$(printf '%s' "$p" | sed 's/ [0-9.]*✕ @.*$//; s/ @.*$//; s/ [0-9.]*✕$//')"
     }
-    young=$(_five_of $((now + 18000 - 600)) 7)
-    [[ "$young" == *▮ ]]
-    [[ "$young" != *▯* ]]
-    [[ "$young" != *×* ]]
+    # (1) a hot young window: one prompt front-loaded 7% ten minutes in —
+    # the fixture that used to draw ▮▯×××. Four hours still to come, and not
+    # one of them carries a verdict.
+    [ "$(_five_of $((18000 - 600)) 7)" = "▮▯▯▯▯" ]
     # (2) mid-window, burning hard enough that linear pace would have walled
-    # off every remaining cell
-    mid=$(_five_of $((now + 18000 - 9000)) 80)
-    [[ "$mid" == *▮ ]]
-    [[ "$mid" != *▯* ]]
+    # off every remaining cell: still ▯, never ×
+    mid=$(_five_of 9000 80)
+    [ "$mid" = "░░▮▯▯" ]
     [[ "$mid" != *×* ]]
-    # ▯ and × are not gone from the vocabulary — the 7d strip still draws both
-    plain=$(strip_ansi "$(build_week_row "$(printf '{"fetched_at":%s,"five_hour":{"utilization":7},"seven_day":{"utilization":20,"resets_at":"%s"}}' "$now" "$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')")" always)")
-    [[ "$plain" == *▯* ]]
+    # (3) the last hour: nothing ahead, same five columns — the row does not
+    # reflow as the window drains
+    [ "$(_five_of 600 40)" = "░░░░▮" ]
+    # the hollow run IS the whole hours left, to the second — not to the
+    # nearest cell boundary of a grid rounded to 5 minutes. 3h01m left draws
+    # three hollow cells; the 119-minute mark used to draw two.
+    for secs in 17400 12600 10860 9000 4000 600; do
+        hollow=$((secs / 3600))
+        slot=$((4 - hollow))
+        want=""
+        for ((i = 0; i < slot; i++)); do want="${want}░"; done
+        want="${want}▮"
+        for ((i = slot + 1; i < 5; i++)); do want="${want}▯"; done
+        [ "$(_five_of "$secs" 30)" = "$want" ]
+    done
     rm -rf "$tmpdir"
+}
+
+@test "windows_ahead: the window you are in is not a window you have left" {
+    # 55h of week with 3h still on the current 5h window: 52h is ahead of it,
+    # and a stub at the end of the week is still a window you can spend — so
+    # 11 more, not the 12 that counting ▮ twice would give.
+    [ "$(windows_ahead $((55 * 3600)) $((3 * 3600)))" -eq 11 ]
+    # ...and it does not drift while both clocks tick down together: an hour
+    # later the week is 54h and the window 2h, still 52h ahead. A count that
+    # moved mid-window would be a reading; this is a countdown.
+    [ "$(windows_ahead $((54 * 3600)) $((2 * 3600)))" -eq 11 ]
+    [ "$(windows_ahead $((53 * 3600)) $((1 * 3600)))" -eq 11 ]
+    # it steps down by exactly one, at the rollover, when 5h is on the clock again
+    [ "$(windows_ahead $((52 * 3600 - 1)) 18000)" -eq 10 ]
+    # a partial window at the end of the week still counts
+    [ "$(windows_ahead $((8 * 3600)) $((3 * 3600)))" -eq 1 ]
+    # the week ends inside this window: nothing is ahead of it
+    [ "$(windows_ahead $((3 * 3600)) $((3 * 3600)))" -eq 0 ]
+    [ "$(windows_ahead $((2 * 3600)) $((3 * 3600)))" -eq 0 ]
+    # no live 5h window in the payload: nothing to exclude
+    [ "$(windows_ahead $((55 * 3600)) 0)" -eq 11 ]
 }
 
 @test "strip_tail: young is a fraction of the window, not a clock reading" {
@@ -3597,11 +3629,12 @@ JSON
 }
 
 @test "build_advisor_line: budget degrades to plain headroom in the last window" {
-    # 3h to reset = 1 ceil'd window: per-window math would just restate the
-    # headroom, so the line says it straight. Surplus kept under
+    # The week ends INSIDE the current window (3h of 7d, 3h30 still on the
+    # 5h): nothing is ahead of it, so there is nothing to divide the surplus
+    # across and the line says the headroom straight. Surplus kept under
     # ADVISOR_SURPLUS_MIN_PCT — a bigger remainder belongs to the expiring
     # surplus clause, which owns the last-day zone.
-    reset_5h=$(date -u -d '+45 minutes' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_5h=$(date -u -d '+3 hours 30 minutes' '+%Y-%m-%dT%H:%M:%SZ')
     reset_7d=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":20,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":75,\"resets_at\":\"$reset_7d\"}}"
     # 25% unused is under ADVISOR_SURPLUS_MIN_PCT, so the end-of-week voice
@@ -3611,6 +3644,17 @@ JSON
     [[ "$plain" != *"/win"* ]]
     long=$(strip_ansi "$(notice_long_line "$(notice_collect "$usage" always)")")
     [[ "$long" =~ ^budget\ last\ window\ ·\ 25%\ left\ ·\ heading\ ~[0-9]+%$ ]]
+}
+
+@test "build_advisor_line: one window ahead keeps the count and the grammar" {
+    # 3h of week with 45m on the current window: one more window follows this
+    # one. Calling that "last window" to save a redundant `/win` clause states
+    # something false about the week; the N-window form is true at N=1.
+    reset_5h=$(date -u -d '+45 minutes' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_7d=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":20,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":75,\"resets_at\":\"$reset_7d\"}}"
+    plain=$(strip_ansi "$(build_advisor_line "$usage" always)")
+    [ "$plain" = "1✕5h left · 25.0%/win" ]
 }
 
 @test "build_advisor_line: hot 5h pace projects the cap wall-clock" {

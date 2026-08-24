@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Claude Code Statusline — a meter for your Claude Code plan</title>
-<meta name="description" content="Your plan is metered; this is the meter. Live 5h/7d quota with reset times, per-model weekly limits, context pressure, session cost, burn ledgers with a learned dry-out forecast, and a notice engine that says which limit binds first — in your Claude Code prompt. One bash file, 427 tests, no daemon, no telemetry.">
+<meta name="description" content="Your plan is metered; this is the meter. Live 5h/7d quota with reset times, per-model weekly limits, context pressure, session cost, burn ledgers with a learned dry-out forecast, and a notice engine that says which limit binds first — in your Claude Code prompt. One bash file, 435 tests, no daemon, no telemetry.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;600&display=swap" rel="stylesheet">
@@ -204,7 +204,7 @@ per viewport (garden-framed-view), margin edge-codes (film-slate-edge-code).
 
 <header class="wrap plate">
   <h1>claude-code-statusline <span>— a meter for your Claude Code plan</span></h1>
-  <div class="tariff">427 tests · jq + curl · no daemon · no telemetry</div>
+  <div class="tariff">435 tests · jq + curl · no daemon · no telemetry</div>
 </header>
 
 <main class="wrap">
@@ -247,12 +247,12 @@ per viewport (garden-framed-view), margin edge-codes (film-slate-edge-code).
       <div class="answer"><b>The 7-day window, forecast-colored.</b> A learned per-weekday burn profile projects whether the pool outlasts the window — your heavy Tuesday counts more than a generic average. Red answers: at your pace, dry before the reset.</div>
     </div>
     <div class="row">
-      <div class="reading"><span class="d">5h</span> <span class="g">▂▅█</span><span class="w">▮</span> <span class="d">0.8✕</span><span class="cite">№ 0001</span></div>
-      <div class="answer"><b>The 5h ledger — the hours of this sitting that have happened.</b> Height is what each hour cost; <code>▮</code> now and the end of the strip, <code>ˍ</code> ran-but-negligible, <code>░</code> no sample. It draws no future: when the window closes is the badge's job, whether it caps is the notice's. Ends with its pace: above 1✕ you cap before the reset.</div>
+      <div class="reading"><span class="d">5h</span> <span class="g">▂▅█</span><span class="w">▮</span><span class="d2">▯</span> <span class="d">0.8✕</span><span class="cite">№ 0001</span></div>
+      <div class="answer"><b>The 5h ledger — this sitting, five hour cells, always all five.</b> Height is what each hour cost; <code>▮</code> now, <code>▯</code> an hour still to come, <code>ˍ</code> ran-but-negligible, <code>░</code> no sample. The hollow run is how long you have got; a fixed axis also means the row never reflows as the window drains. What it will not draw is a forecast — no <code>×</code> wall: when the window closes is the badge's job, whether it caps is the notice's. Ends with its pace: above 1✕ you cap before the reset.</div>
     </div>
     <div class="row">
       <div class="reading"><span class="d">7d</span> <span class="y">▃▅ˍ▃▅ ▃▃▁▂▁</span><span class="w">▮</span><span class="d2">▯▯...▯(✕14)</span> <span class="d">0.7✕</span><span class="cite">№ 0001</span></div>
-      <div class="answer"><b>The week ledger — history in full, the future folded.</b> Each cell one 5h window, day-gapped; after the now-marker the empty run folds to a counted tail: <code>...▯(✕14)</code> answers "14 windows before the reset" — the same 14 the budget line prices — and <code>×</code> red answers "the tail runs dry"; <code>✕</code> is the operator, <code>×</code> is a reading.</div>
+      <div class="answer"><b>The week ledger — history in full, the future folded.</b> Each cell one 5h window, day-gapped; after the now-marker the empty run folds to a counted tail: <code>...▯(✕14)</code> answers "14 windows after this one" — the window you are in is <code>▮</code>, not something you have left, and 14 is the same number the budget line prices — and <code>×</code> red answers "the tail runs dry"; <code>✕</code> is the operator, <code>×</code> is a reading.</div>
     </div>
     <div class="row">
       <div class="reading"><span class="r">! <b>7d dry ~Tue 04:00</b> · hard stop</span><span class="cite">№ 0008</span></div>
@@ -277,7 +277,7 @@ per viewport (garden-framed-view), margin edge-codes (film-slate-edge-code).
     <div class="val"><h3>Numbers that don't lie</h3>
       <p>Wall-clock resets instead of decaying countdowns. A visible <code>[░░░░░░0%]</code> after <code>/compact</code> instead of a hidden bar. Stale data is badged, never passed off as fresh. Burn is a monotone envelope, never a re-earned dip.</p></div>
     <div class="val"><h3>Nothing running in the background</h3>
-      <p>No daemon, no telemetry, no npm. It runs when Claude Code renders the prompt, reads stdin plus one shared cached API call, prints its rows, exits. 427 bats tests on the one file.</p></div>
+      <p>No daemon, no telemetry, no npm. It runs when Claude Code renders the prompt, reads stdin plus one shared cached API call, prints its rows, exits. 435 bats tests on the one file.</p></div>
   </div>
 </section>
 
@@ -327,7 +327,7 @@ per viewport (garden-framed-view), margin edge-codes (film-slate-edge-code).
   // Rows beneath line 1 hang as one block: its right edge meets line 1's
   // edge, every row shares one left edge — exactly how the script pads them.
   // 5h ledger: 5 hour cells. 7d ledger: history in full, future folded.
-  var L5  = s('d','5h ') + s('g','▂▅█') + s('w','▮') + s('d',' 0.8✕');
+  var L5  = s('d','5h ') + s('g','▂▅█') + s('w','▮') + s('d2','▯') + s('d',' 0.8✕');
   var L5b = s('d','5h ') + s('g','▂▅█▄') + s('w','▮') + s('d',' 0.9✕');
   var L7  = s('d','7d ') + s('y','▅▁▂ ▃▅ˍ▃▅ ▃▃▁▂▁ ') + s('w','▮') + s('d2','▯▯...▯(✕14)') + s('d',' 0.7✕ @Wed 09:00');
   var L7x = s('d','7d ') + s('y','▅▁▂ ▃▅ˍ▃▅ ▃▃▁▂▁ ') + s('w','▮') + s('d2','▯▯') + s('r','...×(✕14)') + s('d',' 0.9✕ @Wed 09:00');

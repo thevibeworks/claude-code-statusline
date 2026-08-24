@@ -2653,11 +2653,12 @@ run_session_summary() {
 #   ▮         the window you are in now
 #   ▯         a window still ahead of you
 #   ×         a window the pool will not cover at the current pace
-# The report draws every slot, so ▮ and what follows IS the budget line's
-# "~N✕5h left" laid out cell by cell; the live row folds that same tail and
-# prints the count instead. Past cells come from usage.jsonl; unknown and
-# idle stay different glyphs because drawing a gap in the record as an idle
-# session is the one lie this row must not tell. The prospective glance beside report's
+# The report draws every slot, so what follows ▮ IS the budget line's
+# "~N✕5h left" laid out cell by cell — ▮ itself is where you are, not a
+# window you have left. The live row folds that same tail and prints the
+# count instead. Past cells come from usage.jsonl; unknown and idle stay
+# different glyphs because drawing a gap in the record as an idle session
+# is the one lie this row must not tell. The prospective glance beside report's
 # retrospective ledger; the same strip claude.py renders, so both
 # surfaces tell one story. Reads usage.cache; stale data renders but says so.
 # --- week row (the two windows as ledgers) ------------------------------------
@@ -2670,25 +2671,29 @@ run_session_summary() {
 #   ˍ         ran, burned under a point, or idle inside the log's coverage — a
 #             bar of height zero, on the baseline
 #   ░         unknown — outside the sample log's coverage
-#   ▮         the cell you are in now — and the END of the 5h strip: that
-#             strip is history, it has no cells after this one
-#   ▯         a cell still ahead of you (the hollow of ▮: an empty slot) — 7d
-#   ×         a cell the pool will not cover at the current pace — 7d
-#   ...▯(✕12) the folded future: 12 more 5h windows before the reset, all
-#             alike (× red when the tail projects dry) — live 7d strip only.
-#             The count is windows-to-reset, the same number the budget line
-#             prices as "~12✕5h left" — one line, one arithmetic. (It is NOT
-#             the hidden-cell count: the 34-cell grid spans 170h and the
-#             period is 168h, and a row that says 10 beside a budget that
-#             says 12 makes the reader arbitrate between its own halves.)
+#   ▮         the cell you are in now
+#   ▯         a cell still ahead of you (the hollow of ▮: an empty slot)
+#   ×         a cell the pool will not cover at the current pace — 7d only
+#   ...▯(✕11) the folded future: 11 more 5h windows AFTER the one you are in,
+#             all alike (× red when the tail projects dry) — live 7d strip
+#             only. The count is windows ahead, the same number the budget
+#             line prices as "~11✕5h left" — one line, one arithmetic. (It is
+#             NOT the hidden-cell count: the 34-cell grid spans 170h against a
+#             168h period, and a row that says 10 beside a budget that says 11
+#             makes the reader arbitrate between its own halves.)
 #             ✕ is the operator, × is a cell: the two never mean the same.
 # Unknown and idle are deliberately different glyphs: drawing a gap in the
 # record as an idle session is the one lie this row must not tell.
-# Only the 7d strip draws a future. The 5h one stops at ▮: a window whose end
-# the badge already states (`5h[38%@23:00]`) and whose wall a notice already
-# names (`5h caps ~14:20`) does not need three hollow cells and a row of ×
-# to say it a third time, louder. Strips carry history, badges carry state,
-# notices do the warning.
+# Both strips draw their whole grid, so a strip is an axis, not a growing bar:
+# it holds its width for the life of the window and ▮ walks it. On the 5h
+# strip that makes the hollow run the answer to "how long have I got" — five
+# slots, one per hour, `▃▃▮▯▯` is two whole hours left after this one, no
+# arithmetic and no second glance at the clock.
+# What neither strip draws on 5h is a FORECAST. An empty cell is a fact (that
+# hour has not happened); a × is a guess, and on a 5h window the guess is
+# already owned twice — the badge states the end (`5h[38%@23:00]`) and a
+# notice names the wall with its own gates and an exact time (`5h caps
+# ~14:20`). Cells carry the shape, badges carry state, notices do the warning.
 # Shared by the live `--week` row and the `week` subcommand, so the two
 # surfaces cannot disagree.
 
@@ -2697,8 +2702,9 @@ FIVE_CELLS=5
 FIVE_CELL_SECS=3600
 WEEK_CACHE_TTL_SECS=300
 # The live row compresses the 7d strip's future run: after the now-marker it
-# keeps WEEK_FUTURE_KEEP hollow cells, then folds the rest into `...▯(✕12)`
-# (count = 5h windows before the reset; × red when the tail projects dry).
+# keeps WEEK_FUTURE_KEEP hollow cells, then folds the rest into `...▯(✕11)`
+# (count = windows_ahead, the 5h windows after this one; × red when the tail
+# projects dry).
 # History is information; the future is one fact, and the fact is the count.
 # The threshold is 2, not a column break-even: eleven hollow cells were
 # measured to read as "too much future" long before they were expensive, and
@@ -2716,6 +2722,24 @@ WEEK_FUTURE_MIN_HIDE=2
 week_period_start() {
     local now="$1" seven_secs="$2"
     echo $(( ( (now + seven_secs - SEVEN_DAY_WINDOW_SECS + 150) / 300 ) * 300 ))
+}
+
+# How many 5h windows are still AHEAD of the one you are in. The current
+# window is where you are, not what you have left: the row already draws it as
+# ▮ and the badge already prices it, so counting it again makes `▮ + 11` read
+# as twelve. What remains once it closes is (7d left - 5h left), and a partial
+# window at the end of the week is still a window you can spend, so that
+# divides up. Two properties fall out and both matter: the number is stable
+# inside a window (both clocks tick down together, the difference does not
+# move) and it steps down by exactly one at each 5h rollover — a countdown you
+# can trust rather than a reading that drifts mid-window. With no live 5h
+# window in the payload there is nothing to exclude and the whole 7d
+# remainder is ahead.
+windows_ahead() {
+    local seven_secs="${1:-0}" five_secs="${2:-0}"
+    local rest=$(( seven_secs - five_secs ))
+    [ "$rest" -gt 0 ] 2>/dev/null || { echo 0; return 0; }
+    echo $(( (rest + 17999) / 18000 ))
 }
 
 # One pass over usage.jsonl(.1) for both strips, cached in week.cache keyed
@@ -2837,16 +2861,18 @@ week_dry_slot() {
 
 # The colored strip. Args: fill percent (for the pressure tint), now,
 # period start, dry cell (-1 none), history line ("lo hi slot:cost,..."),
-# cell count, cell seconds, day-gaps flag, how much future to draw (-1 none:
-# the strip ends at ▮; 0 all; N keep N hollow cells then fold), and the TRUE
-# period length in seconds — the fold token
-# counts windows to the real reset, not cells on the grid, so it needs the
-# period, not the drawing. Defaults to the grid when a caller has nothing
-# truer to offer. Cells and gaps come out of one awk so the row is one string
-# with a color run per role.
+# cell count, cell seconds, day-gaps flag, how much future to draw (0 all;
+# N keep N hollow cells then fold), the number the fold token prints —
+# windows AHEAD of the current one, counted from real clocks by the caller;
+# the strip must not re-derive it, since a 34-cell grid spans 170h against a
+# 168h period and a count read off the drawing disagrees with the budget
+# sentence beside it — and finally an optional now-cell (-1: derive it from
+# the period start, which is what a grid-aligned strip wants).
+# Cells and gaps come out of one awk so the row is one string with a color
+# run per role.
 build_ledger_strip() {
     local pct="$1" now="$2" ps="$3" dry="$4" hist="$5" cells_n="$6" cell_secs="$7" gaps="${8:-0}" fut="${9:-0}"
-    local plen="${10:-$(( cells_n * cell_secs ))}"
+    local nleft="${10:-0}" nowslot_in="${11:--1}"
     local span_lo="" span_hi="" cells=""
     [ -n "$hist" ] && read -r span_lo span_hi cells <<<"$hist"
     local fill_color tzoff_s
@@ -2854,7 +2880,8 @@ build_ledger_strip() {
     tzoff_s=$(date +%z | awk '{ s=substr($0,1,1)=="-"?-1:1; h=substr($0,2,2)+0; m=substr($0,4,2)+0; print s*(h*3600+m*60) }')
     awk -v w="$cells_n" -v cs="$cell_secs" -v ps="$ps" -v now="$now" -v dry="$dry" \
         -v gaps="$gaps" -v tz="$tzoff_s" -v fut="$fut" \
-        -v minhide="$WEEK_FUTURE_MIN_HIDE" -v plen="$plen" -v mult="$MULT_GLYPH" \
+        -v minhide="$WEEK_FUTURE_MIN_HIDE" -v nleft="$nleft" -v mult="$MULT_GLYPH" \
+        -v nsin="$nowslot_in" \
         -v lo="${span_lo:--1}" -v hi="${span_hi:--1}" -v cells="$cells" \
         -v C_FILL="$fill_color" -v C_DIM="$DIM" -v C_NOW="$BOLD" \
         -v C_DRY="$RED" -v C_OFF="$RESET" '
@@ -2867,14 +2894,12 @@ build_ledger_strip() {
         BEGIN {
             n = split(cells, a, ",")
             for (i = 1; i <= n; i++) { split(a[i], kv, ":"); cost[kv[1]] = kv[2] }
-            nowslot = int((now - ps) / cs)
+            nowslot = (nsin >= 0 ? nsin : int((now - ps) / cs))
             # fold the future tail: everything past the kept cells is the
             # same hollow slot, so name it once with a count instead of
             # drawing it N times
             lim = w
-            if (fut < 0)                    # history only: stop at the now-cell
-                lim = nowslot + 1
-            else if (fut > 0 && w - (nowslot + 1 + fut) >= minhide)
+            if (fut > 0 && nleft > 0 && w - (nowslot + 1 + fut) >= minhide)
                 lim = nowslot + 1 + fut
             s = ""; prev = ""; pday = -1
             for (i = 0; i < lim; i++) {
@@ -2900,16 +2925,15 @@ build_ledger_strip() {
                 if (c != prev) { s = s C_OFF c; prev = c }
                 s = s g
             }
-            if (fut >= 0 && lim < w) {
+            if (lim < w) {
                 # the fold: glyph = how the tail ends (× red when the pool
-                # dries before the reset), count = 5h windows still to come
-                # before the reset — the same number the budget line prices,
-                # not the number of cells this fold happens to hide.
+                # dries before the reset), count = the 5h windows ahead of the
+                # one you are in — the same number the budget line prices, not
+                # the number of cells this fold happens to hide.
                 # No apostrophes in here: this comment lives inside a
                 # single-quoted awk program.
                 if (dry >= 0 && dry < w) { tg = "×"; tc = C_DRY }
                 else                     { tg = "▯"; tc = C_DIM }
-                nleft = int((ps + plen - now + cs - 1) / cs)
                 s = s C_OFF tc "..." tg "(" mult nleft ")"
             }
             print s C_OFF
@@ -2918,23 +2942,34 @@ build_ledger_strip() {
 
 # 7d strip: 34 ✕ 5h cells from the period start, day-gapped. $5 is
 # week_history_cells' line; $6 folds the future tail after that many kept
-# cells (the live row passes WEEK_FUTURE_KEEP; the `week` report draws all).
-# The grid overshoots the period by design (34 ✕ 5h = 170h against a 168h
-# week), so the fold is told the period itself — its count ends at the reset,
-# where the week ends, not at the last cell it drew.
+# cells (the live row passes WEEK_FUTURE_KEEP; the `week` report draws all and
+# never folds); $7 is windows_ahead, the number the fold token prints.
 build_week_strip() {
-    build_ledger_strip "$1" "$2" "$3" "$4" "$5" "$WEEK_CELLS" 18000 1 "${6:-0}" "$SEVEN_DAY_WINDOW_SECS"
+    build_ledger_strip "$1" "$2" "$3" "$4" "$5" "$WEEK_CELLS" 18000 1 "${6:-0}" "${7:-0}"
 }
 
-# 5h strip: the hours of the current window that have HAPPENED, ending at ▮.
-# $4 is five_history_cells' line. No hollow cells, no dry projection, no
-# future of any kind: a strip carries history, the badge carries state
-# (`5h[38%@23:00]` is the clock this window ends on) and a notice does the
-# warning (`5h caps ~14:20`, with its own gates and its own exact time).
-# Three empty cells and a wall of × said none of that — they spent four
-# columns dramatising a countdown the badge above already prints.
+# 5h strip: the five hours of the current window, always all five. $4 is
+# five_history_cells' line, $5 the seconds still on the window.
+#
+# The hollow run after ▮ is the hours left — the reason the grid is fixed —
+# but there is no dry cell in it: a × here would be a forecast, and the badge
+# (`5h[38%@23:00]`) plus the "5h caps ~14:20" notice already own that warning
+# with better gates and an exact time. Fixed width also means the row does not
+# reflow every hour, which is the difference between an axis and a bar that
+# grows at you.
+#
+# ▮ rides the real clock, not the grid. five_period_start rounds to 5 minutes
+# so week_scan's cache key holds still across renders (a resets_at that jitters
+# by a second would re-run a whole-log jq pass every render), and that rounding
+# offsets every hour boundary by up to 2½ minutes. Invisible in a bar height;
+# wrong exactly where this strip is read. With the marker at 4 - floor(left/1h)
+# the hollow count IS the whole hours remaining, to the second: three hours and
+# one minute left never draws as two.
 build_five_strip() {
-    build_ledger_strip "$1" "$2" "$3" -1 "$4" "$FIVE_CELLS" "$FIVE_CELL_SECS" 0 -1
+    local nowslot=$(( 4 - ${5:-0} / 3600 ))
+    [ "$nowslot" -lt 0 ] && nowslot=0
+    [ "$nowslot" -gt $((FIVE_CELLS - 1)) ] && nowslot=$((FIVE_CELLS - 1))
+    build_ledger_strip "$1" "$2" "$3" -1 "$4" "$FIVE_CELLS" "$FIVE_CELL_SECS" 0 0 0 "$nowslot"
 }
 
 # Does a history line carry at least one cell BEFORE the now-cell? A single
@@ -3010,7 +3045,7 @@ strip_tail() {
     printf '%s %s@%s%s' "$out" "$DIM" "$when" "$RESET"
 }
 
-# The live row: `5h ▂▅█▃▮▯▯▯▯▯ 0.6✕ @04:00  7d ▅▁▂▃▅ ˍ▃▅▃▃ …▮▯▯ 0.7✕ @Wed 09:00` under the badges — this
+# The live row: `5h ▂▅█▮▯ 0.6✕ @04:00  7d ▅▁▂▃▅ ˍ▃▅▃▃ …▮▯▯...▯(✕11) 0.7✕ @Wed 09:00` under the badges — this
 # sitting at the left, the week at the right, one grammar. Prints nothing
 # when there is no live window, or — in auto mode — when the log holds no
 # sample for either period yet (a row of ░░░▮▯▯ says nothing the badges do
@@ -3054,13 +3089,13 @@ build_week_row() {
     fi
     local parts=""
     if [ "$have_five" = 1 ]; then
-        parts="${DIM}5h ${RESET}$(build_five_strip "$five_int" "$now" "$five_start" "$five_hist")$(strip_tail "$five_int" "$five_secs" 18000 "$now" "$five_reset_mode")"
+        parts="${DIM}5h ${RESET}$(build_five_strip "$five_int" "$now" "$five_start" "$five_hist" "$five_secs")$(strip_tail "$five_int" "$five_secs" 18000 "$now" "$five_reset_mode")"
     fi
     if [ "$have_seven" = 1 ]; then
         local dry
         dry=$(week_dry_slot "$seven_int" "$seven_secs" "$now" "$period_start")
         [ -n "$parts" ] && parts="$parts  "
-        parts="${parts}${DIM}7d ${RESET}$(build_week_strip "$seven_int" "$now" "$period_start" "$dry" "$week_hist" "$WEEK_FUTURE_KEEP")$(strip_tail "$seven_int" "$seven_secs" "$SEVEN_DAY_WINDOW_SECS" "$now" "$seven_reset_mode")"
+        parts="${parts}${DIM}7d ${RESET}$(build_week_strip "$seven_int" "$now" "$period_start" "$dry" "$week_hist" "$WEEK_FUTURE_KEEP" "$(windows_ahead "$seven_secs" "${five_secs:-0}")")$(strip_tail "$seven_int" "$seven_secs" "$SEVEN_DAY_WINDOW_SECS" "$now" "$seven_reset_mode")"
     fi
     printf '%b' "$parts"
 }
@@ -4136,29 +4171,35 @@ notice_collect() {
     # where you land. Shared frame with ccpace's watch advisor.
     if [ "$mode" = "always" ] && [ "$seven_int" -gt 0 ] && [ "$seven_int" -lt 100 ] \
        && [ -n "$seven_secs" ] && [ "$seven_secs" -gt 0 ] 2>/dev/null; then
-        local windows=$(( (seven_secs + 17999) / 18000 ))
-        if [ "$windows" -gt 0 ]; then
-            local elapsed7=$((SEVEN_DAY_WINDOW_SECS - seven_secs))
-            local heading="" heading_part="" walk_gap walk_end
-            read -r walk_gap walk_end <<<"$(_seven_day_walk "$seven_int" "$seven_secs")"
-            if [ -n "$walk_end" ]; then
-                heading="$walk_end"
-            elif [ "$elapsed7" -ge 86400 ]; then
-                heading=$((seven_int * SEVEN_DAY_WINDOW_SECS / elapsed7))
-                [ "$heading" -gt 100 ] && heading=100
-            fi
-            [ -n "$heading" ] && heading_part=" · heading ~${heading}%"
-            if [ "$windows" -le 1 ]; then
-                notice_add 10 '-' acct "acct.budget.last" "${surplus}%" \
-                    "last window · ${surplus}% left" \
-                    "budget last window · ${surplus}% left${heading_part}"
-            else
-                local even
-                even=$(awk -v h="$surplus" -v w="$windows" 'BEGIN{printf "%.1f", h/w}')
-                notice_add 10 '-' acct "acct.budget.${windows}" "${windows}${MULT_GLYPH}5h" \
-                    "${windows}${MULT_GLYPH}5h left · ${even}%/win" \
-                    "budget ~${windows}${MULT_GLYPH}5h left · even ${even}%/win${heading_part}"
-            fi
+        # windows AHEAD, not including the one you are in — the same number
+        # the 7d row folds into `...▯(✕N)`, so the two halves of one row never
+        # need arbitrating. "left" means still to come.
+        local windows elapsed7=$((SEVEN_DAY_WINDOW_SECS - seven_secs))
+        windows=$(windows_ahead "$seven_secs" "${five_secs:-0}")
+        local heading="" heading_part="" walk_gap walk_end
+        read -r walk_gap walk_end <<<"$(_seven_day_walk "$seven_int" "$seven_secs")"
+        if [ -n "$walk_end" ]; then
+            heading="$walk_end"
+        elif [ "$elapsed7" -ge 86400 ]; then
+            heading=$((seven_int * SEVEN_DAY_WINDOW_SECS / elapsed7))
+            [ "$heading" -gt 100 ] && heading=100
+        fi
+        [ -n "$heading" ] && heading_part=" · heading ~${heading}%"
+        # 0 ahead is the only "last window": the week ends inside the one you
+        # are in, and there is nothing to divide the surplus across. At 1 the
+        # line keeps the count and the grammar — `1✕5h left · 25.0%/win` says
+        # the same thing the N-window form says, and calling two windows the
+        # last one to save a redundant clause is the wrong trade.
+        if [ "$windows" -le 0 ]; then
+            notice_add 10 '-' acct "acct.budget.last" "${surplus}%" \
+                "last window · ${surplus}% left" \
+                "budget last window · ${surplus}% left${heading_part}"
+        else
+            local even
+            even=$(awk -v h="$surplus" -v w="$windows" 'BEGIN{printf "%.1f", h/w}')
+            notice_add 10 '-' acct "acct.budget.${windows}" "${windows}${MULT_GLYPH}5h" \
+                "${windows}${MULT_GLYPH}5h left · ${even}%/win" \
+                "budget ~${windows}${MULT_GLYPH}5h left · even ${even}%/win${heading_part}"
         fi
     fi
 

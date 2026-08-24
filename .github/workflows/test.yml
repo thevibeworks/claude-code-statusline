@@ -11,7 +11,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y jq
-      - name: Run tests
-        run: npm exec --yes bats -- t/
-      - name: Shellcheck (error severity; warnings are tracked, not gated)
-        run: shellcheck -S error statusline.sh install.sh
+      # `make check` = shellcheck (error severity; warnings are tracked, not
+      # gated) then the bats suite — the same two commands a contributor runs.
+      - name: make check
+        run: make check
