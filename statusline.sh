@@ -2670,9 +2670,10 @@ run_session_summary() {
 #   ˍ         ran, burned under a point, or idle inside the log's coverage — a
 #             bar of height zero, on the baseline
 #   ░         unknown — outside the sample log's coverage
-#   ▮         the cell you are in now
-#   ▯         a cell still ahead of you (the hollow of ▮: an empty slot)
-#   ×         a cell the pool will not cover at the current pace
+#   ▮         the cell you are in now — and the END of the 5h strip: that
+#             strip is history, it has no cells after this one
+#   ▯         a cell still ahead of you (the hollow of ▮: an empty slot) — 7d
+#   ×         a cell the pool will not cover at the current pace — 7d
 #   ...▯(✕12) the folded future: 12 more 5h windows before the reset, all
 #             alike (× red when the tail projects dry) — live 7d strip only.
 #             The count is windows-to-reset, the same number the budget line
@@ -2683,6 +2684,11 @@ run_session_summary() {
 #             ✕ is the operator, × is a cell: the two never mean the same.
 # Unknown and idle are deliberately different glyphs: drawing a gap in the
 # record as an idle session is the one lie this row must not tell.
+# Only the 7d strip draws a future. The 5h one stops at ▮: a window whose end
+# the badge already states (`5h[38%@23:00]`) and whose wall a notice already
+# names (`5h caps ~14:20`) does not need three hollow cells and a row of ×
+# to say it a third time, louder. Strips carry history, badges carry state,
+# notices do the warning.
 # Shared by the live `--week` row and the `week` subcommand, so the two
 # surfaces cannot disagree.
 
@@ -2693,10 +2699,15 @@ WEEK_CACHE_TTL_SECS=300
 # The live row compresses the 7d strip's future run: after the now-marker it
 # keeps WEEK_FUTURE_KEEP hollow cells, then folds the rest into `...▯(✕12)`
 # (count = 5h windows before the reset; × red when the tail projects dry).
-# History is information, the future is all the same cell — but only fold
-# when it hides enough to matter, so a closing week still draws to its edge.
+# History is information; the future is one fact, and the fact is the count.
+# The threshold is 2, not a column break-even: eleven hollow cells were
+# measured to read as "too much future" long before they were expensive, and
+# the count is the part that has to survive mid-week, when a pressure notice
+# owns the pin and this row is the only place the remaining windows appear.
+# A closing week still draws to its edge without help — four cells or fewer
+# leave nothing worth folding.
 WEEK_FUTURE_KEEP=2
-WEEK_FUTURE_MIN_HIDE=10
+WEEK_FUTURE_MIN_HIDE=2
 
 # The period start on the same 5-min grid the window keys are rounded to.
 # resets_at is jittered by the API (15:59:59.76 one fetch, 16:00:00.47 the
@@ -2826,8 +2837,9 @@ week_dry_slot() {
 
 # The colored strip. Args: fill percent (for the pressure tint), now,
 # period start, dry cell (-1 none), history line ("lo hi slot:cost,..."),
-# cell count, cell seconds, day-gaps flag, future cells kept before folding
-# (0 = draw all), and the TRUE period length in seconds — the fold token
+# cell count, cell seconds, day-gaps flag, how much future to draw (-1 none:
+# the strip ends at ▮; 0 all; N keep N hollow cells then fold), and the TRUE
+# period length in seconds — the fold token
 # counts windows to the real reset, not cells on the grid, so it needs the
 # period, not the drawing. Defaults to the grid when a caller has nothing
 # truer to offer. Cells and gaps come out of one awk so the row is one string
@@ -2860,7 +2872,9 @@ build_ledger_strip() {
             # same hollow slot, so name it once with a count instead of
             # drawing it N times
             lim = w
-            if (fut > 0 && w - (nowslot + 1 + fut) >= minhide)
+            if (fut < 0)                    # history only: stop at the now-cell
+                lim = nowslot + 1
+            else if (fut > 0 && w - (nowslot + 1 + fut) >= minhide)
                 lim = nowslot + 1 + fut
             s = ""; prev = ""; pday = -1
             for (i = 0; i < lim; i++) {
@@ -2886,7 +2900,7 @@ build_ledger_strip() {
                 if (c != prev) { s = s C_OFF c; prev = c }
                 s = s g
             }
-            if (lim < w) {
+            if (fut >= 0 && lim < w) {
                 # the fold: glyph = how the tail ends (× red when the pool
                 # dries before the reset), count = 5h windows still to come
                 # before the reset — the same number the budget line prices,
@@ -2912,10 +2926,15 @@ build_week_strip() {
     build_ledger_strip "$1" "$2" "$3" "$4" "$5" "$WEEK_CELLS" 18000 1 "${6:-0}" "$SEVEN_DAY_WINDOW_SECS"
 }
 
-# 5h strip: 5 ✕ 1h cells of the current window. $5 is
-# five_history_cells' line.
+# 5h strip: the hours of the current window that have HAPPENED, ending at ▮.
+# $4 is five_history_cells' line. No hollow cells, no dry projection, no
+# future of any kind: a strip carries history, the badge carries state
+# (`5h[38%@23:00]` is the clock this window ends on) and a notice does the
+# warning (`5h caps ~14:20`, with its own gates and its own exact time).
+# Three empty cells and a wall of × said none of that — they spent four
+# columns dramatising a countdown the badge above already prints.
 build_five_strip() {
-    build_ledger_strip "$1" "$2" "$3" "$4" "$5" "$FIVE_CELLS" "$FIVE_CELL_SECS" 0
+    build_ledger_strip "$1" "$2" "$3" -1 "$4" "$FIVE_CELLS" "$FIVE_CELL_SECS" 0 -1
 }
 
 # Does a history line carry at least one cell BEFORE the now-cell? A single
@@ -2946,24 +2965,6 @@ ledger_has_past() {
 # judged itself too young to speak.
 window_evidence_floor() {
     echo $(( $1 / 20 ))
-}
-
-# The 5h window's own dry cell: linear pace, the same projection the 5h
-# badge and the advisor's "5h caps ~14:20" use — so it waits for the same
-# evidence they do. One prompt front-loading 7% ten minutes in is not a rate
-# yet, and a wall of × is the loudest way to say it. -1 when it holds to
-# reset, and while the window is too young to judge.
-five_dry_cell() {
-    local five_int="$1" five_secs="$2" now="$3" five_start="$4"
-    local elapsed=$(( now - five_start )) floor
-    floor=$(window_evidence_floor 18000)
-    [ "$five_int" -gt 0 ] 2>/dev/null && [ "$elapsed" -ge "$floor" ] || { echo -1; return 0; }
-    local dry_epoch=$(( now + elapsed * (100 - five_int) / five_int ))
-    if [ "$dry_epoch" -lt $(( now + five_secs )) ]; then
-        echo $(( (dry_epoch - five_start) / FIVE_CELL_SECS ))
-    else
-        echo -1
-    fi
 }
 
 # The current 5h window's start on the 5-min grid (its resets_at - 5h).
@@ -3053,9 +3054,7 @@ build_week_row() {
     fi
     local parts=""
     if [ "$have_five" = 1 ]; then
-        local fdry
-        fdry=$(five_dry_cell "$five_int" "$five_secs" "$now" "$five_start")
-        parts="${DIM}5h ${RESET}$(build_five_strip "$five_int" "$now" "$five_start" "$fdry" "$five_hist")$(strip_tail "$five_int" "$five_secs" 18000 "$now" "$five_reset_mode")"
+        parts="${DIM}5h ${RESET}$(build_five_strip "$five_int" "$now" "$five_start" "$five_hist")$(strip_tail "$five_int" "$five_secs" 18000 "$now" "$five_reset_mode")"
     fi
     if [ "$have_seven" = 1 ]; then
         local dry

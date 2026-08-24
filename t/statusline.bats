@@ -1198,7 +1198,7 @@ _seed_week_store() {
     done
 }
 
-@test "build_week_row: the strip under the badges, labelled 7d, 34 cells" {
+@test "build_week_row: the strip under the badges, labelled 7d, on a 34-cell grid" {
     tmpdir=$(mktemp -d)
     CLAUDE_ACCOUNT_DIR="$tmpdir"
     _seed_week_store "$tmpdir"
@@ -1208,7 +1208,15 @@ _seed_week_store() {
     [[ "$plain" == "7d "* ]]
     strip=$(printf '%s' "${plain#7d }" | sed 's/ [0-9.]*✕ @.*$//; s/ @.*$//')
     bar=$(printf '%s' "$strip" | tr -d ' ')
-    [ "$(echo "$bar" | grep -o . | wc -l)" -eq 34 ]
+    # the live row draws history + ▮ + WEEK_FUTURE_KEEP and folds the rest;
+    # the grid it draws them on is still 34 cells (`week` renders all of it)
+    [[ "$bar" =~ ^(.*)\.\.\.▯\(✕[0-9]+\)$ ]]
+    drawn="${BASH_REMATCH[1]}"
+    seven_secs=$(get_reset_seconds "$(jq -r .seven_day.resets_at "$tmpdir/usage.cache")")
+    ps=$(week_period_start "$(date +%s)" "$seven_secs")
+    nowslot=$(( ($(date +%s) - ps) / 18000 ))
+    [ "$(printf '%s' "$drawn" | grep -o . | wc -l)" -eq $((nowslot + 1 + WEEK_FUTURE_KEEP)) ]
+    [ $((nowslot + 1 + WEEK_FUTURE_KEEP)) -lt 34 ]
     [[ "$bar" =~ [▁▂▃▄▅▆▇█]ˍ[▁▂▃▄▅▆▇█] ]]
     [[ "$bar" == *▮* ]]
     # day gaps: single spaces inside the strip, several of them across a week
@@ -1259,24 +1267,36 @@ _seed_week_store() {
     [[ "$plain" =~ @[A-Z][a-z][a-z]\ [0-9]{2}:[0-9]{2}$ ]]
 }
 
-@test "five_dry_cell: a fresh 5h window projects nothing — one floor for the trio" {
-    now=$(date +%s)
-    # Live report: one big prompt front-loaded 7% ten minutes into a window
-    # and the strip drew `▮▯×××` — while the pace suffix beside it judged
-    # itself too young to speak and the "5h caps" notice stayed silent. Same
-    # projection, three surfaces; they wait on the same evidence now.
-    [ "$(five_dry_cell 7 $((18000 - 600)) "$now" $((now - 600)))" = "-1" ]
-    [ "$(window_evidence_floor 18000)" = "900" ]
-    # past the floor the same burn is a rate, and the wall comes back
-    [ "$(five_dry_cell 7 $((18000 - 900)) "$now" $((now - 900)))" != "-1" ]
-    # the strip is what the user actually sees
+@test "build_five_strip: the 5h strip is history — it ends at ▮, always" {
+    # The user could not read `5h ▮▯××`, and they were right: the future of a
+    # 5h window is a clock the badge already prints (`5h[7%@04:20]`) and the
+    # dry projection duplicates the rank-90 "5h caps" notice, which owns that
+    # warning with its own gates and its own exact time.
     tmpdir=$(mktemp -d)
     CLAUDE_ACCOUNT_DIR="$tmpdir"
-    reset_5h=$(date -u -d "@$((now + 18000 - 600))" '+%Y-%m-%dT%H:%M:%SZ')
-    usage=$(printf '{"fetched_at":%s,"five_hour":{"utilization":7,"resets_at":"%s"},"seven_day":{"utilization":20}}' "$now" "$reset_5h")
-    five=$(strip_ansi "$(build_week_row "$usage" always)")
-    [[ "$five" == "5h "* ]]
-    [[ "$five" != *×* ]]
+    now=$(date +%s)
+    # (1) a hot young window: one prompt front-loaded 7% ten minutes in —
+    # the fixture that used to draw ▮▯×××
+    _five_of() {
+        local reset_5h; reset_5h=$(date -u -d "@$1" '+%Y-%m-%dT%H:%M:%SZ')
+        local u=$(printf '{"fetched_at":%s,"five_hour":{"utilization":%s,"resets_at":"%s"},"seven_day":{"utilization":20}}' "$now" "$2" "$reset_5h")
+        local p; p=$(strip_ansi "$(build_week_row "$u" always)")
+        p="${p#5h }"; p="${p%%  7d*}"
+        printf '%s' "$(printf '%s' "$p" | sed 's/ [0-9.]*✕ @.*$//; s/ @.*$//; s/ [0-9.]*✕$//')"
+    }
+    young=$(_five_of $((now + 18000 - 600)) 7)
+    [[ "$young" == *▮ ]]
+    [[ "$young" != *▯* ]]
+    [[ "$young" != *×* ]]
+    # (2) mid-window, burning hard enough that linear pace would have walled
+    # off every remaining cell
+    mid=$(_five_of $((now + 18000 - 9000)) 80)
+    [[ "$mid" == *▮ ]]
+    [[ "$mid" != *▯* ]]
+    [[ "$mid" != *×* ]]
+    # ▯ and × are not gone from the vocabulary — the 7d strip still draws both
+    plain=$(strip_ansi "$(build_week_row "$(printf '{"fetched_at":%s,"five_hour":{"utilization":7},"seven_day":{"utilization":20,"resets_at":"%s"}}' "$now" "$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')")" always)")
+    [[ "$plain" == *▯* ]]
     rm -rf "$tmpdir"
 }
 
@@ -1400,6 +1420,32 @@ _seed_week_store() {
     # against a 168h period, so the two disagree by design
     [ "${BASH_REMATCH[2]}" -eq $(( (reset_epoch - now + 17999) / 18000 )) ]
     [ "${BASH_REMATCH[2]}" -ne $((34 - drawn)) ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_week_row: the future folds as soon as it hides two cells" {
+    # The threshold is not a column break-even. The future is one fact — the
+    # count — and mid-week, when a pressure notice owns the pin, this row is
+    # the only place the remaining windows appear. Eleven hollow cells read as
+    # "too much future" long before they were expensive.
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    now=$(date +%s)
+    _tail_of() {
+        local reset; reset=$(date -u -d "@$1" '+%Y-%m-%dT%H:%M:%SZ')
+        local u; u=$(printf '{"fetched_at":%s,"five_hour":{"utilization":9},"seven_day":{"utilization":20,"resets_at":"%s"}}' "$now" "$reset")
+        local p; p=$(strip_ansi "$(build_week_row "$u" always)" | sed 's/ [0-9.]*✕ @.*$//; s/ @.*$//' | tr -d ' ')
+        printf '%s' "${p#*▮}"
+    }
+    # ~6 windows left: KEEP=2 drawn, the rest folded and counted
+    six=$(_tail_of $((now + 6 * 18000 - 3600)))
+    [[ "$six" =~ ^▯▯\.\.\.▯\(✕([0-9]+)\)$ ]]
+    [ "${BASH_REMATCH[1]}" -eq 6 ]
+    # the last cells of the week: with one cell to hide the fold would spend
+    # more ink than it saves, so the strip draws to its edge
+    close=$(_tail_of $((now + 18000 + 600)))
+    [[ "$close" != *"..."* ]]
+    [[ "$close" =~ ^▯{0,3}$ ]]
     rm -rf "$tmpdir"
 }
 
