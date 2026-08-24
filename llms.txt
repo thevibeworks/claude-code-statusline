@@ -4,11 +4,11 @@
 > per-model weekly limits), context pressure, session cost, prompt-cache
 > health, and git activity in Claude Code's statusLine hook — plus a
 > week row (this 5h window by the hour, the 7d period as its 5h
-> windows with the future folded to a counted `...▯5h✕28` tail: where
+> windows with the future folded to a counted `...▯(✕28)` tail: where
 > the points went), an advisor row that interprets the
 > numbers (cap projections, expiring-surplus and underuse advice, fleet
 > relief), and a `report` subcommand that ledgers what each closed window
-> expired unused. 418 bats tests, deps are jq + curl, no daemon, no
+> expired unused. 423 bats tests, deps are jq + curl, no daemon, no
 > telemetry.
 
 Key facts for agents:
