@@ -10,18 +10,24 @@ setup() {
     export CLAUDE_CONFIG_DIR="$TEST_HOME/.claude"
     mkdir -p "$CLAUDE_CONFIG_DIR"
 
-    # Mock curl: copies the real statusline.sh instead of downloading
+    # Mock curl: serves the repo instead of GitHub. It resolves the URL to a
+    # repo path so a request for the skill does not silently hand back
+    # statusline.sh — a mock that answers everything with the same file cannot
+    # catch an installer that fetches the wrong thing.
     mkdir -p "$TEST_HOME/bin"
     cat > "$TEST_HOME/bin/curl" << MOCKCURL
 #!/bin/bash
-for i in "\$@"; do
-    if [ "\$prev" = "-o" ]; then
-        cp "$SCRIPT_DIR/statusline.sh" "\$i"
-        exit 0
-    fi
-    prev="\$i"
+url=""; out=""
+while [ \$# -gt 0 ]; do
+    case "\$1" in
+        -o) out="\$2"; shift 2 ;;
+        -*) shift ;;
+        *) url="\$1"; shift ;;
+    esac
 done
-cat "$SCRIPT_DIR/statusline.sh"
+path="\${url#*/main/}"
+[ -f "$SCRIPT_DIR/\$path" ] || exit 22
+if [ -n "\$out" ]; then cp "$SCRIPT_DIR/\$path" "\$out"; else cat "$SCRIPT_DIR/\$path"; fi
 MOCKCURL
     chmod +x "$TEST_HOME/bin/curl"
     export PATH="$TEST_HOME/bin:$PATH"
@@ -142,4 +148,73 @@ JSON
 @test "install: output mentions install path" {
     result=$(run_install)
     [[ "$result" == *"statusline.sh"* ]]
+}
+
+# --- the flags are the user's, not the installer's ---
+
+@test "install: keeps the flags already on the statusLine command" {
+    # A configured statusline carries --order/--debug/a width. An installer
+    # that rewrites the whole command reverts the user's setup on every
+    # update, silently, and they find out by looking at a row that changed.
+    cat > "$CLAUDE_CONFIG_DIR/settings.json" << 'JSON'
+{
+  "statusLine": {
+    "type": "command",
+    "command": "bash ~/.claude/statusline.sh --debug --order activity,cost,model,quota,user",
+    "padding": 0
+  }
+}
+JSON
+    run_install
+    result=$(jq -r '.statusLine.command' "$CLAUDE_CONFIG_DIR/settings.json")
+    [[ "$result" == *"statusline.sh --debug --order activity,cost,model,quota,user" ]]
+}
+
+@test "install: a command that is not ours keeps no flags" {
+    cat > "$CLAUDE_CONFIG_DIR/settings.json" << 'JSON'
+{"statusLine": {"type": "command", "command": "echo hi --not-our-flag"}}
+JSON
+    run_install
+    result=$(jq -r '.statusLine.command' "$CLAUDE_CONFIG_DIR/settings.json")
+    [[ "$result" != *"--not-our-flag"* ]]
+}
+
+# --- the skill ships with the script ---
+
+@test "install: installs the usage-insight skill" {
+    run_install
+    [ -f "$CLAUDE_CONFIG_DIR/skills/usage-insight/SKILL.md" ]
+    grep -q 'name: usage-insight' "$CLAUDE_CONFIG_DIR/skills/usage-insight/SKILL.md"
+}
+
+@test "install: STATUSLINE_SKILL=0 skips the skill" {
+    STATUSLINE_SKILL=0 run_install
+    [ -f "$CLAUDE_CONFIG_DIR/statusline.sh" ]
+    [ ! -e "$CLAUDE_CONFIG_DIR/skills/usage-insight" ]
+}
+
+# --- local source (what `make install` runs) ---
+
+@test "install: STATUSLINE_SRC installs from a checkout, no network" {
+    # the mock curl is removed: a local install that reaches the network at
+    # all is a local install in name only
+    rm -f "$TEST_HOME/bin/curl"
+    STATUSLINE_SRC="$SCRIPT_DIR" run_install
+    cmp "$SCRIPT_DIR/statusline.sh" "$CLAUDE_CONFIG_DIR/statusline.sh"
+    cmp "$SCRIPT_DIR/skills/usage-insight/SKILL.md" "$CLAUDE_CONFIG_DIR/skills/usage-insight/SKILL.md"
+    [ -x "$CLAUDE_CONFIG_DIR/statusline.sh" ]
+}
+
+@test "install: a source tree that does not parse is not installed" {
+    # `make install` ships whatever is in the tree, half-finished edit and
+    # all. A broken statusline is not a worse render, it is no statusline.
+    src=$(mktemp -d)
+    mkdir -p "$src/skills/usage-insight"
+    printf 'if [\n' > "$src/statusline.sh"
+    : > "$src/skills/usage-insight/SKILL.md"
+    run env STATUSLINE_SRC="$src" bash "$SCRIPT_DIR/install.sh"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"does not parse"* ]]
+    [ ! -e "$CLAUDE_CONFIG_DIR/statusline.sh" ]
+    rm -rf "$src"
 }

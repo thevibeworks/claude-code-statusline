@@ -2,6 +2,77 @@
 
 ## Unreleased
 
+## v0.34.0 — 2026-08-24 — five slots, and a window you are in is not one you have left
+
+**The 5h strip is five cells again — but the future in them is empty, not
+judged.** v0.33.0 was right that `5h ▮▯×××` was unreadable and wrong about
+which half to cut. The `×` was the problem: a linear projection dressed as
+ink, saying a third time what the badge (`5h[38%@23:00]`) and the notice
+(`5h caps ~14:20`) already say with better gates and an exact time. The
+hollow cells were never the problem — they were the axis. Ending the strip
+at `▮` took the ruler away with the forecast, and left a bar that grew an
+hour at a time and answered "how long have I got" with nothing.
+
+So: five slots, always, one per hour, no dry cell in any of them.
+`5h ▃▃▮▯▯` is two whole hours after this one, read off the row without
+arithmetic and without a second glance at the clock. Fixed width is the
+other half of it — the row holds its shape for the life of the window
+instead of reflowing every hour, which is the difference between an axis
+and a bar that grows at you. An empty cell is a fact; a `×` is a guess, and
+only one of those belongs in a ledger.
+
+`▮` now rides the real clock rather than the grid. `five_period_start`
+rounds to five minutes so `week_scan`'s cache key holds still across renders
+— a `resets_at` that jitters by a second would re-run a whole-log `jq` pass
+every render — and that rounding offsets every hour boundary by up to 2½
+minutes. Invisible in a bar height; wrong exactly where this strip is read.
+With the marker at `4 - floor(left / 1h)` the hollow count is the whole hours
+remaining to the second: at the 119-minute mark, three hours and one minute
+left drew as two, and now does not.
+
+**`N✕5h left` no longer counts the window you are standing in.** The row
+draws it as `▮` and line 1 prices it as `5h[38%]`, so counting it again
+made `▮ + 11` read as twelve, and the budget sentence beside it agreed with
+the miscount. "Left" now means still to come: what remains after this
+window closes, `(7d left - 5h left)`, divided into windows — a stub at the
+end of the week is still a window you can spend, so that rounds up.
+
+The arithmetic has a property the old one did not: both clocks tick down
+together, so the difference does not move. The count holds steady for the
+life of a window and steps down by exactly one at each rollover. It was a
+reading that drifted; it is a countdown now. `windows_ahead` is that
+definition in one place, and the folded `...▯(✕N)` prints what the budget
+line computed rather than re-deriving it off a 34-cell grid that spans 170h
+against a 168h period.
+
+`last window` now means the week ends inside the one you are in — nothing
+ahead of it, nothing to divide the surplus across. It used to fire at one
+window ahead too, to skip a `/win` clause that would just restate the
+headroom; calling two windows the last one to save a redundant clause is the
+wrong trade. At one ahead the line keeps the grammar: `1✕5h left · 25.0%/win`.
+
+**`make install`.** The one-liner installed from GitHub and there was no
+way to install the tree in front of you, so a working copy got there by
+hand — and a stale hand-copy is how v0.28.0 once faked a red "7d dry" at
+2%. `make install` runs the same `install.sh` with `STATUSLINE_SRC` set:
+one installer, two entrypoints, no drift. It also refuses a
+`statusline.sh` that does not parse — a broken statusline is not a worse
+render, it is no statusline.
+
+Three things the installer should have been doing all along, now on both
+paths: it **keeps the flags** already on `statusLine.command` (rewriting
+the whole command silently reverted `--order` and `--debug` on every
+update), it writes through a temp file and renames (the script runs on
+every render; a half-written one is a broken prompt), and it installs the
+`usage-insight` skill beside it (`STATUSLINE_SKILL=0` opts out).
+
+`make status` reports installed-vs-tree drift, settings command and skill
+state; `make check` is shellcheck + bats; `make install-check` gates the
+install on both. `make help` lists the rest.
+
+435 tests (was 427).
+
+
 ## v0.33.0 — 2026-08-23 — the strip is a record, not a forecast
 
 **The 5h strip stops at `▮`.** It used to draw the rest of the window as
