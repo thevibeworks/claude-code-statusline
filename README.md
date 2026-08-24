@@ -305,7 +305,7 @@ fire.
 | `░` | unknown: the log has no sample for that cell (never drawn as idle — a gap in the record is not a quiet session) |
 | `▮` | the cell you are in now |
 | `▯` | a cell still ahead of you — the hollow of `▮`, an empty slot waiting |
-| `×` | a cell the pool will not cover at the current pace (7d: the learned forecast's dry point, linear when untrained; 5h: linear, the same projection as the badge) |
+| `×` | a cell the pool will not cover at the current pace (7d: the learned forecast's dry point, linear when untrained; 5h: linear, the same projection as the badge). Waits on the same evidence the pace suffix does — 5% of the window — so one front-loaded prompt cannot wall off a window that just opened |
 | `...▯(✕28)` | the folded 7d future: 28 more 5h windows before the reset, one token instead of a run of hollow cells (`×` red when the tail ends dry). The count is windows-to-reset — what the budget line prices — not the number of cells the fold happened to hide |
 | `✕` | not a cell — the multiplication sign, the row's one operator (`...▯(✕28)`, `0.7✕`, `19✕5h left`). Deliberately not `×` (U+00D7), which is already a reading: cells are the ink, the operator is punctuation, and `...×(×28)` has to say both at once. One terminal column and no emoji fallback, so the row still meets line 1's edge; override with `MULT_GLYPH` (`╳` and `✖` look stronger but are ambiguous-width and emoji-presentation respectively) |
 
@@ -339,11 +339,13 @@ proj (main*)      +84/-14 8m $6.72 fabl5[1m][██░░42%] fb[91%] [MAX|@work
 ```
 
 **Row 2 pins** the top notice, compacted to the room the ledgers leave —
-it stays while the condition holds. **Row 3 flashes** the same notice in
-full, but only for ~90 s after the condition first appears in this
-session: the explanation arrives once, then gets out of the way and
-leaves the pin. A second story that shows up later takes row 3 next.
-The number you act on is **bold**.
+it stays while the condition holds. **Row 3 flashes** the *next* notice
+in full — never the pin's own sentence, which row 2 is already carrying
+— and only for ~90 s after that condition first appears in this session:
+the explanation arrives once, then gets out of the way and leaves the
+pin. One thing to say means one row, not the same sentence at two
+lengths. A flash that truncation has cut below a readable sentence is
+dropped rather than shown as a stub. The number you act on is **bold**.
 
 Three voices, one hue each:
 
@@ -511,7 +513,7 @@ run. Setting only `CLAUDE_CACHE_DIR` keeps the legacy single-dir behavior.
 npm exec --yes bats -- t/
 ```
 
-423 tests across `t/statusline.bats` (411 statusline + integration) and
+426 tests across `t/statusline.bats` (414 statusline + integration) and
 `t/install.bats` (12 installer). CI runs on push and PR to `main`.
 
 ## Project Structure

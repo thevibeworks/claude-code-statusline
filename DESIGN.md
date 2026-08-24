@@ -103,7 +103,8 @@ badges.
 ▮          now
 ▯          ahead — the hollow of ▮
 ...▯(x14)  the folded future: 14 more 5h windows before the reset (live 7d row)
-×          pace won't cover it (7d: learned forecast, linear when cold; 5h: linear)
+×          pace won't cover it (7d: learned forecast, linear when cold; 5h: linear;
+           no projection before 5% of the window has run — same floor as the pace)
 ```
 
 Burn cells take their badge's pressure color; nothing else in the row is
@@ -128,7 +129,8 @@ rank  voice  scope  key  hl  short  long
   frame: two clauses about one window can never disagree.
 - **key** — identity of the *condition*, not of the text. Row 3 shows a
   notice only while its key is new to this session (~90 s), so a long
-  explanation arrives once and then gets out of the way.
+  explanation arrives once and then gets out of the way. Never the pin's
+  key: row 3 starts at the second record, so one condition costs one row.
 - **hl** — the number the reader acts on: bold, then back to the voice.
 - **short / long** — the pin, and the sentence for a surface with a
   whole line (row 3, `--check`, `--week`).

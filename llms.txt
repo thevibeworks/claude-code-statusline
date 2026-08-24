@@ -8,7 +8,7 @@
 > the points went), an advisor row that interprets the
 > numbers (cap projections, expiring-surplus and underuse advice, fleet
 > relief), and a `report` subcommand that ledgers what each closed window
-> expired unused. 423 bats tests, deps are jq + curl, no daemon, no
+> expired unused. 426 bats tests, deps are jq + curl, no daemon, no
 > telemetry.
 
 Key facts for agents:

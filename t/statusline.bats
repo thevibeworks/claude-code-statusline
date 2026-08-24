@@ -1259,6 +1259,27 @@ _seed_week_store() {
     [[ "$plain" =~ @[A-Z][a-z][a-z]\ [0-9]{2}:[0-9]{2}$ ]]
 }
 
+@test "five_dry_cell: a fresh 5h window projects nothing — one floor for the trio" {
+    now=$(date +%s)
+    # Live report: one big prompt front-loaded 7% ten minutes into a window
+    # and the strip drew `▮▯×××` — while the pace suffix beside it judged
+    # itself too young to speak and the "5h caps" notice stayed silent. Same
+    # projection, three surfaces; they wait on the same evidence now.
+    [ "$(five_dry_cell 7 $((18000 - 600)) "$now" $((now - 600)))" = "-1" ]
+    [ "$(window_evidence_floor 18000)" = "900" ]
+    # past the floor the same burn is a rate, and the wall comes back
+    [ "$(five_dry_cell 7 $((18000 - 900)) "$now" $((now - 900)))" != "-1" ]
+    # the strip is what the user actually sees
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    reset_5h=$(date -u -d "@$((now + 18000 - 600))" '+%Y-%m-%dT%H:%M:%SZ')
+    usage=$(printf '{"fetched_at":%s,"five_hour":{"utilization":7,"resets_at":"%s"},"seven_day":{"utilization":20}}' "$now" "$reset_5h")
+    five=$(strip_ansi "$(build_week_row "$usage" always)")
+    [[ "$five" == "5h "* ]]
+    [[ "$five" != *×* ]]
+    rm -rf "$tmpdir"
+}
+
 @test "strip_tail: young is a fraction of the window, not a clock reading" {
     now=$(date +%s)
     # 5h is unchanged: 15m is 5% of it, and the pace is legible from there
@@ -3655,6 +3676,23 @@ JSON
     rm -rf "$(dirname "$state")"
 }
 
+@test "notice_flash_worth_row: a sentence earns the row, a truncation stub does not" {
+    # the floor is absolute, not relative to the pin: since row 3 became a
+    # DIFFERENT notice than row 2, subtracting their lengths compared two
+    # unrelated sentences
+    run notice_flash_worth_row "! 7d dry ~Wed 19:50"   # 19: carries the number
+    [ "$status" -eq 0 ]
+    run notice_flash_worth_row "! 7d dry ~Wed"         # 13: says nothing to act on
+    [ "$status" -eq 1 ]
+    # the boundary itself, both sides
+    run notice_flash_worth_row "$(printf '%*s' "$NOTICE_FLASH_MIN_CHARS" '')"
+    [ "$status" -eq 0 ]
+    run notice_flash_worth_row "$(printf '%*s' $((NOTICE_FLASH_MIN_CHARS - 1)) '')"
+    [ "$status" -eq 1 ]
+    run notice_flash_worth_row ""
+    [ "$status" -eq 1 ]
+}
+
 @test "notice_flash_line: a NEW condition speaks even when the old one has faded" {
     state=$(mktemp -d)/notice_seen
     now=$(date +%s)
@@ -4346,6 +4384,36 @@ make_deadman_shim() { # $1=tmpdir $2=chip output
     [ -n "$line2" ]
     [ "${#line1}" -gt 55 ]
     [ "${#line2}" -eq 55 ]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: a narrow width keeps a short flash beside a long pin" {
+    # The regression this guards: row 3's gate used to require the flash to
+    # beat the PIN by 12 columns. At 30 columns the pin is `! 5h caps ~23:54`
+    # (16) and the flash is cut at its first joint to `! 7d caps ~Tue 07:22`
+    # (20) — a gain of 4, so the second notice lost its row for being about a
+    # different window than the first. It is a sentence with a number in it;
+    # it gets the row. 30 columns is deliberate: the full sentence runs ~38
+    # even when the reset gap renders short (`40h` vs `39h59m`), so the joint
+    # is always dropped and the lengths here do not drift with the clock.
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude/statusline"
+    printf '{"claudeAiOauth":{"accessToken":"tok"}}' > "$tmpdir/.claude/.credentials.json"
+    reset_5h=$(date -u -d '+2 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_7d=$(date -u -d '+3 days' '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"five_hour":{"utilization":85,"resets_at":"%s"},"seven_day":{"utilization":75,"resets_at":"%s"},"fetched_at":%s}' \
+        "$reset_5h" "$reset_7d" "$(date +%s)" > "$tmpdir/.claude/statusline/usage.cache"
+    out=$(echo '{"session_id":"flashfloor","model":{"id":"claude-opus-4-6","display_name":"Opus"},"cwd":"/t","workspace":{"current_dir":"/t"},"cost":{"total_cost_usd":0},"context_window":{"used_percentage":10,"context_window_size":200000}}' \
+        | COLUMNS=30 HOME="$tmpdir" bash "$SCRIPT_DIR/statusline.sh")
+    [ "$(printf '%s\n' "$out" | wc -l)" -eq 3 ]
+    pin=$(strip_ansi "$(printf '%s\n' "$out" | sed -n 2p)" | sed 's/^ *//')
+    flash=$(strip_ansi "$(printf '%s\n' "$out" | sed -n 3p)" | sed 's/^ *//')
+    [[ "$pin" =~ ^!\ 5h\ caps\ ~[0-9]{2}:[0-9]{2}$ ]]
+    [[ "$flash" =~ ^!\ 7d\ caps\ ~[A-Z][a-z]{2}\ [0-9]{2}:[0-9]{2}$ ]]
+    # the two rows speak about different windows, and the flash is shorter
+    # than the old rule would ever have allowed
+    [ $(( ${#flash} - ${#pin} )) -lt 12 ]
+    [ "${#flash}" -ge "$NOTICE_FLASH_MIN_CHARS" ]
     rm -rf "$tmpdir"
 }
 
