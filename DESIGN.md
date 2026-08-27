@@ -82,7 +82,7 @@ own signal.
 ## The ledgers (row 2)
 
 ```
-5h ▃▄▮▯▯ 0.6x @04:00  7d ▅▁▂ ▃▅ˍ▃▅ ▃▃▁▂▁ ▮▯▯...▯(x14) 0.7x @Wed 09:00
+5h ▄▄▮▯▯ 0.6x @04:00  7d ▅▂▃ ▄▅▁▄▅ ▄▄▂▃▂ ▮▯▯...▯(x14) 0.7x @Wed 09:00
 ```
 
 One grammar, two scales. `5h` = this window as five hour cells; `7d` =
@@ -109,8 +109,8 @@ window has run) and the reset its right edge is — axis labels, not restated
 badges.
 
 ```
-▁▂▃▄▅▆▇█   burned; height = points that cell cost (▁ ≤2 … ▅ ≤11 … █ >20)
-ˍ          ran, negligible — a bar of height zero, on the baseline
+▂▃▄▅▆▇█    burned; height = points that cell cost (▂ ≤2 … ▅ ≤11 … █ >20)
+▁          baseline: ran, negligible — the shortest bar of the same block
 ░          unknown — no sample; never drawn as idle
 ▮          now
 ▯          ahead — the hollow of ▮; on 5h, the hours left in the window

@@ -109,7 +109,7 @@ Every component earns its place:
 | User tier | Neutral white-weight (MAX bold, PRO normal, dim otherwise) — identity, never a status color. Truncated display name. |
 | Quota | Integer percentages. The 5h badge always carries its reset time while a window is live — `5h[42%@14:30]` reads "42% used, resets at 14:30" — because on a 5h horizon the reset is the number you plan the current sitting around. Wall-clock, not a countdown, on purpose: Claude Code only re-renders the statusline on activity, so a relative "@1h38m" silently decays into a lie during idle gaps, while "@14:30" stays true in a frozen frame. (The 7d badge is hybrid: day-relative `@5d` while the reset is >= 24h out — decays one day per day, mild and narrow — switching to the same wall-clock `@04:00` inside the last day, where an `@6h`/`@<1h` countdown decayed by the hour exactly when pressure keeps the suffix visible.) When a window's utilization climbs between renders, a reverse-video `+N` token appears right after the badge for ~60s: `5h[44%@14:32]+2` means "you just burned 2%". A drop (window reset) stays quiet — the fresh low number is its own signal. **7d is forecast, not leveled**: a learned per-weekday burn profile (EWMA over your own usage history) plus your recent 24h burn project whether the quota outlasts the window — your heavy Tuesday counts more than a generic average. The verdict is color alone; under pressure the badge shows when relief arrives: `7d[44%@5d]` red means "at your pace, dry days before the reset 5 days from now"; inside the last day it reads `7d[92%@04:00]` — resets at 04:00. Cold start (<14 days history) falls back to window-average pacing. Recovery color when reset is imminent. **Model-scoped weekly quota**: when the usage API carries a per-model weekly limit (`limits[]`, `kind=weekly_scoped`) for the model your session is running, it renders right after the model+context block — `fabl5[1m][12%] fb[67%]` on a Fable 5 session, `op[33%]` on Opus — because the quota is a property of the model you're running, not of the account-wide 5h/7d cluster. It's a weekly number (same reset as the 7d badge), scoped to one model. Other models' scoped quotas stay hidden: only the limit constraining *this* session is signal. Supersedes the legacy `seven_day_opus`/`seven_day_sonnet` fields, which the API now sends as null. |
 | Extra usage | Monthly spend, limit, prepaid balance. `--extra auto` shows when quota runs out. |
-| Week row | **A row of its own, under the badges**: `5h ▅█▃▮▯ 0.9✕ @23:00  7d ▅▁▂ ▃▅ˍ▃▅ …▮▯▯...▯(✕19) 0.7✕ @Wed 09:00` — this sitting hour by hour on a fixed five-slot axis (the hollow run is the hours left), the week as its 5h windows (day-gapped, the far future folded to a counted `...▯(✕19)`), height = what each cell burned, `▮` = now. `×` marks where the pool runs dry on the week; each strip ends with its pace and reset. Reconstructed from your own usage log; `auto` shows it once there is history to show. See [Week row](#week-row). |
+| Week row | **A row of its own, under the badges**: `5h ▅█▄▮▯ 0.9✕ @23:00  7d ▅▂▃ ▄▅▁▄▅ …▮▯▯...▯(✕19) 0.7✕ @Wed 09:00` — this sitting hour by hour on a fixed five-slot axis (the hollow run is the hours left), the week as its 5h windows (day-gapped, the far future folded to a counted `...▯(✕19)`), height = what each cell burned, `▮` = now. `×` marks where the pool runs dry on the week; each strip ends with its pace and reset. Reconstructed from your own usage log; `auto` shows it once there is history to show. See [Week row](#week-row). |
 | Deadman | **Invisible until a switch is armed.** Surfaces [deadman](https://github.com/thevibeworks/deadman) — a dead man's switch that hands the session off when you stop responding. `[☠ armed 42m]` (dim) counts down to the auto-handoff; `[☠ warned 3m]` (yellow) means the phone warning went out; `[☠ due]` means the handoff fires imminently. Sits on the left lane next to the path — it describes this session's lifecycle, not a quota. One `command -v` when the tool is absent, one fast file read when present; nothing armed renders nothing. `--deadman off` disables it. |
 | Cache health | **Quiet until it bites.** Claude Code never re-renders an idle session, and while you work the prompt cache is always freshly ~1 TTL from expiry — so a proactive "expiring soon" isn't honestly observable, and `auto` spends no width on it. It speaks only when a rewrite actually happens: `≡!419k` the instant you resume onto a dead cache (idle longer than the TTL) or a mid-session prefix collapse — a 419k-token re-cache at ~20x the read rate (and the same burn on your 5h/7d quota on subscriptions). **Bold red past 200k** — the premium-band miss. `≡~` while a large prefix rebuilds. `--cache always` additionally keeps the freeze-safe deadline `≡@15:20` (last request + TTL; a past time in a frozen frame reads "expired at 15:20"). TTL defaults to 1h (claude.ai subscriber sessions) or 5m (API-key auth); an observed usage breakdown overrides it. The `≡` glyph (U+2261) reads as stacked cache layers — one terminal column, quiet and distinct. |
 
@@ -273,7 +273,7 @@ right edge shared with line 1:
 
 ```text
 proj (main*)       +84/-14 8m $6.72 fabl5[1m][██░░42%] fb[66%] [MAX|@work] 5h[38%@23:00] 7d[39%]
-3✕5h left · 20%/win   5h ▅█▃▮▯ 0.9✕  7d ▅▁▂ ▃▅ˍ▃▅ ▃▃▁▂▁ ▅ˍ▂▁▁ ˍˍˍ▃▅ ˍˍˍ▅ ▆▆ˍ▂▮▯▯ 0.7✕ @Wed 09:00
+3✕5h left · lands ~52%   5h ▅█▄▮▯ 0.9✕  7d ▅▂▃ ▄▅▁▄▅ ▄▄▂▃▂ ▅▁▃▂▂ ▁▁▁▄▅ ▁▁▁▅ ▆▆▁▃▮▯▯ 0.7✕ @Wed 09:00
 ```
 
 The 5h strip prints no reset: line 1's `5h[38%@23:00]` already carries
@@ -290,8 +290,8 @@ edge and the full sentence sits flush-left beneath them:
 
 ```text
 proj (main*)   fabl5[1m][██░░42%] fb[66%] [MAX|@work] 5h[38%@23:00] 7d[39%]
-   5h ▅█▃▮▯ 0.9✕ @23:00  7d ▅▁▂ ▃▅ˍ▃▅ ▃▃▁▂▁ ▅ˍ▂▁▁ ˍˍˍ▃▅ ˍˍˍ▅ ▆▆ˍ▂▮▯▯ 0.7✕ @Wed 09:00
-   budget ~3✕5h left · even 20%/win · heading ~52%
+   5h ▅█▄▮▯ 0.9✕ @23:00  7d ▅▂▃ ▄▅▁▄▅ ▄▄▂▃▂ ▅▁▃▂▂ ▁▁▁▄▅ ▁▁▁▅ ▆▆▁▃▮▯▯ 0.7✕ @Wed 09:00
+   budget ~3✕5h left · even 20%/win · lands ~52%
 ```
 
 Each strip ends with its **pace** (used ÷ elapsed: `0.7✕` is on track,
@@ -329,8 +329,8 @@ fire.
 
 | Cell | Meaning |
 |------|---------|
-| `▁▂▃▄▅▆▇█` | a cell that ran; height is the points it burned (`▁` <= 2, `▅` <= 11, `█` > 20) — the same scale in both strips, so a full window and a full week read the same height |
-| `ˍ` | ran, cost under a point — or ran idle inside the log's coverage; a bar of height zero, on the baseline |
+| `▂▃▄▅▆▇█` | a cell that ran; height is the points it burned (`▂` <= 2, `▅` <= 11, `█` > 20) — the same scale in both strips, so a full window and a full week read the same height |
+| `▁` | the baseline: ran and cost under a point, or ran idle inside the log's coverage. The shortest bar of the same Block Elements run as `▂▃▄`, so the zero line shares their font, width and height — it used to be `ˍ` (U+02CD), a modifier *letter*, which terminals resolve through the text face and which broke the strip's metrics mid-row. Override with `LEDGER_BASE_GLYPH` |
 | `░` | unknown: the log has no sample for that cell (never drawn as idle — a gap in the record is not a quiet session) |
 | `▮` | the cell you are in now |
 | `▯` | a cell still ahead of you — the hollow of `▮`, an empty slot waiting. On the 5h strip the run of them is the hours left in the window |
@@ -363,7 +363,7 @@ long one:
 
 ```text
 proj (main*)      +84/-14 8m $6.72 fabl5[1m][██░░42%] fb[91%] [MAX|@work] 5h[38%@23:00] 7d[55%]
-+ fb 91% vs 7d 55% · go op   5h ▅█▃▮▯ 0.9✕  7d ▅▁▂ ▃▅ˍ▃▅ … ▆▆ˍ▂▮▯▯ 0.6✕ @Wed 09:00
++ fb 91% vs 7d 55% · go op   5h ▅█▄▮▯ 0.9✕  7d ▅▂▃ ▄▅▁▄▅ … ▆▆▁▃▮▯▯ 0.6✕ @Wed 09:00
 + fb weekly 91% against 7d 55% · the model caps first, not the account; op sits at 33%, so run it for the bulk
 ```
 
@@ -398,7 +398,7 @@ clauses about one window can never disagree.
 | `+ 5h ~40m left · 70% unused` | Said only when the *week* is stranding capacity — an unspent 5h window is otherwise headroom, not waste, since the 5h window is a rate limit and not a budget. |
 | `+ ~62% will expire · go heavier` | On pace to strand a large chunk of the subscription. Speaks only to an engaged, unsqueezed session. |
 | `+ work 5h[8%] free` | A sibling account in the same shared home is idle while this one is pinned. |
-| `19✕5h left · 1.1%/win` | The calm budget: runway, what even looks like, where you land (long form). 19 counts the windows **after** the one you are in — the window you are inside is where you are, not what you have left, and it is already drawn as `▮` and priced by `5h[38%]`. The count holds steady inside a window and steps down by one at each rollover. It wears no sigil — `!` and `+` interrupt, the week's resting reading does not. |
+| `19✕5h left · lands ~52%` | The calm budget: runway plus the destination. The long form carries all three clauses — `budget ~19✕5h left · even 1.1%/win · lands ~52%` — and names each for what it is: `even N%/win` is the **ration** (spend that per window and the pool lands exactly on 100), `lands ~N%` is the **prediction** (spend like you have been and you end up here). Row 2 keeps the landing, because the count is already drawn on the strip beside it and the ration is surplus ÷ count, but where the week ends up is nowhere else on screen; with no projection yet the row falls back to the ration. 19 counts the windows **after** the one you are in — the window you are inside is where you are, not what you have left, and it is already drawn as `▮` and priced by `5h[38%]`. The count holds steady inside a window and steps down by one at each rollover. It wears no sigil — `!` and `+` interrupt, the week's resting reading does not. |
 
 `--notice off` keeps row 3 quiet; `--advisor off` silences both. `--check`
 and `--week` print the long form, since a terminal command has a whole

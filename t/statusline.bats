@@ -605,7 +605,7 @@ _write_forecast_fixture() {
 # count — the scoped series rides the same scan.
 _write_scoped_profile_cache() { # dir days rate recent24 scope_name
     cat > "$1/forecast.cache" <<EOF
-{"computed_at":$(date +%s),"days_history":$2,"recent_24h":0,"recent_48h":0,
+{"schema":$FORECAST_SCHEMA,"computed_at":$(date +%s),"days_history":$2,"recent_24h":0,"recent_48h":0,
  "weekday_profile":{"0":-1,"1":-1,"2":-1,"3":-1,"4":-1,"5":-1,"6":-1},
  "scoped_name":"$5","scoped_recent_24h":$4,
  "scoped_profile":{"0":$3,"1":$3,"2":$3,"3":$3,"4":$3,"5":$3,"6":$3}}
@@ -723,6 +723,62 @@ EOF
     [ "$(jq -r '.cost.usd_per_pct' "$tmpdir/forecast.cache")" = "-1.0000" ]
     [ "$(jq -r '.cost.paired_pct' "$tmpdir/forecast.cache")" = "0.0" ]
     [ -z "$(CLAUDE_ACCOUNT_DIR="$tmpdir" forecast_usd_per_pct)" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_seven_day_profile: stamps the schema it wrote" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    _write_forecast_fixture "$tmpdir" 21
+    build_seven_day_profile
+    [ "$(jq -r '.schema' "$tmpdir/forecast.cache")" = "$FORECAST_SCHEMA" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_seven_day_profile: a fresh cache of this schema is left alone" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    _write_forecast_fixture "$tmpdir" 21
+    build_seven_day_profile
+    before=$(jq -r '.computed_at' "$tmpdir/forecast.cache")
+    jq --argjson t "$(( before - 60 ))" '.computed_at = $t' "$tmpdir/forecast.cache" > "$tmpdir/f" \
+        && mv "$tmpdir/f" "$tmpdir/forecast.cache"
+    build_seven_day_profile
+    [ "$(jq -r '.computed_at' "$tmpdir/forecast.cache")" = "$(( before - 60 ))" ]
+    rm -rf "$tmpdir"
+}
+
+# The shared-store defence. A co-writer that summed raw deltas published
+# 149%/day into Thursday and dropped pct_per_window on the way past; the
+# walk's corrupt-profile guard caught the 149 and went silent for the rest
+# of the hour. Freshness alone cannot be the gate on a file more than one
+# tool writes — the shape has to match too.
+@test "build_seven_day_profile: a fresh cache of a foreign shape is rebuilt on sight" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    _write_forecast_fixture "$tmpdir" 21
+    cat > "$tmpdir/forecast.cache" <<EOF
+{"computed_at":$(date +%s),"days_history":251,"recent_24h":18,"recent_48h":21,
+ "weekday_profile":{"0":11,"1":29,"2":59,"3":149.11,"4":17,"5":11,"6":11}}
+EOF
+    build_seven_day_profile
+    [ "$(jq -r '.schema' "$tmpdir/forecast.cache")" = "$FORECAST_SCHEMA" ]
+    [ "$(jq -r '.pct_per_window' "$tmpdir/forecast.cache")" != "null" ]
+    thu=$(jq -r '.weekday_profile["3"]' "$tmpdir/forecast.cache")
+    awk -v p="$thu" 'BEGIN{exit !(p >= 0 && p <= 100)}'
+    rm -rf "$tmpdir"
+}
+
+@test "build_seven_day_profile: an older statusline's unversioned cache is rebuilt too" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    _write_forecast_fixture "$tmpdir" 21
+    printf '{"computed_at":%s,"days_history":21,"recent_24h":0,"recent_48h":0,"pct_per_window":9,"weekday_profile":{"0":1,"1":1,"2":1,"3":1,"4":1,"5":1,"6":1}}\n' \
+        "$(date +%s)" > "$tmpdir/forecast.cache"
+    build_seven_day_profile
+    [ "$(jq -r '.schema' "$tmpdir/forecast.cache")" = "$FORECAST_SCHEMA" ]
+    mon=$(jq -r '.weekday_profile["1"]' "$tmpdir/forecast.cache")
+    awk -v p="$mon" 'BEGIN{exit !(p >= 19 && p <= 21)}'
     rm -rf "$tmpdir"
 }
 
@@ -1016,8 +1072,8 @@ _write_ledger_fixture() { # dir
     [[ "$output" == *"(~3.8 ✕ 5h windows unused)"* ]]
     [[ "$output" == *"one full 5h window = ~10.00% of the week"* ]]
     [[ "$output" == *"week in progress: 44% used"* ]]
-    # 44% + 4d x 10%/day: heading ~83-84%
-    [[ "$output" == *"heading ~8"* ]]
+    # 44% + 4d x 10%/day: lands ~83-84%
+    [[ "$output" == *"lands ~8"* ]]
     rm -rf "$tmpdir"
 }
 
@@ -1169,9 +1225,10 @@ _write_ledger_fixture() { # dir
     [ "$(echo "$bar" | grep -o . | wc -l)" -eq 34 ]
     # burn heights appear, slots before coverage stay unknown
     [[ "$bar" == ░* ]]
-    [[ "$bar" =~ [▁▂▃▄▅▆▇█] ]]
-    # the zero-burn sampled window reads idle, not unknown
-    [[ "$bar" =~ [▁▂▃▄▅▆▇█]ˍ[▁▂▃▄▅▆▇█] ]]
+    [[ "$bar" =~ [▂▃▄▅▆▇█] ]]
+    # the zero-burn sampled window reads idle, not unknown — ▁ is the
+    # baseline, so the burning neighbours must be ▂ or taller
+    [[ "$bar" =~ [▂▃▄▅▆▇█]▁[▂▃▄▅▆▇█] ]]
     rm -rf "$tmpdir"
 }
 
@@ -1217,7 +1274,7 @@ _seed_week_store() {
     nowslot=$(( ($(date +%s) - ps) / 18000 ))
     [ "$(printf '%s' "$drawn" | grep -o . | wc -l)" -eq $((nowslot + 1 + WEEK_FUTURE_KEEP)) ]
     [ $((nowslot + 1 + WEEK_FUTURE_KEEP)) -lt 34 ]
-    [[ "$bar" =~ [▁▂▃▄▅▆▇█]ˍ[▁▂▃▄▅▆▇█] ]]
+    [[ "$bar" =~ [▂▃▄▅▆▇█]▁[▂▃▄▅▆▇█] ]]
     [[ "$bar" == *▮* ]]
     # day gaps: single spaces inside the strip, several of them across a week
     [ "$(printf '%s' "$strip" | tr -cd ' ' | wc -c)" -ge 5 ]
@@ -1265,6 +1322,24 @@ _seed_week_store() {
     # 7d reset beyond 24h -> weekday + time
     plain=$(strip_ansi "$(strip_tail 40 $((3*86400)) 604800 "$now")")
     [[ "$plain" =~ @[A-Z][a-z][a-z]\ [0-9]{2}:[0-9]{2}$ ]]
+}
+
+# One Unicode block for the whole ladder. ˍ (U+02CD) is a spacing modifier
+# LETTER: terminals resolve it through the text font while ▂▃▄ fall back to
+# the box-drawing face, so the zero line sat at a different height and width
+# than the bars beside it. ▁ is the shortest bar of the same run, which costs
+# one rung — burn now starts at ▂ — and buys a strip that is one typeface.
+@test "build_ledger_strip: the baseline is the shortest bar of the same block" {
+    hist="0 100000 0:0,1:0.4,2:1,3:2,4:3,5:5,6:9,7:13,8:18,9:40"
+    # cell 10 is `now`, so every cell above is history and draws its height
+    strip=$(strip_ansi "$(build_ledger_strip 50 100000 0 -1 "$hist" 11 10000 0 0 0 10)")
+    [ "$strip" = "▁▁▂▂▃▄▅▆▇█▮" ]
+    # nothing from outside Block Elements, and in particular no modifier letter
+    [[ "$strip" != *ˍ* ]]
+    # an idle cell inside coverage draws the same baseline as a sub-point one:
+    # one glyph, one tint, no colour-only meaning
+    idle=$(strip_ansi "$(build_ledger_strip 50 100000 0 -1 "0 100000 0:5" 4 10000 0 0 0 3)")
+    [ "$idle" = "▄▁▁▮" ]
 }
 
 @test "build_five_strip: five slots, always — the hollow run is the hours left" {
@@ -1544,7 +1619,7 @@ _seed_week_store() {
     plain=$(strip_ansi "$(build_week_row "$usage" auto)")
     [[ "$plain" == "5h "* ]]
     five="${plain#5h }"; five="${five%%  7d*}"; five=$(printf '%s' "$five" | sed 's/ [0-9.]*✕ @.*$//; s/ @.*$//')
-    [ "$five" = "▃▅ˍ█▮" ]
+    [ "$five" = "▄▅▁█▮" ]
     # 30% in 4h+ -> dry past the reset: holds, so no × in this window
     [[ "$five" != *×* ]]
     rm -rf "$tmpdir"
@@ -3622,10 +3697,14 @@ JSON
     plain=$(strip_ansi "$(build_advisor_line "$usage" always)")
     # the budget voice wears no sigil: it interrupts nothing, and a leading
     # '-' on a dim line reads as a bullet in a list of one
-    [[ "$plain" =~ ^24✕5h\ left\ ·\ 3\.3%/win$ ]]
-    # the whole sentence is still there for surfaces with a line to spend
+    # row 2 carries the runway and the LANDING: the count is already drawn
+    # on the strip beside it and the ration is surplus ÷ count, but where the
+    # week ends up is nowhere else on screen
+    [[ "$plain" =~ ^24✕5h\ left\ ·\ lands\ ~70%$ ]]
+    # the whole sentence is still there for surfaces with a line to spend —
+    # ration and prediction both, each named for what it is
     long=$(strip_ansi "$(notice_long_line "$(notice_collect "$usage" always)")")
-    [[ "$long" =~ ^budget\ ~24✕5h\ left\ ·\ even\ 3\.3%/win\ ·\ heading\ ~70%$ ]]
+    [[ "$long" =~ ^budget\ ~24✕5h\ left\ ·\ even\ 3\.3%/win\ ·\ lands\ ~70%$ ]]
 }
 
 @test "build_advisor_line: budget degrades to plain headroom in the last window" {
@@ -3643,7 +3722,7 @@ JSON
     [[ "$plain" =~ ^last\ window\ ·\ 25%\ left$ ]]
     [[ "$plain" != *"/win"* ]]
     long=$(strip_ansi "$(notice_long_line "$(notice_collect "$usage" always)")")
-    [[ "$long" =~ ^budget\ last\ window\ ·\ 25%\ left\ ·\ heading\ ~[0-9]+%$ ]]
+    [[ "$long" =~ ^budget\ last\ window\ ·\ 25%\ left\ ·\ lands\ ~[0-9]+%$ ]]
 }
 
 @test "build_advisor_line: one window ahead keeps the count and the grammar" {
@@ -3654,7 +3733,32 @@ JSON
     reset_7d=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":20,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":75,\"resets_at\":\"$reset_7d\"}}"
     plain=$(strip_ansi "$(build_advisor_line "$usage" always)")
-    [ "$plain" = "1✕5h left · 25.0%/win" ]
+    [[ "$plain" =~ ^1✕5h\ left\ · ]]
+    [[ "$plain" != *"last window"* ]]
+    # and the ration is still true at N=1: the long form divides by one
+    long=$(strip_ansi "$(notice_long_line "$(notice_collect "$usage" always)")")
+    [[ "$long" == *"even 25.0%/win"* ]]
+}
+
+@test "build_advisor_line: the short budget states the landing, the long one both" {
+    # A week with a day behind it: linear pace can speak even with no learned
+    # profile, so row 2 has a destination to name. The ration and the
+    # prediction answer different questions and the long form labels each —
+    # `even N%/win` is what to spend, `lands ~N%` is where you end up.
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    reset_5h=$(date -u -d '+45 minutes' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_7d=$(date -u -d '+5 days' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":20,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":14,\"resets_at\":\"$reset_7d\"}}"
+    plain=$(strip_ansi "$(build_advisor_line "$usage" always)")
+    [[ "$plain" =~ ^[0-9]+✕5h\ left\ ·\ lands\ ~[0-9]+%$ ]]
+    [[ "$plain" != *"/win"* ]]
+    long=$(strip_ansi "$(notice_long_line "$(notice_collect "$usage" always)")")
+    [[ "$long" == *"even "*"%/win"* ]]
+    [[ "$long" == *"lands ~"* ]]
+    # one line, two futures, never the same word for both
+    [[ "$long" != *heading* ]]
+    rm -rf "$tmpdir"
 }
 
 @test "build_advisor_line: hot 5h pace projects the cap wall-clock" {
@@ -4548,4 +4652,117 @@ make_deadman_shim() { # $1=tmpdir $2=chip output
     result=$(CLAUDE_ACCOUNT_DIR="$tmpdir" last_logged_model)
     [ -z "$result" ]
     rm -rf "$tmpdir"
+}
+
+# --- corpus: history is the ACCOUNT's, across every store it was written to
+
+_write_corpus_fixture() {
+    # root holds the account's OLD history (untagged days); the tagged dir
+    # holds the recent week. Same uuid, two directories — the real layout.
+    local root="$1" now d ts
+    local tag="$root/accounts/work"
+    now=$(date +%s)
+    mkdir -p "$tag"
+    echo '{"account":{"uuid":"acct-A"}}' > "$tag/profile.cache"
+    for (( d = 30; d >= 8; d-- )); do
+        ts=$(( now - d * 86400 ))
+        printf '{"type":"usage","timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":10},"five_hour":{"utilization":10,"resets_at":"R%s"}}\n' "$ts" "$d"
+        printf '{"type":"usage","timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":22},"five_hour":{"utilization":40,"resets_at":"R%s"}}\n' "$(( ts + 14400 ))" "$d"
+        printf '{"type":"usage","timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":30},"five_hour":{"utilization":70,"resets_at":"R%s"}}\n' "$(( ts + 28800 ))" "$d"
+    done > "$root/usage.jsonl"
+    # sediment: a row with no uuid, a row of someone else, a marker
+    printf '{"type":"usage","timestamp":%s,"user":{"email":"x@y"},"seven_day":{"utilization":99}}\n' "$(( now - 9 * 86400 ))" >> "$root/usage.jsonl"
+    printf '{"type":"usage","timestamp":%s,"user":{"uuid":"acct-B"},"seven_day":{"utilization":80}}\n' "$(( now - 9 * 86400 ))" >> "$root/usage.jsonl"
+    printf '{"type":"session_start","timestamp":%s,"session_id":"s"}\n' "$(( now - 9 * 86400 ))" >> "$root/usage.jsonl"
+    for (( d = 7; d >= 1; d-- )); do
+        ts=$(( now - d * 86400 ))
+        printf '{"type":"usage","timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":10},"five_hour":{"utilization":10,"resets_at":"R%s"}}\n' "$ts" "$d"
+        printf '{"type":"usage","timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":22},"five_hour":{"utilization":40,"resets_at":"R%s"}}\n' "$(( ts + 14400 ))" "$d"
+        printf '{"type":"usage","timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":30},"five_hour":{"utilization":70,"resets_at":"R%s"}}\n' "$(( ts + 28800 ))" "$d"
+    done > "$tag/usage.jsonl"
+}
+
+@test "usage_corpus_files: root + every accounts/*/ + own dir, backups first, no repeats" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/accounts/a" "$tmpdir/accounts/b"
+    : > "$tmpdir/usage.jsonl"; : > "$tmpdir/usage.jsonl.1"
+    : > "$tmpdir/accounts/a/usage.jsonl"; : > "$tmpdir/accounts/b/usage.jsonl.1"
+    CLAUDE_DATA_DIR="$tmpdir" CLAUDE_ACCOUNT_DIR="$tmpdir/accounts/a"
+    run usage_corpus_files
+    [ "$output" = "$tmpdir/usage.jsonl.1
+$tmpdir/usage.jsonl
+$tmpdir/accounts/a/usage.jsonl
+$tmpdir/accounts/b/usage.jsonl.1" ]
+    # no data root (function-level callers): the account dir alone
+    CLAUDE_DATA_DIR=""
+    run usage_corpus_files
+    [ "$output" = "$tmpdir/accounts/a/usage.jsonl" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_seven_day_profile: a fresh tag learns from the account's history at the root" {
+    tmpdir=$(mktemp -d)
+    _write_corpus_fixture "$tmpdir"
+    # per-directory scope: 7 days in the tagged dir, below the 14-day floor
+    CLAUDE_DATA_DIR="" CLAUDE_ACCOUNT_DIR="$tmpdir/accounts/work"
+    build_seven_day_profile
+    [ "$(jq -r '.days_history' "$tmpdir/accounts/work/forecast.cache")" -lt 14 ]
+    rm -f "$tmpdir/accounts/work/forecast.cache"
+    # the union: 30 days for the same uuid, one level up
+    CLAUDE_DATA_DIR="$tmpdir"
+    build_seven_day_profile
+    [ "$(jq -r '.days_history' "$tmpdir/accounts/work/forecast.cache")" -ge 28 ]
+    # still one account: B's 80 never leaks into the profile
+    mon=$(jq -r '.weekday_profile["1"]' "$tmpdir/accounts/work/forecast.cache")
+    awk -v p="$mon" 'BEGIN{exit !(p >= 19 && p <= 21)}'
+    rm -rf "$tmpdir"
+}
+
+@test "build_seven_day_profile: stamps the corpus it ran over, drops counted" {
+    tmpdir=$(mktemp -d)
+    _write_corpus_fixture "$tmpdir"
+    CLAUDE_DATA_DIR="$tmpdir" CLAUDE_ACCOUNT_DIR="$tmpdir/accounts/work"
+    build_seven_day_profile
+    fc="$tmpdir/accounts/work/forecast.cache"
+    [ "$(jq -r '.corpus.uuid' "$fc")" = "acct-A" ]
+    [ "$(jq -r '.corpus.files' "$fc")" = "2" ]
+    [ "$(jq -r '.corpus.samples' "$fc")" = "90" ]
+    [ "$(jq -r '.corpus.dropped_no_uuid' "$fc")" = "1" ]
+    [ "$(jq -r '.corpus.oldest' "$fc")" = "$(head -1 "$tmpdir/usage.jsonl" | jq -r .timestamp)" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_seven_day_profile: the same observation in two stores is counted once" {
+    tmpdir=$(mktemp -d)
+    _write_corpus_fixture "$tmpdir"
+    cp "$tmpdir/accounts/work/usage.jsonl" "$tmpdir/usage.jsonl.1"
+    CLAUDE_DATA_DIR="$tmpdir" CLAUDE_ACCOUNT_DIR="$tmpdir/accounts/work"
+    build_seven_day_profile
+    [ "$(jq -r '.corpus.samples' "$tmpdir/accounts/work/forecast.cache")" = "90" ]
+    rm -rf "$tmpdir"
+}
+
+@test "week_scan: a sample landing in another store invalidates week.cache" {
+    tmpdir=$(mktemp -d)
+    _write_corpus_fixture "$tmpdir"
+    CLAUDE_DATA_DIR="$tmpdir" CLAUDE_ACCOUNT_DIR="$tmpdir/accounts/work"
+    sig1=$(usage_corpus_sig)
+    sleep 1
+    printf '{"type":"usage","timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":31},"five_hour":{"utilization":71,"resets_at":"R1"}}\n' "$(date +%s)" >> "$tmpdir/usage.jsonl"
+    sig2=$(usage_corpus_sig)
+    [ "$sig1" != "$sig2" ]
+    rm -rf "$tmpdir"
+}
+
+@test "session_telemetry_json: carries the project basename, never the path" {
+    cost_usd=1.5 project_dir="/Users/x/wrk/src/repo-name/" cwd="/Users/x/wrk/src/repo-name/sub"
+    run session_telemetry_json
+    [ "$(echo "$output" | jq -r .project)" = "repo-name" ]
+    [[ "$output" != *"/Users"* ]]
+    cost_usd=1.5 project_dir="" cwd="/tmp/other"
+    run session_telemetry_json
+    [ "$(echo "$output" | jq -r .project)" = "other" ]
+    cost_usd=1.5 project_dir="" cwd=""
+    run session_telemetry_json
+    [ "$(echo "$output" | jq -r .project)" = "null" ]
 }
