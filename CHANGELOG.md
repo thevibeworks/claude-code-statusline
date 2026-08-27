@@ -1,6 +1,45 @@
 # Changelog
 
-## Unreleased
+## v0.35.0 — 2026-08-27 — a directory is where a sample landed, not who it belongs to
+
+**A directory is where a sample landed, not who it belongs to.** The
+same account reaches `~/.claude/statusline/` when an untagged statusline
+fetched and `accounts/<tag>/` when a deva-tagged container did, and
+every aggregating reader — the forecast, the ledger strip, `report` —
+read only the directory it was standing in. Measured on one machine:
+301 days of history at the root, 28 in the tagged dir, one uuid. Nothing
+was visibly wrong, because 28 clears the 14-day floor. The failure sits
+one step ahead: every new `DEVA_AUTH_TAG` starts an empty directory for
+an account with ten months of samples one level up, and renders "still
+learning" for two weeks. The readers now take the union — root plus
+every `accounts/*/` — and partition by `user.uuid`, which is the rule
+the state-dir contract already stated and ccpace already followed. The
+union is safe for this data because every quantity is envelope-based:
+the same window seen from two containers takes a max, never a sum.
+`week.cache` keys on every store's mtime:size so a sample landing
+anywhere invalidates it. Cost: 1.2 s per hourly rebuild over 31 MiB.
+
+**`forecast.cache` says which samples it stands on.** `schema` versions
+the model and cannot: statusline and ccpace agree on envelope burn, read
+different stores, both pass the gate, and `days_history` — the number
+that decides whether a forecast speaks at all — depended on which binary
+rendered last. A `corpus` stamp (`uuid`, `files`, `samples`,
+`dropped_no_uuid`, `oldest`) makes that visible in one `jq`. It is
+informative, not a gate; ccpace v0.3.1 writes the same one.
+
+**A dropped row is counted.** 94 rows in that store carry no
+`user.uuid` (the field is younger than the log) and every
+uuid-partitioned reader discarded them in silence. They stay dropped —
+thirteen carry an email that would identify them, and guessing identity
+on a log that already interleaves accounts is how a 9000%/day burn rate
+gets manufactured — but the count is in the stamp. Loss is acceptable;
+silent loss is not.
+
+**`session.project`.** Each `usage` line's session block now carries
+the basename of the project directory. The quota log knows percent, the
+transcript knows tokens, and neither knew which repo the week went to;
+this is the one dimension a breakdown cannot recover later. Basename
+only, never the path.
 
 **The ledger is one typeface again.** The baseline — a cell that ran and
 cost nothing — was `ˍ` (U+02CD MODIFIER LETTER LOW MACRON). Every bar

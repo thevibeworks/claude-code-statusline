@@ -1098,18 +1098,27 @@ fetch_prepaid_balance() {
 STDIN_LOG_MIN_SECS=60
 session_telemetry_json() {
     [ -n "${cost_usd:-}" ] || [ -n "${ctx_total_in:-}" ] || return 0
+    # The project is the one dimension a breakdown by session cannot recover
+    # later: the transcript knows tokens, the quota log knows percent, and
+    # neither knows which repo the week went to. Basename only — the log is
+    # owner-readable but a full path is a machine fingerprint the store has
+    # no use for.
+    local proj="${project_dir:-${cwd:-}}"
+    proj="${proj%/}"; proj="${proj##*/}"
     jq -nc --arg cost "${cost_usd:-}" --arg dur "${duration_ms:-}" \
         --arg api "${api_duration_ms:-}" --arg la "${lines_added:-}" \
         --arg ld "${lines_removed:-}" --arg cin "${ctx_total_in:-}" \
         --arg csz "${ctx_size:-}" --arg eff "${effort_level:-}" \
-        --arg fast "${fast_mode:-}" --arg cli "${cli_version:-}" '
+        --arg fast "${fast_mode:-}" --arg cli "${cli_version:-}" \
+        --arg proj "$proj" '
         def num: tonumber? // null;
         {cost_usd: ($cost|num), dur_ms: ($dur|num), api_ms: ($api|num),
          lines_add: ($la|num), lines_del: ($ld|num),
          ctx_in: ($cin|num), ctx_size: ($csz|num),
          effort: (if $eff == "" then null else $eff end),
          fast: ($fast == "true"),
-         cli: (if $cli == "" then null else $cli end)}' 2>/dev/null
+         cli: (if $cli == "" then null else $cli end),
+         project: (if $proj == "" then null else $proj end)}' 2>/dev/null
 }
 
 log_stdin_snapshot() {
@@ -2026,6 +2035,48 @@ get_seven_day_color() {
 
 USAGE_LOG_MAX_BYTES="${USAGE_LOG_MAX_BYTES:-33554432}"  # 32 MiB cap
 
+# Every store this account may have been written to. A directory is where a
+# sample LANDED, not who it belongs to: the same uuid reaches the root when
+# an untagged statusline fetched, accounts/<tag>/ when a deva-tagged
+# container did — and a fresh tag starts an EMPTY directory for an account
+# with ten months of history one level up, so it renders "still learning"
+# for two weeks. Measured on one machine: 301 days at the root, 28 in the
+# tagged dir, same uuid. Aggregating readers (forecast, ledger, report)
+# therefore read the union — root + every accounts/*/ — and partition by
+# user.uuid (state-dir contract v2, "never trust placement"); the
+# per-directory scope was the thing that fragmented history to begin with.
+# The union is safe for THIS data because every quantity is envelope-based:
+# the same window seen from two containers takes a max, never a sum.
+# Without a data root (function-level tests) it is just the account dir.
+# Prints paths, `.1` backups first, one per line.
+usage_corpus_files() {
+    local base f seen=" "
+    for base in "${CLAUDE_DATA_DIR:-}" "${CLAUDE_DATA_DIR:+$CLAUDE_DATA_DIR/accounts/}"*/ "$CLAUDE_ACCOUNT_DIR"; do
+        base="${base%/}"
+        [ -n "$base" ] && [ -d "$base" ] || continue
+        case "$seen" in *" $base "*) continue ;; esac
+        seen="$seen$base "
+        for f in "$base/usage.jsonl.1" "$base/usage.jsonl"; do
+            [ -f "$f" ] && printf '%s\n' "$f"
+        done
+    done
+    return 0
+}
+cat_usage_corpus() {
+    local f
+    usage_corpus_files | while IFS= read -r f; do cat "$f" 2>/dev/null; done
+    return 0
+}
+# mtime:size of every corpus file, one token — the cache key a derived file
+# (week.cache) uses to notice a sample landing in ANY store.
+usage_corpus_sig() {
+    local f sig=""
+    while IFS= read -r f; do
+        sig="$sig$(stat -c %Y:%s "$f" 2>/dev/null || stat -f %m:%z "$f" 2>/dev/null || echo 0),"
+    done <<<"$(usage_corpus_files)"
+    printf '%s' "${sig:-0}"
+}
+
 # forecast.cache contract version. Bump when the MODEL changes (how burn is
 # counted, what a profile value means) — not when a field is added, which
 # readers already tolerate via `// -1`.
@@ -2062,9 +2113,12 @@ rotate_usage_log() {
 # Daily burn is the rise of a MONOTONE ENVELOPE, never the sum of raw
 # positive deltas (see seven_env below and docs/api/state-dir.md).
 build_seven_day_profile() {
-    local jsonl="$CLAUDE_ACCOUNT_DIR/usage.jsonl"
     local out="$CLAUDE_ACCOUNT_DIR/forecast.cache"
-    [ -f "$jsonl" ] || return 0
+    local corpus_files
+    corpus_files=$(usage_corpus_files)
+    [ -n "$corpus_files" ] || return 0
+    local nfiles
+    nfiles=$(printf '%s\n' "$corpus_files" | grep -c .)
     local acct
     acct=$(jq -r '.account.uuid // empty' "$CLAUDE_ACCOUNT_DIR/profile.cache" 2>/dev/null)
     [ -n "$acct" ] || return 0
@@ -2091,7 +2145,7 @@ build_seven_day_profile() {
     # ±HHMM -> signed seconds (portable; date +%z works on GNU and BSD)
     tzoff_s=$(date +%z | awk '{ s=substr($0,1,1)=="-"?-1:1; h=substr($0,2,2)+0; m=substr($0,4,2)+0; print s*(h*3600+m*60) }')
     local data
-    data=$( { cat "${jsonl}.1" 2>/dev/null; cat "$jsonl"; } | jq -r --arg a "$acct" '
+    data=$( cat_usage_corpus | jq -r --arg a "$acct" '
             # Window identity for the ratio pairs: resets_at wobbles per
             # fetch (microseconds, and 06:59:59 vs 07:00:00 across the
             # boundary), so normalize to the nearest minute. Non-ISO values
@@ -2103,15 +2157,26 @@ build_seven_day_profile() {
                     (try (sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z")
                           | fromdateiso8601 | (. + 30) / 60 | floor) catch $raw)
                   end;
-            select((.user.uuid // "") == $a)
-            | ([.limits[]? | select(.kind == "weekly_scoped")] | first) as $sc
-            | [.timestamp, (.seven_day.utilization // ""),
-               (.five_hour.utilization // ""),
-               ((.five_hour.resets_at // "") | norm),
-               ((.seven_day.resets_at // "") | norm),
-               ($sc.percent // ""), ($sc.scope.model.display_name // ""),
-               (.session.cost_usd // ""), (.session_id // "")] | @tsv' 2>/dev/null \
-        | sort -n | awk -F'\t' -v now="$now" -v tz="$tzoff_s" -v schema="$FORECAST_SCHEMA" '
+            select((.type // "usage") == "usage" and (.timestamp // null) != null)
+            # Rows of other accounts and rows with no uuid are dropped —
+            # and COUNTED, as X-lines the reducer tallies into the corpus
+            # stamp. A uuid-less row is refused, never guessed (some carry an
+            # email that would identify them; guessing identity on a log
+            # that interleaves accounts is how a 9000%/day burn rate gets
+            # manufactured), but a reader that discards identifiable
+            # observations silently will discard more just as quietly.
+            | if (.user.uuid // "") == $a then
+                ([.limits[]? | select(.kind == "weekly_scoped")] | first) as $sc
+                | [.timestamp, (.seven_day.utilization // ""),
+                   (.five_hour.utilization // ""),
+                   ((.five_hour.resets_at // "") | norm),
+                   ((.seven_day.resets_at // "") | norm),
+                   ($sc.percent // ""), ($sc.scope.model.display_name // ""),
+                   (.session.cost_usd // ""), (.session_id // "")] | @tsv
+              elif (.user.uuid // "") == "" then "X\tnouuid"
+              else "X\tother" end' 2>/dev/null \
+        | sort -n | awk -F'\t' -v now="$now" -v tz="$tzoff_s" -v schema="$FORECAST_SCHEMA" \
+                       -v acct="$acct" -v nfiles="$nfiles" '
         # Burn is the rise of a MONOTONE ENVELOPE, not the rise of the last
         # sample. Summing raw positive deltas counts every stale dip twice:
         # measured, that read 146 points of "burn" against a real 50-point
@@ -2199,7 +2264,13 @@ build_seven_day_profile() {
             if (now - ts <= 604800) u7d += d
         }
         BEGIN { RESET_CONFIRM = 2; RESET_DROP = 15; swin = -1 }
+        $1 == "X" { if ($2 == "nouuid") drop_nu++; else drop_other++; next }
+        # The union can hold the same observation twice (a fetch logged by
+        # two writers before the pool existed); sorted, repeats are adjacent.
+        $0 == prev_line { next }
         {
+            prev_line = $0
+            nsamp++; if (oldest == "") oldest = $1
             credited = 0
             if ($2 != "") seven_env($1, $2 + 0, $5)
             if ($6 != "" && $7 != "") scoped_env($1, $6 + 0, $7, $5)
@@ -2274,13 +2345,18 @@ build_seven_day_profile() {
             # mined from two samples is a rumour, not a rate.
             upp = -1
             if (usd_all > 0 && burn_paired >= 5) upp = usd_all / burn_paired
-            printf "\"cost\":{\"usd_24h\":%.2f,\"usd_7d\":%.2f,\"usd_per_pct\":%.4f,\"paired_pct\":%.1f}", \
+            printf "\"cost\":{\"usd_24h\":%.2f,\"usd_7d\":%.2f,\"usd_per_pct\":%.4f,\"paired_pct\":%.1f},", \
                 u24, u7d, upp, burn_paired
+            # Which samples this model was run over. `schema` versions the
+            # model and cannot say: two writers that agree on envelope burn
+            # and read different stores both pass the gate.
+            printf "\"corpus\":{\"uuid\":\"%s\",\"files\":%d,\"samples\":%d,\"dropped_no_uuid\":%d,\"oldest\":%d}", \
+                acct, nfiles, nsamp, drop_nu, (oldest == "" ? 0 : oldest)
             printf "}\n"
         }')
     if [ -n "$data" ]; then
         printf '%s\n' "$data" >"${out}.tmp.$$" 2>/dev/null && mv -f "${out}.tmp.$$" "$out"
-        debug_log "build_seven_day_profile: rebuilt ($(echo "$data" | jq -r '.days_history') days, acct=${acct:0:8})"
+        debug_log "build_seven_day_profile: rebuilt ($(echo "$data" | jq -r '"\(.days_history) days, \(.corpus.samples) samples in \(.corpus.files) files, \(.corpus.dropped_no_uuid) no-uuid dropped"'), acct=${acct:0:8})"
     fi
 }
 
@@ -2441,7 +2517,7 @@ run_usage_report() {
     case "$days" in '' | *[!0-9]*) days=28 ;; esac
     [ "$days" -ge 1 ] 2>/dev/null || days=28
     local jsonl="$CLAUDE_ACCOUNT_DIR/usage.jsonl"
-    if [ ! -f "$jsonl" ] && [ ! -f "${jsonl}.1" ]; then
+    if [ -z "$(usage_corpus_files)" ]; then
         echo "no usage history yet ($jsonl)"
         echo "the statusline logs every quota fetch; come back after a session or two."
         return 1
@@ -2457,7 +2533,7 @@ run_usage_report() {
     # Mined stream: "S <7d-close-key> <final%>" per closed 7d window,
     # then "F <closed> <avg%> <capped>" for 5h windows, "N <samples>".
     local mined
-    mined=$( { cat "${jsonl}.1" 2>/dev/null; cat "$jsonl" 2>/dev/null; } | jq -r --arg a "$acct" --argjson cut "$cutoff" '
+    mined=$( cat_usage_corpus | jq -r --arg a "$acct" --argjson cut "$cutoff" '
         def norm: tostring | . as $raw
             | if $raw == "" then "" else
                 (try (sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z")
@@ -2793,10 +2869,10 @@ windows_ahead() {
 #      step credited to the hour cell the sample fell in.
 week_scan() {
     local period_start="$1" five_start="${2:-0}"
-    local ujl="$CLAUDE_ACCOUNT_DIR/usage.jsonl" wc="$CLAUDE_ACCOUNT_DIR/week.cache"
-    [ -f "$ujl" ] || [ -f "${ujl}.1" ] || return 0
+    local wc="$CLAUDE_ACCOUNT_DIR/week.cache"
+    [ -n "$(usage_corpus_files)" ] || return 0
     local sig
-    sig="$(stat -c %Y:%s "$ujl" 2>/dev/null || stat -f %m:%z "$ujl" 2>/dev/null || echo 0)"
+    sig="$(usage_corpus_sig)"
     if [ -f "$wc" ]; then
         local c_ps c_fs c_sig c_at c_week c_five
         eval "$(jq -r '@sh "c_ps=\(.period_start // 0)", @sh "c_fs=\(.five_start // 0)",
@@ -2819,7 +2895,7 @@ week_scan() {
     local acct=""
     acct=$(jq -r '.account.uuid // empty' "$CLAUDE_ACCOUNT_DIR/profile.cache" 2>/dev/null) || true
     local scan week five
-    scan=$( { cat "${ujl}.1" 2>/dev/null; cat "$ujl" 2>/dev/null; } \
+    scan=$( cat_usage_corpus \
         | jq -sr --argjson ps "$period_start" --argjson w "$WEEK_CELLS" \
                  --arg acct "$acct" \
                  --argjson fs "$five_start" --argjson fw "$FIVE_CELLS" --argjson fc "$FIVE_CELL_SECS" '

@@ -7,7 +7,7 @@ read concurrently.
 
 - Contract version: **2** (bump on any breaking layout/field change; this
   file is the changelog)
-- Synced with: statusline.sh v0.29.0
+- Synced with: statusline.sh v0.35.0
 - Permissions: the script runs under `umask 077` — files are owner-only.
   Caches hold account PII (email, uuid, org names).
 
@@ -37,8 +37,17 @@ a writer that cannot honor all of them must use its own dir instead:
   `profile.cache` likewise (raw profile; mtime is the fetch time,
   24 h TTL). `*.lock` files are advisory between statusline processes;
   cross-tool safety comes from atomic rename.
-- **Partition by uuid.** Aggregating readers (forecast, report) filter
-  on `user.uuid`, never trust directory placement alone.
+- **Partition by uuid, read the union.** A directory is where a sample
+  LANDED, not who it belongs to: the same account reaches the top level
+  when an untagged statusline fetched and `accounts/<tag>/` when a
+  tagged container did (measured: 301 days at the root, 28 in the tagged
+  dir, one uuid). Aggregating readers (forecast, ledger, report) read
+  every store under the root — top level plus every `accounts/*/` — and
+  filter on `user.uuid`; they never trust placement alone. The union is
+  safe because every derived quantity is envelope-based (the same window
+  seen twice takes a max, never a sum); it would not be for a sum of
+  deltas. Rows with no `user.uuid` are dropped and counted
+  (`corpus.dropped_no_uuid`), never attributed by guess.
 
 ## Layout
 
@@ -109,8 +118,17 @@ Output of the hourly usage.jsonl scan (EWMA half-life 14 days):
  "scoped_name": "Fable", "scoped_recent_24h": 76.00,
  "scoped_profile": {"0": 5.7, "1": 23.5, "…": 0, "6": -1},
  "cost": {"usd_24h": 12.40, "usd_7d": 84.10,
-          "usd_per_pct": 1.6820, "paired_pct": 50.0}}
+          "usd_per_pct": 1.6820, "paired_pct": 50.0},
+ "corpus": {"uuid": "…", "files": 5, "samples": 26081,
+            "dropped_no_uuid": 94, "oldest": 1761542968}}
 ```
+
+`corpus` says WHICH samples the model was run over — `schema` cannot.
+Two writers that agree on envelope burn and read different stores both
+pass the schema gate, and `days_history` (which decides whether the
+forecast speaks at all) then depends on which binary rendered last.
+The stamp is informative, not a gate: a reader that wants to know why
+two caches disagree reads it; a rebuild overwrites it.
 
 #### The co-writer contract
 
@@ -250,6 +268,7 @@ render, for free. Both writers (`api` and `source:"stdin"`) carry it;
 | `session.effort` | string \| null | reasoning effort (`low`…`max`) |
 | `session.fast` | bool | fast mode |
 | `session.cli` | string \| null | Claude Code version, so a schema change is datable |
+| `session.project` | string \| null | basename of `workspace.project_dir` (else `cwd`) — the one dimension a breakdown cannot recover later; never the full path |
 
 **Aggregating cost.** `cost_usd` is per session and cumulative, and
 consecutive samples routinely come from different sessions. Account
@@ -315,7 +334,9 @@ infers them:
 ## Consumer rules
 
 1. Read-only. Locks, TTLs, and rotation are the writer's job.
-2. Key on `accounts/<tag>/` when present; fall back to the top level.
+2. Key on `accounts/<tag>/` for the live caches (`usage.cache`,
+   `profile.cache`, `forecast.cache`); for history, read every
+   `usage.jsonl(.1)` under the root and partition by `user.uuid`.
 3. Trust `fetched_at`/`timestamp`, not file mtimes (migrations preserve
    content, not mtime).
 4. Tolerate absent files — every file appears lazily on first use.

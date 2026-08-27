@@ -4653,3 +4653,116 @@ make_deadman_shim() { # $1=tmpdir $2=chip output
     [ -z "$result" ]
     rm -rf "$tmpdir"
 }
+
+# --- corpus: history is the ACCOUNT's, across every store it was written to
+
+_write_corpus_fixture() {
+    # root holds the account's OLD history (untagged days); the tagged dir
+    # holds the recent week. Same uuid, two directories — the real layout.
+    local root="$1" now d ts
+    local tag="$root/accounts/work"
+    now=$(date +%s)
+    mkdir -p "$tag"
+    echo '{"account":{"uuid":"acct-A"}}' > "$tag/profile.cache"
+    for (( d = 30; d >= 8; d-- )); do
+        ts=$(( now - d * 86400 ))
+        printf '{"type":"usage","timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":10},"five_hour":{"utilization":10,"resets_at":"R%s"}}\n' "$ts" "$d"
+        printf '{"type":"usage","timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":22},"five_hour":{"utilization":40,"resets_at":"R%s"}}\n' "$(( ts + 14400 ))" "$d"
+        printf '{"type":"usage","timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":30},"five_hour":{"utilization":70,"resets_at":"R%s"}}\n' "$(( ts + 28800 ))" "$d"
+    done > "$root/usage.jsonl"
+    # sediment: a row with no uuid, a row of someone else, a marker
+    printf '{"type":"usage","timestamp":%s,"user":{"email":"x@y"},"seven_day":{"utilization":99}}\n' "$(( now - 9 * 86400 ))" >> "$root/usage.jsonl"
+    printf '{"type":"usage","timestamp":%s,"user":{"uuid":"acct-B"},"seven_day":{"utilization":80}}\n' "$(( now - 9 * 86400 ))" >> "$root/usage.jsonl"
+    printf '{"type":"session_start","timestamp":%s,"session_id":"s"}\n' "$(( now - 9 * 86400 ))" >> "$root/usage.jsonl"
+    for (( d = 7; d >= 1; d-- )); do
+        ts=$(( now - d * 86400 ))
+        printf '{"type":"usage","timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":10},"five_hour":{"utilization":10,"resets_at":"R%s"}}\n' "$ts" "$d"
+        printf '{"type":"usage","timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":22},"five_hour":{"utilization":40,"resets_at":"R%s"}}\n' "$(( ts + 14400 ))" "$d"
+        printf '{"type":"usage","timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":30},"five_hour":{"utilization":70,"resets_at":"R%s"}}\n' "$(( ts + 28800 ))" "$d"
+    done > "$tag/usage.jsonl"
+}
+
+@test "usage_corpus_files: root + every accounts/*/ + own dir, backups first, no repeats" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/accounts/a" "$tmpdir/accounts/b"
+    : > "$tmpdir/usage.jsonl"; : > "$tmpdir/usage.jsonl.1"
+    : > "$tmpdir/accounts/a/usage.jsonl"; : > "$tmpdir/accounts/b/usage.jsonl.1"
+    CLAUDE_DATA_DIR="$tmpdir" CLAUDE_ACCOUNT_DIR="$tmpdir/accounts/a"
+    run usage_corpus_files
+    [ "$output" = "$tmpdir/usage.jsonl.1
+$tmpdir/usage.jsonl
+$tmpdir/accounts/a/usage.jsonl
+$tmpdir/accounts/b/usage.jsonl.1" ]
+    # no data root (function-level callers): the account dir alone
+    CLAUDE_DATA_DIR=""
+    run usage_corpus_files
+    [ "$output" = "$tmpdir/accounts/a/usage.jsonl" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_seven_day_profile: a fresh tag learns from the account's history at the root" {
+    tmpdir=$(mktemp -d)
+    _write_corpus_fixture "$tmpdir"
+    # per-directory scope: 7 days in the tagged dir, below the 14-day floor
+    CLAUDE_DATA_DIR="" CLAUDE_ACCOUNT_DIR="$tmpdir/accounts/work"
+    build_seven_day_profile
+    [ "$(jq -r '.days_history' "$tmpdir/accounts/work/forecast.cache")" -lt 14 ]
+    rm -f "$tmpdir/accounts/work/forecast.cache"
+    # the union: 30 days for the same uuid, one level up
+    CLAUDE_DATA_DIR="$tmpdir"
+    build_seven_day_profile
+    [ "$(jq -r '.days_history' "$tmpdir/accounts/work/forecast.cache")" -ge 28 ]
+    # still one account: B's 80 never leaks into the profile
+    mon=$(jq -r '.weekday_profile["1"]' "$tmpdir/accounts/work/forecast.cache")
+    awk -v p="$mon" 'BEGIN{exit !(p >= 19 && p <= 21)}'
+    rm -rf "$tmpdir"
+}
+
+@test "build_seven_day_profile: stamps the corpus it ran over, drops counted" {
+    tmpdir=$(mktemp -d)
+    _write_corpus_fixture "$tmpdir"
+    CLAUDE_DATA_DIR="$tmpdir" CLAUDE_ACCOUNT_DIR="$tmpdir/accounts/work"
+    build_seven_day_profile
+    fc="$tmpdir/accounts/work/forecast.cache"
+    [ "$(jq -r '.corpus.uuid' "$fc")" = "acct-A" ]
+    [ "$(jq -r '.corpus.files' "$fc")" = "2" ]
+    [ "$(jq -r '.corpus.samples' "$fc")" = "90" ]
+    [ "$(jq -r '.corpus.dropped_no_uuid' "$fc")" = "1" ]
+    [ "$(jq -r '.corpus.oldest' "$fc")" = "$(head -1 "$tmpdir/usage.jsonl" | jq -r .timestamp)" ]
+    rm -rf "$tmpdir"
+}
+
+@test "build_seven_day_profile: the same observation in two stores is counted once" {
+    tmpdir=$(mktemp -d)
+    _write_corpus_fixture "$tmpdir"
+    cp "$tmpdir/accounts/work/usage.jsonl" "$tmpdir/usage.jsonl.1"
+    CLAUDE_DATA_DIR="$tmpdir" CLAUDE_ACCOUNT_DIR="$tmpdir/accounts/work"
+    build_seven_day_profile
+    [ "$(jq -r '.corpus.samples' "$tmpdir/accounts/work/forecast.cache")" = "90" ]
+    rm -rf "$tmpdir"
+}
+
+@test "week_scan: a sample landing in another store invalidates week.cache" {
+    tmpdir=$(mktemp -d)
+    _write_corpus_fixture "$tmpdir"
+    CLAUDE_DATA_DIR="$tmpdir" CLAUDE_ACCOUNT_DIR="$tmpdir/accounts/work"
+    sig1=$(usage_corpus_sig)
+    sleep 1
+    printf '{"type":"usage","timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":31},"five_hour":{"utilization":71,"resets_at":"R1"}}\n' "$(date +%s)" >> "$tmpdir/usage.jsonl"
+    sig2=$(usage_corpus_sig)
+    [ "$sig1" != "$sig2" ]
+    rm -rf "$tmpdir"
+}
+
+@test "session_telemetry_json: carries the project basename, never the path" {
+    cost_usd=1.5 project_dir="/Users/x/wrk/src/repo-name/" cwd="/Users/x/wrk/src/repo-name/sub"
+    run session_telemetry_json
+    [ "$(echo "$output" | jq -r .project)" = "repo-name" ]
+    [[ "$output" != *"/Users"* ]]
+    cost_usd=1.5 project_dir="" cwd="/tmp/other"
+    run session_telemetry_json
+    [ "$(echo "$output" | jq -r .project)" = "other" ]
+    cost_usd=1.5 project_dir="" cwd=""
+    run session_telemetry_json
+    [ "$(echo "$output" | jq -r .project)" = "null" ]
+}
