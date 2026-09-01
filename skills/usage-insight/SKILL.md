@@ -47,12 +47,18 @@ the deep-dive version of what the advisor row says in one sentence.
 ```json
 {"days_history": 21, "recent_24h": 14.2,
  "pct_per_window": 11.83,
- "weekday_profile": {"0": 5.1, "1": 27.3, "6": -1}}
+ "weekday_profile": {"0": 5.1, "1": 27.3, "6": -1},
+ "hour_profile": {"0": 0.09, "9": 1.83, "23": 1.24}}
 ```
 
 - `weekday_profile`: learned percent-of-7d-quota burned per weekday
   (0=Sun..6=Sat), EWMA half-life 14 days; `-1` = never observed.
   Cold start below 14 `days_history` — say projections are unlearned.
+- `hour_profile`: burn multiplier per local hour, mean 1 — the rate at
+  hour h is `weekday_profile[dow] x hour_profile[h]`. Below 0.25 is a
+  REST hour; absent or malformed means flat, never silence. Hours the
+  account sleeps through are not capacity: count only those at or above
+  0.25 when you say what is spendable before a reset.
 - `pct_per_window`: the exchange rate — 7d percentage points one fully
   burned 5h window costs THIS account. `-1` = unlearned. A week holds
   roughly `100 / pct_per_window` full windows.
@@ -66,7 +72,9 @@ the deep-dive version of what the advisor row says in one sentence.
   hours to its reset, the burnable maximum is roughly
   `pct_per_window x (T / 5h)` (capped by the current 5h window's own
   headroom). If that is less than S, do NOT say "use it up" — say how
-  much expires no matter what.
+  much expires no matter what. T is AWAKE hours once `hour_profile` is
+  learned: "spend it" at 23:00 is advice to burn a week through eight
+  hours of sleep.
 - With `pct_per_window = -1`, state facts, not advice.
 - A scoped limit (`limits[]`) at 100% means that model is unavailable:
   the useful fact is its `resets_at`, not the percentage.

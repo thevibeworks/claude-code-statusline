@@ -7,7 +7,7 @@ read concurrently.
 
 - Contract version: **2** (bump on any breaking layout/field change; this
   file is the changelog)
-- Synced with: statusline.sh v0.35.0
+- Synced with: statusline.sh v0.36.0
 - Permissions: the script runs under `umask 077` — files are owner-only.
   Caches hold account PII (email, uuid, org names).
 
@@ -56,7 +56,7 @@ a writer that cannot honor all of them must use its own dir instead:
   usage.cache                             last /api/oauth/usage response + fetched_at
   profile.cache                           last /api/oauth/profile response (24h TTL)
   prepaid_credits.cache                   prepaid balance + fetched_at (5m TTL)
-  forecast.cache                          learned weekday burn profile (hourly rebuild)
+  forecast.cache                          learned weekday + hour burn profile (hourly rebuild)
   week.cache                              week-row cells: 7d per-window + 5h per-half-hour burn (rebuilt when usage.jsonl grows)
   stdin_seen                              last stdin rate_limits pair logged (`5h|7d epoch`) — dedupe for source:stdin samples
   usage.jsonl                             append-only usage/session event log
@@ -115,6 +115,7 @@ Output of the hourly usage.jsonl scan (EWMA half-life 14 days):
  "recent_24h": 14.20, "recent_48h": 22.10,
  "pct_per_window": 11.83,
  "weekday_profile": {"0": 5.1, "1": 27.3, "…": 0, "6": -1},
+ "hour_profile": {"0": 0.09, "…": 1.83, "23": 1.24},
  "scoped_name": "Fable", "scoped_recent_24h": 76.00,
  "scoped_profile": {"0": 5.7, "1": 23.5, "…": 0, "6": -1},
  "cost": {"usd_24h": 12.40, "usd_7d": 84.10,
@@ -161,6 +162,51 @@ points consumed by one fully burned 5h window, mined from paired samples
 inside the same 5h window; `-1` until enough paired burn has been
 observed (>= half a window). Snapshots are partitioned by `account.uuid`
 before aggregation.
+
+`hour_profile` is the same account on the other axis: 24 keys, local hour
+`"0"`..`"23"`, values are burn MULTIPLIERS with mean 1. The instantaneous
+rate at hour h is `weekday_rate * mult[h]` (%/day), so integrating any
+whole day reproduces the weekday total exactly — the weekday says what a
+Tuesday costs, the hour says when in it. The field is additive, so
+`schema` stays 2: a reader that has never heard of it walks flat, which is
+what every reader did before it existed.
+
+Built inside the same envelope pass — each credited delta is also credited
+to `(local_day, local_hour)`, EWMA-weighted by day age with the same
+14-day half-life, and today is EXCLUDED, because a day that has only
+reached noon reports every evening hour as rest. The weighted share per
+hour becomes `m[h] = max(share[h] * 24, 0.1)`, then the whole vector is
+scaled so the mean is exactly 1, rounded to 2 decimals. Floored AND
+renormalized at BUILD time so every reader sees the same numbers instead
+of each applying the hedge its own way; a floored hour therefore prints
+slightly under the floor (`0.09`) once many hours were floored — that is
+correct, do not re-floor on read. The 0.1 floor is the hedge for the
+occasional overnight autonomous run: a rest hour projects a tenth of a
+uniform hour, never zero. Omitted entirely when no weighted burn exists.
+
+Use it only if it is an object with all 24 keys, every value numeric in
+`[0, 24]`, and the mean in `[0.9, 1.1]` — plus the `days_history >= 14`
+gate every learned surface shares. Invalid or absent means FLAT (mult
+== 1), never silence: a bad hour shape must not take a good forecast away,
+and only the weekday guards do that. Both readers walk the profile by
+stepping local-hour boundaries, and the recent-24h blend that opens the
+walk ends at exactly 24h out.
+
+```
+REST_MULT_MAX = 0.25      an hour below this is a REST hour
+```
+
+An AWAKE WINDOW is a 5h window you are awake for. Over the span
+`[now + five_secs, now + seven_secs]` — the same span the windows-ahead
+count covers, with `five_secs = 0` when no 5h window is live —
+`awake_secs` is the part of it falling in local hours with `mult >=
+REST_MULT_MAX`, and `awake = min(windows_ahead, ceil(awake_secs /
+18000))`; it ceils for the reason windows-ahead does, a partial window
+being still spendable. A surface names the awake count only when the
+shape is learned, `windows_ahead >= 1`, and `awake < windows_ahead` — an
+equal count would spend a clause to say nothing. At `awake == 0` both the
+awake clause and the ration that would divide by it go away; the landing
+still speaks.
 
 `scoped_*` mirror the all-model fields for the `weekly_scoped` limit —
 the per-model weekly cap, `Fable` at time of writing. `scoped_name` is

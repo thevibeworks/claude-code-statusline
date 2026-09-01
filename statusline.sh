@@ -2089,6 +2089,13 @@ usage_corpus_sig() {
 # not", without either tool having to know the other exists.
 FORECAST_SCHEMA=2
 
+# An hour whose learned burn multiplier sits below this is a REST hour: week
+# after week, this account has burned a tenth of a uniform hour in it. Part of
+# the cache contract (docs/api/state-dir.md) rather than a local threshold —
+# ccpace divides the same surplus by the same awake windows, and two tools
+# that disagree about which hours are spendable disagree about the ration.
+REST_MULT_MAX=0.25
+
 # Rotate usage.jsonl when it exceeds the cap. Single .1 backup; the profile
 # builder reads .1 + current, so rotation never costs learned history.
 rotate_usage_log() {
@@ -2109,6 +2116,7 @@ rotate_usage_log() {
 # can read for free:
 #   { schema, computed_at, days_history, recent_24h, recent_48h,
 #     pct_per_window, weekday_profile: {"0":sun.. "6":sat, unknown = -1},
+#     hour_profile: {"0".."23" burn multipliers, mean 1; absent = unlearned},
 #     scoped_name, scoped_recent_24h, scoped_profile, cost }
 # Daily burn is the rise of a MONOTONE ENVELOPE, never the sum of raw
 # positive deltas (see seven_env below and docs/api/state-dir.md).
@@ -2217,6 +2225,11 @@ build_seven_day_profile() {
             if (v <= env) return
             d = v - env; env = v; day = int((ts + tz) / 86400)
             burn[day] += d; credited = d
+            # The same delta on a second axis: the LOCAL HOUR it landed in.
+            # Claude Code can work at 03:00 and the human cannot, so a walk
+            # that burns flat through the night puts a dry-out in the middle
+            # of sleep — a false alarm at 23:00 and a missed warning at 09:00.
+            hburn[day SUBSEP int(((ts + tz) % 86400) / 3600)] += d
             if (now - ts <= 86400)  r24 += d
             if (now - ts <= 172800) r48 += d
         }
@@ -2321,6 +2334,17 @@ build_seven_day_profile() {
                 dw = (kp[2] + 4) % 7
                 cnum[dw] += cburn[k] * w; cden[dw] += w
             }
+            # The hour shape: burn SHARE per local hour, weighted by the same
+            # 14-day half-life. Today is excluded — a day that has only
+            # reached noon reports every evening hour as rest, and the shape
+            # is exactly the thing that must not learn that.
+            for (k in hburn) {
+                split(k, kp, SUBSEP)
+                if (kp[1] + 0 == today) continue
+                age = today - kp[1]; if (age < 0) age = 0
+                w = exp(-0.0495 * age)
+                hnum[kp[2] + 0] += hburn[k] * w; hden += hburn[k] * w
+            }
             printf "{\"schema\":%d,\"computed_at\":%d,\"days_history\":%d,", schema, now, ndays
             printf "\"recent_24h\":%.2f,\"recent_48h\":%.2f,", r24, r48
             printf "\"pct_per_window\":%.2f,", ppw
@@ -2331,6 +2355,27 @@ build_seven_day_profile() {
                 printf "%s\"%d\":%.2f", sep, i, p; sep = ","
             }
             printf "},"
+            # Published floored AND renormalized, so every reader sees the
+            # same numbers rather than each applying the hedge its own way:
+            # a rest hour projects a tenth of a uniform hour, never zero,
+            # which is what the occasional overnight autonomous run costs.
+            # Omitted entirely when nothing has been credited — a reader with
+            # no shape walks flat, which is the behavior that predates this
+            # field.
+            if (hden > 0) {
+                hsum = 0
+                for (i = 0; i < 24; i++) {
+                    hm[i] = hnum[i] / hden * 24
+                    if (hm[i] < 0.1) hm[i] = 0.1
+                    hsum += hm[i]
+                }
+                printf "\"hour_profile\":{"
+                sep = ""
+                for (i = 0; i < 24; i++) {
+                    printf "%s\"%d\":%.2f", sep, i, hm[i] * 24 / hsum; sep = ","
+                }
+                printf "},"
+            }
             printf "\"scoped_name\":%s,", (sc_last == "" ? "null" : "\"" sc_last "\"")
             printf "\"scoped_recent_24h\":%.2f,", (sc_last == "" ? -1 : cr24[sc_last])
             printf "\"scoped_profile\":{"
@@ -2360,7 +2405,7 @@ build_seven_day_profile() {
     fi
 }
 
-# Project the remaining window day-by-day against the learned profile and
+# Project the remaining window hour-by-hour against the learned profile and
 # echo "<level> <dry_gap_hours>" when the quota dries up BEFORE the reset
 # ("you will be out of usage while days still remain"). Empty output = no
 # verdict (no cache, cold start < 14 days of history, or quota outlasts the
@@ -2368,13 +2413,18 @@ build_seven_day_profile() {
 # hot streak escalates before the weekday average catches up (L1 blend).
 # Shared learned-profile walker: simulate burn from now to the reset using
 # the weekday profile (recent-24h blended over the first day, exactly the
-# seven_day_forecast behavior). Echoes "gap_h projected_end":
+# seven_day_forecast behavior), shaped by the learned hour profile — the
+# weekday says how much a Tuesday costs, the hour says WHEN in it. Echoes
+# "gap_h projected_end":
 #   gap_h          hours between drying up and the reset, -1 if the quota
 #                  outlasts the window
 #   projected_end  final utilization at the reset, capped at 100
-# Silent on cold start (<14 days history) or missing/empty inputs.
+# Silent on cold start (<14 days history) or missing/empty inputs. `now` is
+# injectable because the hour shape makes the answer depend on when the walk
+# runs, and a test that cannot pin the hour cannot assert where a dry-out
+# lands.
 _profile_walk() {
-    local used="$1" secs_left="$2" prof_key="${3:-weekday_profile}" recent_key="${4:-recent_24h}"
+    local used="$1" secs_left="$2" prof_key="${3:-weekday_profile}" recent_key="${4:-recent_24h}" now="${5:-}"
     local fc="$CLAUDE_ACCOUNT_DIR/forecast.cache"
     [ -f "$fc" ] || return 0
     [ -n "$secs_left" ] && [ "$secs_left" -gt 0 ] 2>/dev/null || return 0
@@ -2389,14 +2439,22 @@ _profile_walk() {
     local used_int
     used_int=$(printf '%.0f' "$used" 2>/dev/null || echo 0)
     [ "$used_int" -gt 0 ] 2>/dev/null || return 0
-    local now tzoff_s
-    now=$(date +%s)
+    local tzoff_s
+    [ -n "$now" ] || now=$(date +%s)
     tzoff_s=$(date +%z | awk '{ s=substr($0,1,1)=="-"?-1:1; h=substr($0,2,2)+0; m=substr($0,4,2)+0; print s*(h*3600+m*60) }')
+    # The 24 hour multipliers ride the same TSV. Anything that is not a
+    # number lands as -1 and fails the read validation below: @tsv refuses an
+    # object or an array outright, and a walk that goes silent because a
+    # foreign writer put a nested value in hour_profile would be a bad shape
+    # silencing a good forecast.
     jq -r --arg p "$prof_key" --arg r "$recent_key" '
         (.[$p] // {}) as $wp
+        | (if ((.hour_profile // null) | type) == "object" then .hour_profile else {} end) as $hp
         | [.days_history, (.[$r] // -1),
            ($wp["0"] // -1), ($wp["1"] // -1), ($wp["2"] // -1), ($wp["3"] // -1),
-           ($wp["4"] // -1), ($wp["5"] // -1), ($wp["6"] // -1)] | @tsv' "$fc" 2>/dev/null \
+           ($wp["4"] // -1), ($wp["5"] // -1), ($wp["6"] // -1)]
+          + [range(0; 24) | ($hp[tostring] // -1)
+             | if type == "number" then . else -1 end] | @tsv' "$fc" 2>/dev/null \
     | awk -F'\t' -v used="$used_int" -v left="$secs_left" -v now="$now" -v tz="$tzoff_s" '
     {
         ndays = $1 + 0; r24 = $2 + 0
@@ -2416,20 +2474,44 @@ _profile_walk() {
         for (i = 0; i <= 6; i++) if (prof[i] >= 0) { sum += prof[i]; known++ }
         if (known == 0) exit
         fb = sum / known
+        # The hour shape, validated exactly as the cache contract states it:
+        # 24 keys, each numeric in [0, 24], mean in [0.9, 1.1]. Absent or
+        # broken reads as FLAT, which is this walk before the field existed —
+        # a bad hour shape narrows nothing and silences nothing. Only the
+        # weekday guards above can silence the walk.
+        hp_ok = 1; hsum = 0
+        for (i = 0; i < 24; i++) {
+            hm[i] = $(i + 10) + 0
+            if (hm[i] < 0 || hm[i] > 24) hp_ok = 0
+            hsum += hm[i]
+        }
+        if (hsum / 24 < 0.9 || hsum / 24 > 1.1) hp_ok = 0
+        if (!hp_ok) for (i = 0; i < 24; i++) hm[i] = 1
         remaining = 100 - used
         t = now; end = now + left; burned = 0; gap_h = -1
+        # Local-hour steps (<= 169 of them), because a rate that changes at
+        # 08:00 cannot be integrated a day at a time.
         while (t < end) {
-            day = int((t + tz) / 86400)
-            day_end = (day + 1) * 86400 - tz
-            step = (day_end < end ? day_end : end) - t
+            lt = t + tz
+            day = int(lt / 86400)
+            seg = t + 3600 - (lt % 3600)
+            if (seg > end) seg = end
+            step = seg - t
             rate = prof[(day + 4) % 7]; if (rate < 0) rate = fb
+            # L1 blend, tested at the segment start as it always was — which
+            # on hour steps means it now ends at exactly 24h out. Day steps
+            # let a blend that began mid-day run to the end of the day
+            # holding t+24h, so a hot rate could be projected through 47
+            # hours; the 24h horizon is what the field says and what ccpace
+            # walks, and two surfaces reading one cache may not disagree.
             if (t - now < 86400 && r24 > rate) rate = r24   # L1 blend
+            rate *= hm[int((lt % 86400) / 3600)]
             add = rate * step / 86400.0
             if (gap_h < 0 && burned + add >= remaining && rate > 0) {
                 dry = t + (remaining - burned) / rate * 86400.0
                 gap_h = int((end - dry) / 3600.0)
             }
-            burned += add; t = day_end
+            burned += add; t = seg
         }
         total = used + burned
         if (total > 100) total = 100
@@ -2439,8 +2521,8 @@ _profile_walk() {
 
 # The account 7d and the model-scoped cap, each by name. Callers say which
 # question they are asking; neither has to know how a profile is stored.
-_seven_day_walk() { _profile_walk "$1" "$2" weekday_profile recent_24h; }
-_scoped_walk()    { _profile_walk "$1" "$2" scoped_profile scoped_recent_24h; }
+_seven_day_walk() { _profile_walk "$1" "$2" weekday_profile recent_24h "${3:-}"; }
+_scoped_walk()    { _profile_walk "$1" "$2" scoped_profile scoped_recent_24h "${3:-}"; }
 
 seven_day_forecast() {
     local used="$1" secs_left="$2"
@@ -2499,6 +2581,51 @@ forecast_pct_per_window() {
     local ppw
     ppw=$(jq -r '.pct_per_window // -1' "$fc" 2>/dev/null)
     awk -v p="${ppw:--1}" 'BEGIN{ if (p > 0) printf "%.2f", p }'
+}
+
+# The learned hour shape as 24 space-separated multipliers, or nothing while
+# it is unlearned. The read validation is the cache contract
+# (docs/api/state-dir.md): 24 keys, every value numeric in [0, 24], mean in
+# [0.9, 1.1], plus the same >= 14 days of history every other learned surface
+# waits for. Anything else reads as flat — no clause narrows, nothing goes
+# quiet. `|| true`: jq exits nonzero on a truncated cache, and under `set -e`
+# a bare `x=$(cmd)` aborts AT the assignment.
+hour_profile_mults() {
+    local fc="$CLAUDE_ACCOUNT_DIR/forecast.cache"
+    [ -f "$fc" ] || return 0
+    jq -r 'if (.days_history // 0) < 14 then empty else
+             (if ((.hour_profile // null) | type) == "object" then .hour_profile else {} end) as $h
+             | [range(0; 24) | ($h[tostring] // -1) | if type == "number" then . else -1 end]
+             | if (map(select(. >= 0 and . <= 24)) | length) == 24
+                  and (add / 24) >= 0.9 and (add / 24) <= 1.1
+               then map(tostring) | join(" ") else empty end
+           end' "$fc" 2>/dev/null || true
+}
+
+# Seconds of the span [now + from, now + to] that fall in AWAKE local hours —
+# the ones whose learned multiplier clears REST_MULT_MAX. Nothing (not zero)
+# while the shape is unlearned: a caller must be able to tell "you sleep
+# through all of it" from "I have no idea when you sleep". `now` is
+# injectable for the same reason the walk's is.
+awake_secs() {
+    local mults="$1" from="${2:-0}" to="${3:-0}" now="${4:-}"
+    [ -n "$mults" ] || return 0
+    local tzoff_s
+    [ -n "$now" ] || now=$(date +%s)
+    tzoff_s=$(date +%z | awk '{ s=substr($0,1,1)=="-"?-1:1; h=substr($0,2,2)+0; m=substr($0,4,2)+0; print s*(h*3600+m*60) }')
+    awk -v now="$now" -v tz="$tzoff_s" -v from="$from" -v to="$to" \
+        -v rest="$REST_MULT_MAX" -v mults="$mults" 'BEGIN{
+        if (split(mults, m, " ") != 24) { print 0; exit }
+        t = now + from; hi = now + to; awake = 0
+        while (t < hi) {
+            lt = t + tz
+            seg = t + 3600 - (lt % 3600)
+            if (seg > hi) seg = hi
+            if (m[int((lt % 86400) / 3600) + 1] + 0 >= rest) awake += seg - t
+            t = seg
+        }
+        printf "%d\n", awake
+    }'
 }
 
 # ---------------------------------------------------------------------------
@@ -2628,7 +2755,38 @@ run_usage_report() {
         printf 'price: still learning (samples carrying both dollars and percent)\n'
     fi
     awk -v a="${usd24:-0}" -v b="${usd7d:-0}" \
-        'BEGIN{ if (a > 0 || b > 0) printf "spent: $%.2f in 24h · $%.2f in 7d\n", a, b }' 
+        'BEGIN{ if (a > 0 || b > 0) printf "spent: $%.2f in 24h · $%.2f in 7d\n", a, b }'
+
+    # The rhythm the walk below is now shaped by. Stated because it changes
+    # every projection in this report and is the one learned fact the reader
+    # can check against their own week.
+    local hour_mults
+    hour_mults=$(hour_profile_mults)
+    if [ -n "$hour_mults" ]; then
+        awk -v m="$hour_mults" -v rest="$REST_MULT_MAX" 'BEGIN{
+            split(m, mult, " ")
+            awake = 0
+            for (i = 0; i < 24; i++) if (mult[i + 1] + 0 >= rest) awake++
+            # Longest CIRCULAR run of rest hours: sleep wraps 23 -> 0, and a
+            # run cut at midnight reads as two short ones. Two passes over
+            # the ring find it; the mean is 1, so some hour is always awake
+            # and the run can never swallow the ring.
+            best = 0; bs = -1; run = 0; start = 0
+            for (i = 0; i < 48; i++) {
+                h = i % 24
+                if (mult[h + 1] + 0 < rest) {
+                    if (run == 0) start = h
+                    run++
+                    if (run > best) { best = run; bs = start }
+                } else run = 0
+            }
+            if (best >= 3)
+                printf "rhythm: rest ~%02d:00-%02d:00 · %dh awake/day (learned)\n", \
+                    bs, (bs + best) % 24, awake
+            else
+                printf "rhythm: no rest learned — burns around the clock\n"
+        }'
+    fi
 
     # Week in progress, from the freshest source (usage.cache), projected with
     # the same learned walk the advisor uses — the surfaces must not disagree.
@@ -3760,11 +3918,15 @@ build_advisor_fleet_hint() {
 #                                         mid-week underuse, engaged sessions
 #                                         only — reaches exactly the users
 #                                         who can act on it
-#   budget ~19✕5h left · even 1.1%/win · lands ~52%
+#   budget ~19✕5h left · ~13 awake · even 1.6%/win · lands ~52%
 #                                         always-mode calm line (shared
 #                                         budget frame with claude.py's
-#                                         watch advisor); in the last
-#                                         window: budget last window ·
+#                                         watch advisor); the awake clause
+#                                         appears only once the hour shape
+#                                         is learned and only when it cuts
+#                                         the count, and it names the
+#                                         denominator `even` divides by; in
+#                                         the last window: budget last window ·
 #                                         N% left · lands ~M%
 # ---------------------------------------------------------------------------
 # The notice engine. Readers below turn the account's live numbers into
@@ -4192,15 +4354,28 @@ notice_collect() {
         when=$(format_reset_absolute "$seven_reset")
         ppw=$(forecast_pct_per_window)
         if [ -n "$ppw" ]; then
-            reachable=$(awk -v ppw="$ppw" -v ss="$seven_secs" -v fs="${five_secs:-0}" -v fu="$five_int" 'BEGIN{
+            # Two legs: the window you are in (time-limited by its own reset,
+            # rate-limited by its own headroom) and everything after it. The
+            # TIME terms are awake seconds once the rhythm is learned —
+            # "spend it" at 23:00 was advice to burn a week of surplus
+            # through eight hours of sleep. Unlearned, the legs are wall
+            # seconds and the arithmetic is exactly what it was.
+            local leg_secs="$seven_secs" rest_secs=0 hour_mults
+            if [ "${five_secs:-0}" -gt 0 ] 2>/dev/null \
+               && [ "$five_secs" -lt "$seven_secs" ] 2>/dev/null; then
+                leg_secs="$five_secs"; rest_secs=$(( seven_secs - five_secs ))
+            fi
+            hour_mults=$(hour_profile_mults)
+            if [ -n "$hour_mults" ]; then
+                local awake_leg awake_rest=0
+                awake_leg=$(awake_secs "$hour_mults" 0 "$leg_secs")
+                [ "$rest_secs" -gt 0 ] && awake_rest=$(awake_secs "$hour_mults" "$leg_secs" "$seven_secs")
+                leg_secs="$awake_leg"; rest_secs="$awake_rest"
+            fi
+            reachable=$(awk -v ppw="$ppw" -v leg="$leg_secs" -v rest="$rest_secs" -v fu="$five_int" 'BEGIN{
                 cap = ppw * (100 - fu) / 100          # current window headroom
-                if (fs > 0 && fs < ss) {
-                    leg = ppw * fs / 18000            # time-limited until 5h reset
-                    r = (leg < cap ? leg : cap) + ppw * (ss - fs) / 18000
-                } else {
-                    leg = ppw * ss / 18000            # 5h window outlasts 7d reset
-                    r = (leg < cap ? leg : cap)
-                }
+                l = ppw * leg / 18000                 # time-limited until 5h reset
+                r = (l < cap ? l : cap) + ppw * rest / 18000
                 printf "%d", int(r + 0.5)
             }')
         fi
@@ -4325,18 +4500,47 @@ notice_collect() {
                 "last window · ${surplus}% left" \
                 "budget last window · ${surplus}% left${lands_part}"
         else
-            local even
-            even=$(awk -v h="$surplus" -v w="$windows" 'BEGIN{printf "%.1f", h/w}')
+            # How many of those windows you are actually awake for. A window
+            # you sleep through is not capacity you can spend, and a ration
+            # that divides by it is a number nobody can hit. Clamped to the
+            # calendar count — the two describe the same future and must
+            # never disagree about it — and spoken only when it REFINES it:
+            # equal counts would spend a clause to say nothing.
+            local awake_n="" awake_part="" den="$windows" hour_mults asecs
+            hour_mults=$(hour_profile_mults)
+            asecs=$(awake_secs "$hour_mults" "${five_secs:-0}" "$seven_secs")
+            if [ -n "$asecs" ]; then
+                awake_n=$(( (asecs + 17999) / 18000 ))
+                [ "$awake_n" -gt "$windows" ] && awake_n="$windows"
+                if [ "$awake_n" -lt "$windows" ]; then
+                    den="$awake_n"
+                    # At zero the awake clause and the ration both go: there
+                    # is no denominator, and "~0 awake" is a sentence about
+                    # the next eight hours pretending to be one about the
+                    # week. The landing still speaks.
+                    [ "$awake_n" -gt 0 ] && awake_part=" · ~${awake_n} awake"
+                else
+                    awake_n=""
+                fi
+            fi
+            local even="" even_part=""
+            if [ "$den" -gt 0 ] 2>/dev/null; then
+                even=$(awk -v h="$surplus" -v w="$den" 'BEGIN{printf "%.1f", h/w}')
+                even_part=" · even ${even}%/win"
+            fi
             # 0 ahead is the only "last window": the week ends inside the one
             # you are in, and there is nothing to divide the surplus across.
             # At 1 the line keeps the count and the grammar — `1✕5h left ·
             # 25.0%/win` says the same thing the N-window form says, and
             # calling two windows the last one to save a redundant clause is
             # the wrong trade.
-            if [ -n "$lands" ]; then short_tail="lands ~${lands}%"; else short_tail="${even}%/win"; fi
+            if [ -n "$lands" ]; then short_tail="lands ~${lands}%"
+            elif [ -n "$even" ]; then short_tail="${even}%/win"; fi
+            local short_line="${windows}${MULT_GLYPH}5h left"
+            [ -n "$short_tail" ] && short_line="${short_line} · ${short_tail}"
             notice_add 10 '-' acct "acct.budget.${windows}" "${windows}${MULT_GLYPH}5h" \
-                "${windows}${MULT_GLYPH}5h left · ${short_tail}" \
-                "budget ~${windows}${MULT_GLYPH}5h left · even ${even}%/win${lands_part}"
+                "$short_line" \
+                "budget ~${windows}${MULT_GLYPH}5h left${awake_part}${even_part}${lands_part}"
         fi
     fi
 
