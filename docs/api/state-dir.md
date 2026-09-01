@@ -7,7 +7,7 @@ read concurrently.
 
 - Contract version: **2** (bump on any breaking layout/field change; this
   file is the changelog)
-- Synced with: statusline.sh v0.36.0
+- Synced with: statusline.sh v0.37.0
 - Permissions: the script runs under `umask 077` — files are owner-only.
   Caches hold account PII (email, uuid, org names).
 
@@ -99,6 +99,49 @@ when idle); a `usage.err` JSON file appears during fetch-failure cooldowns
 (`{at, code, count, cooldown, msg?}`) and is removed on the next success.
 Treat `fetched_at` as authoritative staleness; anything older than ~1h
 means no active session is feeding this account.
+
+#### Two pools, one wall
+
+The account `seven_day` limit and a `weekly_scoped` limit are two counters
+over one week: the same reset instant, both cumulative from it. Their live
+ratio is therefore this week's MIX RATE, and no history is needed to read
+it. Everything in this section is COMPUTED LIVE from the two numbers above
+— nothing here is a stored field, and no cache changes when it changes.
+
+```
+mix       = scope / seven                            scoped points per 7d point
+reachable = round((100 - seven) * scope / seven)     of the scoped pool
+strand    = (100 - scope) - reachable                = round(100 * (seven - scope) / seven)
+```
+
+`reachable` is what the account's remaining points can still buy in the
+scoped pool; `strand` is the rest of that pool, which expires because
+nothing can reach it. Round ONCE and take the strand as the remainder: the
+two numbers are printed beside the total they must add to.
+
+Live check: `seven = 81`, `scope = 63` gives mix 0.78, reachable 15, strand
+22 — against 0.77 mined from the corpus at week level.
+
+The reading speaks only when ALL of these hold:
+
+| Rule | Value | Why |
+|------|-------|-----|
+| `SCOPE_SAME_WALL_SEC` | 120 | Resets no further apart than this are one wall. The two have always reset together to the microsecond, but Anthropic could split them, and a ratio taken across two different weeks is a fluent lie. |
+| `SCOPE_MIX_MIN_7D` | 60 | "Which cap binds" is only a question once the account's own end is in sight, and the ratio is well established by then. |
+| `SCOPE_MIX_MIN_SCOPE` | 5 | A model untouched this week belongs to the underuse reading, not to a mix. |
+| `SCOPE_STRAND_MIN_PCT` | 10 | Under ten points there is nothing to act on. |
+
+Plus: both pools under 100 (a capped pool is its own message), and the 7d
+window past the young guard every projection shares (a day of this
+window's own evidence).
+
+Selecting the scoped limit where no running model names one (`report`,
+ccpace): prefer `is_active == true`, else the deepest `weekly_scoped`. A
+surface that knows which model the session runs matches on that instead.
+
+The coupling in the other direction — what a scoped point costs the
+account — is deliberately NOT published. Measured at n=22 it sits in a
+0.2-0.5 band: fluent enough to be believed, too noisy to be true.
 
 ### profile.cache
 

@@ -2096,6 +2096,20 @@ FORECAST_SCHEMA=2
 # that disagree about which hours are spendable disagree about the ration.
 REST_MULT_MAX=0.25
 
+# The account 7d pool and the model-scoped weekly pool drain at different
+# speeds toward the SAME wall. Both counters are cumulative from one reset
+# instant, so their live ratio IS this week's mix — `scope / seven` is
+# scoped points per account point — and what the account cannot reach before
+# the wall arrives strands in the scoped pool. These are READING RULES, not
+# cache fields: nothing is stored, the numbers are computed from usage.cache
+# on every frame. They live here beside the cache contract because ccpace
+# says the same thing from the same numbers (docs/api/state-dir.md), and two
+# tools that disagree about what strands disagree about the week.
+SCOPE_STRAND_MIN_PCT=10          # scoped points the mix strands before it is worth a row
+SCOPE_MIX_MIN_7D=60              # ...and only once the account's own end is in sight
+SCOPE_MIX_MIN_SCOPE=5            # a model untouched this week is the underuse voice's job
+SCOPE_SAME_WALL_SEC=120          # resets this close are one wall; further apart, no ratio
+
 # Rotate usage.jsonl when it exceeds the cap. Single .1 backup; the profile
 # builder reads .1 + current, so rotation never costs learned history.
 rotate_usage_log() {
@@ -2756,6 +2770,51 @@ run_usage_report() {
     fi
     awk -v a="${usd24:-0}" -v b="${usd7d:-0}" \
         'BEGIN{ if (a > 0 || b > 0) printf "spent: $%.2f in 24h · $%.2f in 7d\n", a, b }'
+
+    # What a 7d point buys in the pool beside it. The account pool and the
+    # model-scoped pool are cumulative from one reset instant, so their live
+    # ratio is this week's mix rate, and the account reaching its wall first
+    # is what strands the rest of the model's pool. No history is needed and
+    # nothing is cached — the reading rules are the SCOPE_* constants, shared
+    # with ccpace (docs/api/state-dir.md). No session runs here, so there is
+    # no model to match: the binding scoped limit speaks, else the deepest.
+    local mix_cache="$CLAUDE_ACCOUNT_DIR/usage.cache" mix_tsv=""
+    if [ -f "$mix_cache" ]; then
+        mix_tsv=$(jq -r '. as $u
+            | [$u.limits[]? | select(.kind == "weekly_scoped"
+                                     and (.scope.model.display_name // "") != "")]
+            | ((map(select(.is_active == true)) | first) // (sort_by(.percent // 0) | last) // empty)
+            | [(.scope.model.display_name | ascii_downcase), (.percent // 0), (.resets_at // ""),
+               ($u.seven_day.utilization // 0), ($u.seven_day.resets_at // "")] | @tsv' \
+            "$mix_cache" 2>/dev/null) || true
+    fi
+    if [ -n "$mix_tsv" ]; then
+        local mx_name mx_pct mx_reset mx_su mx_sreset
+        IFS=$'\t' read -r mx_name mx_pct mx_reset mx_su mx_sreset <<<"$mix_tsv"
+        local mx_int mx_seven mx_secs mx_ssecs
+        mx_int=$(printf '%.0f' "$mx_pct" 2>/dev/null || echo 0)
+        mx_seven=$(printf '%.0f' "$mx_su" 2>/dev/null || echo 0)
+        mx_secs=$(get_reset_seconds "$mx_reset")
+        mx_ssecs=$(get_reset_seconds "$mx_sreset")
+        if [ -n "$mx_secs" ] && [ -n "$mx_ssecs" ] && [ "$mx_ssecs" -gt 0 ] 2>/dev/null \
+           && [ "$mx_int" -ge "$SCOPE_MIX_MIN_SCOPE" ] && [ "$mx_int" -lt 100 ] 2>/dev/null \
+           && [ "$mx_seven" -ge "$SCOPE_MIX_MIN_7D" ] && [ "$mx_seven" -lt 100 ] 2>/dev/null \
+           && [ $((SEVEN_DAY_WINDOW_SECS - mx_ssecs)) -ge "$SEVEN_DAY_YOUNG_SECS" ] 2>/dev/null; then
+            local mx_wall=$((mx_secs - mx_ssecs))
+            [ "$mx_wall" -lt 0 ] && mx_wall=$((-mx_wall))
+            local mx_reach=$(( ((100 - mx_seven) * mx_int + mx_seven / 2) / mx_seven ))
+            local mx_strand=$((100 - mx_int - mx_reach))
+            if [ "$mx_wall" -le "$SCOPE_SAME_WALL_SEC" ] \
+               && [ "$mx_strand" -ge "$SCOPE_STRAND_MIN_PCT" ]; then
+                local mx_ab
+                mx_ab=$(model_scope_abbrev "$mx_name")
+                printf "%s mix: ~%s %s-pt per 7d-pt this week · 7d's %s%% left carries ~%s%% of %s's %s%%\n" \
+                    "$mx_ab" \
+                    "$(awk -v s="$mx_int" -v v="$mx_seven" 'BEGIN{printf "%.2f", s / v}')" \
+                    "$mx_ab" "$((100 - mx_seven))" "$mx_reach" "$mx_ab" "$((100 - mx_int))"
+            fi
+        fi
+    fi
 
     # The rhythm the walk below is now shaped by. Stated because it changes
     # every projection in this report and is the one learned fact the reader
@@ -4340,6 +4399,44 @@ notice_collect() {
             "${scope_ab} caps ~${sc_str}" \
             "${scope_ab} caps ~${sc_str}, ${sc_gap} before reset"
         pressure=1
+    fi
+
+    # The other way round: the ACCOUNT caps first, and the model's remaining
+    # points expire in a pool nothing can reach them from. Both counters run
+    # from the same reset instant, so their live ratio is this week's mix
+    # rate — no history, no cache field, just the two numbers line 1 already
+    # shows. Measured at 81/63: mix 0.78 against 0.77 mined from the corpus.
+    # It is the mirror of the steering notice above and cannot coexist with
+    # it — that one needs the model ahead of the account, this one needs the
+    # account ahead of the model.
+    #
+    # Rank 58: above the 5h tail, below the fleet hint, and never above the
+    # 7d pressure that CAUSES it. The pairing this is built for is the dry
+    # warning pinned on row 2 with the strand flashing on row 3.
+    if [ -z "$sc_str" ] && [ -z "$rebase_at" ] \
+       && [ -n "$scope_int" ] && [ "$scope_int" -ge "$SCOPE_MIX_MIN_SCOPE" ] 2>/dev/null \
+       && [ "$scope_int" -lt 100 ] 2>/dev/null \
+       && [ "$seven_int" -ge "$SCOPE_MIX_MIN_7D" ] && [ "$seven_int" -lt 100 ] \
+       && [ -n "$scope_secs" ] && [ -n "$seven_secs" ] && [ "$seven_secs" -gt 0 ] 2>/dev/null \
+       && [ $((SEVEN_DAY_WINDOW_SECS - seven_secs)) -ge "$SEVEN_DAY_YOUNG_SECS" ] 2>/dev/null; then
+        # One wall, or no ratio: the two pools have always reset together to
+        # the microsecond, but Anthropic could split them someday, and a mix
+        # taken across two different weeks is a fluent lie.
+        local wall_gap=$((scope_secs - seven_secs))
+        [ "$wall_gap" -lt 0 ] && wall_gap=$((-wall_gap))
+        if [ "$wall_gap" -le "$SCOPE_SAME_WALL_SEC" ]; then
+            # One division, not two. Both numbers land on one line beside the
+            # total they must add to, so the strand is the REMAINDER of what
+            # the mix reaches, never its own rounding.
+            local mix_left=$((100 - scope_int))
+            local mix_reach=$(( ((100 - seven_int) * scope_int + seven_int / 2) / seven_int ))
+            local mix_strand=$((mix_left - mix_reach))
+            if [ "$mix_strand" -ge "$SCOPE_STRAND_MIN_PCT" ] 2>/dev/null; then
+                notice_add 58 '+' fb "fb.strand.$((mix_strand / 5))" "~${mix_strand}%" \
+                    "${scope_ab} ~${mix_strand}% expires at this mix" \
+                    "7d caps before ${scope_ab}: this mix reaches ~${mix_reach}% of its ${mix_left}% left · run ${scope_ab} heavier to extract more"
+            fi
+        fi
     fi
 
     # Expiring surplus — use it or lose it. Inside the last day of the 7d
