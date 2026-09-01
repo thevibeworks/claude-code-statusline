@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.39.0 — 2026-09-01 — a guess may not delete a window
+
+**v0.38.0 unfolded the future and the dry wall walked out with it.** The
+first live frame after install: six windows to the reset, drawn as
+`▮▯▯▯×××` — and read, by the person the row exists for, as *three slots
+where six should be*. The `×` cells were the dry projection doing what it
+had always done; folding had just kept the run compressed into one token.
+Exposed cell by cell, the guess was overwriting windows — while the exact
+same fact sat one row up as `! 7d dry ~Tue 22:00`, with better gates and
+an exact time.
+
+**v0.33 already made this argument for the 5h strip** ("the strip is a
+record, not a forecast": an empty cell is a fact, a `×` is a guess, and
+the guess is owned by the badge and the notice). The 7d strip only kept
+its `×` cells because the fold hid them. Same answer now on both windows:
+**a future cell is a slot, never a verdict.** Every cell ahead draws
+hollow — dim where the learned rhythm says you sleep — up to the grid's
+edge. The one place the dry mark still draws is the folded token
+(`...×(✕23)`): an early-week tail has no per-cell shape to say it, and
+the count beside the mark is the point there.
+
+Nothing else moves: `week_dry_slot` still runs (it decides the token's
+glyph), the notices still warn, the `week` report draws every slot. Ships
+with [ccpace](https://github.com/thevibeworks/ccpace) v0.7.0, which
+retires the `×` cell from its ledger the same way. 470 bats.
+
 ## v0.38.0 — 2026-09-01 — the future has a shape
 
 **The fold's own argument expired.** "History is information; the future

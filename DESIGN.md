@@ -93,14 +93,18 @@ grows at you: it holds its width for the life of the window and `▮` walks
 it. On the 5h strip that makes the hollow run the answer to *how long
 have I got* — `▃▄▮▯▯` is two whole hours after this one.
 
-What neither strip draws on 5h is a *forecast*. An empty cell is a fact;
-a `×` is a guess, and on a 5h window the guess is owned twice already —
-the badge states the end (`5h[38%@23:00]`) and the notice names the wall
-(`5h caps ~14:20`). Cells carry the shape, badges carry state, notices do
-the warning. History draws in full; the live row folds the 7d future
-after two kept cells into `...▯(x14)` — the 5h windows *after* the one
-you are in, `×` red when the tail projects dry (the `week`
-report still draws every slot). The count is the budget line's own,
+What neither strip draws *in a cell* is a *forecast*. An empty cell is a
+fact; a `×` is a guess, and the guess is owned already — the badge states
+the end, the notice names the wall with an exact time (`5h caps ~14:20`,
+`7d dry ~Tue 22:00`). The 5h strip learned this first; the 7d strip kept
+its `×` cells only while the fold hid them, and unfolding called the
+question — a run of `×××` was read live as *deleted windows*. A future
+cell is a slot, never a verdict. Cells carry the shape, badges carry
+state, notices do the warning. History draws in full; the live row folds
+the 7d future after two kept cells into `...▯(x14)` — the 5h windows
+*after* the one you are in, `×` in place of `▯` when the tail projects
+dry, the one place the dry mark still draws (no per-cell shape exists in
+a folded tail to say it). The `week` report still draws every slot. The count is the budget line's own,
 priced from the same instant. The fold pays only while the tail is wider
 than its own token: ten cells or fewer draw in full, because the future
 stopped being one fact the day the cells learned your rhythm — a hollow
@@ -119,10 +123,10 @@ badges.
 ▮          now
 ▯          ahead — the hollow of ▮; on 5h, the hours left in the window;
            dim when your learned hours say you sleep through most of it
-           (× outranks it: unreachable beats asleep)
 ...▯(x14)  the folded future: 14 more 5h windows after this one (live 7d
-           row, only while the tail is wider than this token)
-×          pace won't cover it (7d only: learned forecast, linear when cold)
+           row, only while the tail is wider than this token); × in place
+           of ▯ when the tail projects dry — the dry mark's only cell,
+           since the wall's own notice states the exact time
 ```
 
 Burn cells take their badge's pressure color; nothing else in the row is
