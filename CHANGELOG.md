@@ -1,5 +1,60 @@
 # Changelog
 
+## v0.37.0 — 2026-09-01 — what a point buys
+
+**Two pools drain toward one wall and nothing said which one binds.** The
+live reading that started this: the account at 81%, the model-scoped
+weekly at 63%, both resetting at the same instant. Line 1 has printed the
+two numbers for months and never their relation — and the relation is the
+decision, because 22 of the model's remaining points are already
+unreachable at the rate this week is mixing them.
+
+**The ratio is the mix, and it needs no history.** Both counters are
+cumulative from one reset instant, so `scope / seven` IS this week's rate
+of scoped points per account point. `reachable = round((100 - seven) *
+scope / seven)` is what the account's remaining points can still buy in
+the scoped pool, and `strand = (100 - scope) - reachable` is the rest of
+it. At 81/63: mix 0.78, reachable 15, strand 22 — against 0.77 mined from
+the corpus at week level. One division, and the strand is its remainder,
+because both numbers print beside the total they have to add to. No new
+`forecast.cache` field and no schema concern: the inputs are already on
+screen.
+
+**A new `+` notice at rank 58.** `fb ~22% expires at this mix`, and in
+full: `7d caps before fb: this mix reaches ~15% of its 37% left · run fb
+heavier to extract more`. Above the 5h tail, below the fleet hint, and it
+can never outrank the 7d pressure that causes it — the pairing it was
+built for is the dry warning pinned on row 2 with the strand flashing on
+row 3. It is the mirror of `fb 91% vs 7d 55%` and the two cannot coexist:
+that one needs the model ahead of the account, this one needs the account
+ahead of the model.
+
+**Gates, because a ratio is easy to say and easy to get wrong.** One wall
+(`SCOPE_SAME_WALL_SEC = 120`: the pools have always reset together to the
+microsecond, but Anthropic could split them, and a ratio across two
+different weeks is a fluent lie); the account at 60% or deeper, where
+"which cap binds" is a question at all; the model at 5% or more, since a
+model untouched this week belongs to the underuse voice; both pools under
+100; ten stranded points or more; and the 7d window past the young guard
+every projection shares. Two mutes on top, statusline-only: a projected
+scoped cap, because "fb caps first" and "fb strands" cannot both be true
+in one frame, and a live re-base, which just moved one of the two counters
+for a reason the ratio cannot see.
+
+**`report` prices the same thing in the other currency.** One line after
+the price and spend block: `fb mix: ~0.78 fb-pt per 7d-pt this week ·
+7d's 19% left carries ~15% of fb's 37%`. No session runs there to name a
+model, so it takes the binding scoped limit, else the deepest.
+
+The four constants are shared rules, not local thresholds:
+`SCOPE_STRAND_MIN_PCT`, `SCOPE_MIX_MIN_7D`, `SCOPE_MIX_MIN_SCOPE` and
+`SCOPE_SAME_WALL_SEC` are documented in `docs/api/state-dir.md` as
+READING RULES computed live rather than cache fields, and ccpace v0.5.0
+ships the same four with the same closed forms. The coupling in the other
+direction — what a scoped point costs the account — stays unpublished:
+n=22 in a 0.2-0.5 band is fluent enough to be believed and too noisy to
+be true.
+
 ## v0.36.0 — 2026-09-01 — the night is not runway
 
 **The forecast learns when you work, not just how much.** Claude Code can

@@ -161,6 +161,9 @@ fb capped ~Thu 07:00     the running model is gone until then
 last 5h of the week      no later window exists to spend the remainder through
 fb 91% vs 7d 55%         the MODEL caps first, not the account: switch, and the
                          week's remaining capacity comes back
+fb ~22% expires          the ACCOUNT caps first: at this week's mix the 7d pool
+                         runs out before the model's does, and what it cannot
+                         reach expires unspent
 5h ~40m left             throughput you cannot bank — said only while the week
                          has slack, since an unspent 5h window is otherwise
                          headroom, not waste

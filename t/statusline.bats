@@ -1306,6 +1306,42 @@ _write_ledger_fixture() { # dir
     rm -rf "$tmpdir"
 }
 
+@test "run_usage_report: what a 7d point buys in the pool beside it" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    _write_ledger_fixture "$tmpdir"
+    reset=$(date -u -d '+2 days' '+%Y-%m-%dT%H:%M:%SZ')
+    _uc() { # seven, then each scoped limit as pct:model:is_active
+        local seven="$1" lim="" t p n a
+        shift
+        for t in "$@"; do
+            IFS=: read -r p n a <<<"$t"
+            lim="${lim:+$lim,}$(printf '{"kind":"weekly_scoped","percent":%s,"resets_at":"%s","scope":{"model":{"display_name":"%s"}},"is_active":%s}' \
+                "$p" "$reset" "$n" "$a")"
+        done
+        printf '{"seven_day":{"utilization":%s,"resets_at":"%s"},"limits":[%s]}' \
+            "$seven" "$reset" "$lim" > "$tmpdir/usage.cache"
+    }
+    # nothing scoped in the payload: no second pool, no ratio
+    _uc 81
+    run run_usage_report 28
+    [[ "$output" != *"mix:"* ]]
+    # 81 against 63: 19 account points left carry 15 of the 37 the model has
+    _uc 81 "63:Fable:false" "20:Opus:false"
+    run run_usage_report 28
+    [[ "$output" == *"fb mix: ~0.78 fb-pt per 7d-pt this week · 7d's 19% left carries ~15% of fb's 37%"* ]]
+    # no session runs here, so no model to match: the binding limit wins over
+    # the deeper one
+    _uc 81 "63:Fable:false" "20:Opus:true"
+    run run_usage_report 28
+    [[ "$output" == *"op mix: ~0.25 op-pt per 7d-pt this week · 7d's 19% left carries ~5% of op's 80%"* ]]
+    # the account has to be deep enough for "which cap binds" to be a question
+    _uc 50 "30:Fable:false"
+    run run_usage_report 28
+    [[ "$output" != *"mix:"* ]]
+    rm -rf "$tmpdir"
+}
+
 @test "run_usage_report: --days cutoff hides older closes; no history exits 1" {
     tmpdir=$(mktemp -d)
     CLAUDE_ACCOUNT_DIR="$tmpdir"
@@ -4197,6 +4233,98 @@ JSON
     # 75% scoped vs 70% account: the model is not the binding constraint
     usage="{\"five_hour\":{\"utilization\":40},\"seven_day\":{\"utilization\":70,\"resets_at\":\"$reset_7d\"},\"limits\":[{\"kind\":\"weekly_scoped\",\"percent\":75,\"resets_at\":\"$reset_7d\",\"scope\":{\"model\":{\"display_name\":\"Fable\"}}}]}"
     [ -z "$(notice_collect "$usage" auto "claude-fable-5" | awk -F$'\037' '$3 == "fb"')" ]
+}
+
+# One wall, two pools. Default: five days into the week, both counters
+# resetting at the same instant — the shape the mix reading is only ever
+# allowed to speak in.
+_mix_reset() { date -u -d "${1:-+2 days}" '+%Y-%m-%dT%H:%M:%SZ'; }
+_mix_usage() { # seven scope [reset-iso] [scope-wall-skew-secs]
+    local seven="$1" scope="$2" r7="${3:-}" skew="${4:-0}" rfb
+    [ -n "$r7" ] || r7=$(_mix_reset)
+    rfb=$(date -u -d "$r7 + $skew seconds" '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"five_hour":{"utilization":40},"seven_day":{"utilization":%s,"resets_at":"%s"},"limits":[{"kind":"weekly_scoped","percent":%s,"resets_at":"%s","scope":{"model":{"display_name":"Fable"}}}]}' \
+        "$seven" "$r7" "$scope" "$rfb"
+}
+_strand_recs() { notice_collect "$(_mix_usage "$1" "$2" "${3:-}" "${4:-0}")" auto claude-fable-5; }
+_strand_key() { _strand_recs "$@" | awk -F$'\037' '$4 ~ /strand/ { print $4 }'; }
+
+@test "notice_collect: the account caps first, so the model's own pool strands" {
+    # 81 against 63 — the live reading the model was built from. Both
+    # counters run from one reset instant, so the ratio IS this week's mix
+    # (0.78, against 0.77 mined from the corpus): the 19 account points left
+    # carry 15 of the 37 the model still has, and 22 expire unreachable.
+    recs=$(_strand_recs 81 63)
+    _fb() { printf '%s\n' "$recs" | awk -F$'\037' -v n="$1" '$3 == "fb" { print $n }'; }
+    [ "$(_fb 1)" = "58" ]
+    [ "$(_fb 2)" = "+" ]
+    [ "$(_fb 4)" = "fb.strand.4" ]
+    [ "$(_fb 5)" = "~22%" ]
+    [ "$(_fb 6)" = "fb ~22% expires at this mix" ]
+    [ "$(_fb 7)" = "7d caps before fb: this mix reaches ~15% of its 37% left · run fb heavier to extract more" ]
+    # the key re-flashes as the strand grows, like the surplus voice
+    [ "$(_strand_key 81 59)" = "fb.strand.5" ]
+}
+
+@test "notice_collect: every gate the mix reading stands on" {
+    # a week that has barely started: the ratio is two days of noise
+    [ -z "$(_strand_key 81 63 "$(_mix_reset '+6 days 12 hours')")" ]
+    # two walls 5 minutes apart would be a ratio of two different weeks;
+    # the observed jitter between them is seconds
+    [ -z "$(_strand_key 81 63 "" 300)" ]
+    [ -n "$(_strand_key 81 63 "" 60)" ]
+    # a model untouched this week belongs to the underuse voice, not here
+    [ -z "$(_strand_key 81 4)" ]
+    [ -n "$(_strand_key 81 5)" ]
+    # ...and the question only exists once the account's own end is in sight
+    [ -z "$(_strand_key 59 30)" ]
+    [ -n "$(_strand_key 60 30)" ]
+    # under 10 points there is nothing to act on
+    [ -z "$(_strand_key 70 64)" ]
+    [ -n "$(_strand_key 70 63)" ]
+    # either pool at 100 is its own notice, and neither is a mix
+    [ -z "$(_strand_key 81 100)" ]
+    [ -z "$(_strand_key 100 63)" ]
+}
+
+@test "notice_collect: a model projected to cap first cannot also be stranding" {
+    # 85 against 95 five days in: the linear scoped pace hits the model's own
+    # cap a day before its reset, so the frame already says fb runs out
+    r=$(_mix_reset)
+    [[ "$(notice_collect "$(_mix_usage 95 85 "$r")" auto claude-fable-5 \
+        | awk -F$'\037' '$3 == "fb" { print $4 }')" == fb.caps.* ]]
+    [ -z "$(_strand_key 95 85 "$r")" ]
+    # the same two numbers with the wall 20h out: the projection no longer
+    # reaches the cap, and what the account cannot spend strands again
+    [ "$(_strand_key 95 85 "$(_mix_reset '+20 hours')")" = "fb.strand.2" ]
+}
+
+@test "notice_collect: the mix stays quiet while the denominator is suspect" {
+    tmpdir=$(mktemp -d)
+    export CLAUDE_ACCOUNT_DIR="$tmpdir"
+    r=$(_mix_reset)
+    # first sight of the window, then 78 -> 65 inside it. A plan change moved
+    # one of the two counters for a reason the ratio cannot see.
+    notice_collect "$(_mix_usage 78 40 "$r")" auto claude-fable-5 >/dev/null
+    recs=$(notice_collect "$(_mix_usage 65 40 "$r")" auto claude-fable-5)
+    [ -n "$(printf '%s\n' "$recs" | awk -F$'\037' '$4 ~ /rebase/')" ]
+    [ -z "$(printf '%s\n' "$recs" | awk -F$'\037' '$4 ~ /strand/')" ]
+    # once the re-base is no longer newsworthy the same frame speaks
+    rm -f "$tmpdir/seven_seen"
+    [ "$(_strand_key 65 40 "$r")" = "fb.strand.7" ]
+    unset CLAUDE_ACCOUNT_DIR
+    rm -rf "$tmpdir"
+}
+
+@test "notice_collect: the wall pins the row, the strand it causes flashes" {
+    state=$(mktemp -d)/notice_seen
+    recs=$(_strand_recs 81 63)
+    # the account wall is the pressure and owns row 2; the strand is its
+    # consequence, and a consequence never outranks its cause
+    [[ "$(strip_ansi "$(notice_pin_line "$recs")")" == "! 7d caps ~"* ]]
+    flash=$(strip_ansi "$(notice_flash_line "$recs" "$state" "$(date +%s)")")
+    [[ "$flash" == "+ 7d caps before fb: this mix reaches ~15%"* ]]
+    rm -rf "$(dirname "$state")"
 }
 
 @test "notice_collect: 7d falling inside one window reads as a re-base, not as burn" {
