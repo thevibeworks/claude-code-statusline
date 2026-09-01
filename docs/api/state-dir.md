@@ -7,7 +7,7 @@ read concurrently.
 
 - Contract version: **2** (bump on any breaking layout/field change; this
   file is the changelog)
-- Synced with: statusline.sh v0.37.0
+- Synced with: statusline.sh v0.38.0
 - Permissions: the script runs under `umask 077` — files are owner-only.
   Caches hold account PII (email, uuid, org names).
 
@@ -250,6 +250,16 @@ shape is learned, `windows_ahead >= 1`, and `awake < windows_ahead` — an
 equal count would spend a clause to say nothing. At `awake == 0` both the
 awake clause and the ration that would divide by it go away; the landing
 still speaks.
+
+A REST SLOT is a ledger cell you sleep through: fewer than
+`REST_SLOT_AWAKE_MIN_SECS = 9000` awake seconds in its 5h span — under
+half the cell, the break-even a reader can hold in their head. Both
+ledgers (this statusline's week strip, ccpace's block) draw such a future
+cell as a dim `▯`; the general rule is half the cell, which is how the 5h
+strip applies it to 1h cells (1800). `×` outranks the tint — a cell the
+pool cannot cover is unusable for a stronger reason — and the dim count
+may sit one off the sentence's `~N awake`: cells are grid slots, the
+sentence is clocks, the same one-cell tolerance the fold count carries.
 
 `scoped_*` mirror the all-model fields for the `weekly_scoped` limit —
 the per-model weekly cap, `Fable` at time of writing. `scoped_name` is

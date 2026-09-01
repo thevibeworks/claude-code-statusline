@@ -318,14 +318,16 @@ fire.
   left, the last a 3h stub), height = the 7d points that window burned,
   with a thin gap at each local midnight so days read as clusters — and a
   day that held five windows shows it — without a ruler. History draws in
-  full; the future folds as soon as folding hides two cells: two hollow
-  cells after `▮`, then `...▯(✕28)` — 28 more 5h windows **after the one
-  you are in**, all alike (`×` red when the tail projects dry). That count
-  is the budget line's own `~28✕5h left`, priced from the same instant:
-  one row, one arithmetic. The future is one fact and the strip's ink belongs to
-  history; a closing week needs no help to draw to its edge, since four
-  cells or fewer leave nothing worth folding. The `week` subcommand's wide
-  ledger still draws every slot.
+  full; the future folds only while folding pays: with more than ten cells
+  ahead, two hollow cells after `▮`, then `...▯(✕28)` — 28 more 5h windows
+  **after the one you are in** (`×` red when the tail projects dry). That
+  count is the budget line's own `~28✕5h left`, priced from the same
+  instant: one row, one arithmetic. Ten cells or fewer — the last ~2 days
+  of every week — draw in full, because the cells stopped being all alike:
+  once the learned rest model knows your hours, a hollow cell you
+  sleep through most of draws **dim**, so the drawn tail is a shape
+  (tonight, the night, tomorrow morning), not a count. The `week`
+  subcommand's wide ledger still draws every slot.
 
 | Cell | Meaning |
 |------|---------|
@@ -333,7 +335,7 @@ fire.
 | `▁` | the baseline: ran and cost under a point, or ran idle inside the log's coverage. The shortest bar of the same Block Elements run as `▂▃▄`, so the zero line shares their font, width and height — it used to be `ˍ` (U+02CD), a modifier *letter*, which terminals resolve through the text face and which broke the strip's metrics mid-row. Override with `LEDGER_BASE_GLYPH` |
 | `░` | unknown: the log has no sample for that cell (never drawn as idle — a gap in the record is not a quiet session) |
 | `▮` | the cell you are in now |
-| `▯` | a cell still ahead of you — the hollow of `▮`, an empty slot waiting. On the 5h strip the run of them is the hours left in the window |
+| `▯` | a cell still ahead of you — the hollow of `▮`, an empty slot waiting. On the 5h strip the run of them is the hours left in the window. **Dim** when your learned hours say you sleep through most of it (under half the cell awake): capacity on the grid that is not really available. `×` outranks it — unreachable beats asleep — and a reader who cannot see the tint loses nothing actionable: a dim `▯` is still a window ahead |
 | `×` | a cell the pool will not cover at the current pace — **7d only**: the learned forecast's dry point, linear when untrained. The 5h window's wall belongs to the `5h caps ~14:20` notice, which states the time instead of shading cells |
 | `...▯(✕28)` | the folded 7d future: 28 more 5h windows after the one you are in, one token instead of a run of hollow cells (`×` red when the tail ends dry). The count is what the budget line prices — not the number of cells the fold happened to hide |
 | `✕` | not a cell — the multiplication sign, the row's one operator (`...▯(✕28)`, `0.7✕`, `19✕5h left`). Deliberately not `×` (U+00D7), which is already a reading: cells are the ink, the operator is punctuation, and `...×(×28)` has to say both at once. One terminal column and no emoji fallback, so the row still meets line 1's edge; override with `MULT_GLYPH` (`╳` and `✖` look stronger but are ambiguous-width and emoji-presentation respectively) |

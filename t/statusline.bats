@@ -1530,15 +1530,11 @@ _seed_week_store() {
     [[ "$plain" == "7d "* ]]
     strip=$(printf '%s' "${plain#7d }" | sed 's/ [0-9.]*✕ @.*$//; s/ @.*$//')
     bar=$(printf '%s' "$strip" | tr -d ' ')
-    # the live row draws history + ▮ + WEEK_FUTURE_KEEP and folds the rest;
-    # the grid it draws them on is still 34 cells (`week` renders all of it)
-    [[ "$bar" =~ ^(.*)\.\.\.▯\(✕[0-9]+\)$ ]]
-    drawn="${BASH_REMATCH[1]}"
-    seven_secs=$(get_reset_seconds "$(jq -r .seven_day.resets_at "$tmpdir/usage.cache")")
-    ps=$(week_period_start "$(date +%s)" "$seven_secs")
-    nowslot=$(( ($(date +%s) - ps) / 18000 ))
-    [ "$(printf '%s' "$drawn" | grep -o . | wc -l)" -eq $((nowslot + 1 + WEEK_FUTURE_KEEP)) ]
-    [ $((nowslot + 1 + WEEK_FUTURE_KEEP)) -lt 34 ]
+    # 31h from the reset there are six cells ahead — ten or fewer draw in
+    # full (WEEK_FUTURE_UNFOLD_MAX), so the whole 34-cell grid shows; the
+    # mid-week fold has its own test on a five-day frame
+    [[ "$bar" =~ ▮▯+$ ]]
+    [ "$(printf '%s' "$bar" | grep -o . | wc -l)" -eq 34 ]
     [[ "$bar" =~ [▂▃▄▅▆▇█]▁[▂▃▄▅▆▇█] ]]
     [[ "$bar" == *▮* ]]
     # day gaps: single spaces inside the strip, several of them across a week
@@ -1795,11 +1791,12 @@ _seed_week_store() {
     rm -rf "$tmpdir"
 }
 
-@test "build_week_row: the future folds as soon as it hides two cells" {
-    # The threshold is not a column break-even. The future is one fact — the
-    # count — and mid-week, when a pressure notice owns the pin, this row is
-    # the only place the remaining windows appear. Eleven hollow cells read as
-    # "too much future" long before they were expensive.
+@test "build_week_row: the future folds only when folding pays" {
+    # The fold's old rule ("as soon as it hides two cells") served "the
+    # future is one fact"; the rest tint superseded that — future cells now
+    # carry a shape — so what remains of the fold is column economy: a tail
+    # of WEEK_FUTURE_UNFOLD_MAX cells or fewer costs no more drawn in full
+    # than the nine-column token that would replace it.
     tmpdir=$(mktemp -d)
     CLAUDE_ACCOUNT_DIR="$tmpdir"
     now=$(date +%s)
@@ -1809,15 +1806,104 @@ _seed_week_store() {
         local p; p=$(strip_ansi "$(build_week_row "$u" always)" | sed 's/ [0-9.]*✕ @.*$//; s/ @.*$//' | tr -d ' ')
         printf '%s' "${p#*▮}"
     }
-    # ~6 windows left: KEEP=2 drawn, the rest folded and counted
+    # ~6 windows left: cheaper drawn than folded, so every cell shows
     six=$(_tail_of $((now + 6 * 18000 - 3600)))
-    [[ "$six" =~ ^▯▯\.\.\.▯\(✕([0-9]+)\)$ ]]
-    [ "${BASH_REMATCH[1]}" -eq 6 ]
-    # the last cells of the week: with one cell to hide the fold would spend
-    # more ink than it saves, so the strip draws to its edge
+    [[ "$six" != *"..."* ]]
+    [[ "$six" =~ ^▯{5,7}$ ]]
+    # ~13 windows left: the tail is wider than the token, so it still folds
+    # to KEEP=2 cells and the count
+    mid=$(_tail_of $((now + 13 * 18000 - 3600)))
+    [[ "$mid" =~ ^▯▯\.\.\.▯\(✕([0-9]+)\)$ ]]
+    [ "${BASH_REMATCH[1]}" -eq 13 ]
+    # the last cells of the week: nothing to fold at all
     close=$(_tail_of $((now + 18000 + 600)))
     [[ "$close" != *"..."* ]]
     [[ "$close" =~ ^▯{0,3}$ ]]
+    rm -rf "$tmpdir"
+}
+
+# Mark dim runs so a test can assert WHERE the tint sits, not just that some
+# escape exists: {D} opens dim, {R} is the reset that closes every run.
+_mark_dim() {
+    printf '%s' "$1" | sed -e $'s/\x1b\\[2m/{D}/g' -e $'s/\x1b\\[0m/{R}/g' \
+        -e $'s/\x1b\\[[0-9;]*m//g'
+}
+
+@test "build_week_strip: the unfold boundary is the fold token's own width" {
+    # F = cells after ▮ on the 34-cell grid. Ten or fewer draw in full;
+    # eleven is the first tail wider than the token and folds.
+    local ps now10 now11 t10 t11
+    ps=$(( ($(date +%s) / 86400 - 6) * 86400 ))
+    now10=$((ps + 23 * 18000 + 100))     # nowslot 23 -> F = 10
+    now11=$((ps + 22 * 18000 + 100))     # nowslot 22 -> F = 11
+    t10=$(strip_ansi "$(build_week_strip 50 "$now10" "$ps" -1 "" 2 10 "")")
+    t11=$(strip_ansi "$(build_week_strip 50 "$now11" "$ps" -1 "" 2 11 "")")
+    [[ "$t10" != *"..."* ]]
+    [[ "$t11" == *"...▯(✕11)"* ]]
+}
+
+@test "build_week_strip: a cell you sleep through draws dim" {
+    # ps at UTC midnight; rest hours 0-8 (mult 0.1), awake 9-23. nowslot 27
+    # puts six cells ahead: 20:00 (4h awake, plain), 01:00 (rest, dim),
+    # 06:00 (2h awake < half the cell, dim), then three daytime cells plain.
+    local mults="0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 1.54 1.54 1.54 1.54 1.54 1.54 1.54 1.54 1.54 1.54 1.54 1.54 1.54 1.54 1.54"
+    local ps now out
+    ps=$(( ($(date +%s) / 86400 - 6) * 86400 ))
+    now=$((ps + 27 * 18000 + 100))
+    out=$(_mark_dim "$(TZ=UTC build_week_strip 50 "$now" "$ps" -1 "" 2 6 "$mults")")
+    [[ "${out#*▮}" == "{R}▯{R}{D}▯▯{R}▯▯▯{R}" ]]
+}
+
+@test "build_week_strip: × outranks rest — unreachable beats asleep" {
+    local mults="0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 1.54 1.54 1.54 1.54 1.54 1.54 1.54 1.54 1.54 1.54 1.54 1.54 1.54 1.54 1.54"
+    local ps now raw
+    ps=$(( ($(date +%s) / 86400 - 6) * 86400 ))
+    now=$((ps + 27 * 18000 + 100))
+    raw=$(TZ=UTC build_week_strip 50 "$now" "$ps" 31 "" 2 6 "$mults")
+    # the dry wall keeps its glyph and its red: no dim × anywhere
+    [[ "$(strip_ansi "$raw")" == *"×××"* ]]
+    [[ "$raw" != *$'\033[2m×'* ]]
+    # and the rest cells before it still dim
+    [[ "$(_mark_dim "$raw")" == *"▯{R}{D}▯▯{R}×××"* ]]
+}
+
+@test "build_week_strip: unlearned, every future cell stays plain" {
+    local ps now raw
+    ps=$(( ($(date +%s) / 86400 - 6) * 86400 ))
+    now=$((ps + 27 * 18000 + 100))
+    raw=$(TZ=UTC build_week_strip 50 "$now" "$ps" -1 "" 2 6 "")
+    # no dim escape anywhere after the now-marker (history ░ cells are dim
+    # by design and sit before it)
+    [[ "${raw#*▮}" != *$'\033[2m'* ]]
+}
+
+@test "build_five_strip: hollow hours you sleep through draw dim" {
+    # a 22:00-03:00 UTC window, two hours in: the hours ahead are 01:00 and
+    # 02:00, both rest — the window outlives the evening and the strip says so
+    local mults="0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 1.54 1.54 1.54 1.54 1.54 1.54 1.54 1.54 1.54 1.54 1.54 1.54 1.54 1.54 1.54"
+    local fps fnow out
+    fps=$(( ($(date +%s) / 86400 - 1) * 86400 + 22 * 3600 ))
+    fnow=$((fps + 2 * 3600 + 60))
+    out=$(_mark_dim "$(TZ=UTC build_five_strip 40 "$fnow" "$fps" "" 10740 "$mults")")
+    [[ "${out#*▮}" == "{R}{D}▯▯{R}" ]]
+}
+
+@test "build_week_strip: the tint flows from the learned cache, gated on history" {
+    # No mults argument: the builder reads hour_profile_mults, which refuses
+    # a cache younger than 14 days — the same evidence gate every learned
+    # surface waits behind.
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    local hp ps now
+    hp='{"0":0.1,"1":0.1,"2":0.1,"3":0.1,"4":0.1,"5":0.1,"6":0.1,"7":0.1,"8":0.1,"9":1.54,"10":1.54,"11":1.54,"12":1.54,"13":1.54,"14":1.54,"15":1.54,"16":1.54,"17":1.54,"18":1.54,"19":1.54,"20":1.54,"21":1.54,"22":1.54,"23":1.54}'
+    ps=$(( ($(date +%s) / 86400 - 6) * 86400 ))
+    now=$((ps + 27 * 18000 + 100))
+    printf '{"days_history":21,"hour_profile":%s}\n' "$hp" >"$tmpdir/forecast.cache"
+    learned=$(TZ=UTC build_week_strip 50 "$now" "$ps" -1 "" 2 6)
+    [[ "${learned#*▮}" == *$'\033[2m▯'* ]]
+    printf '{"days_history":5,"hour_profile":%s}\n' "$hp" >"$tmpdir/forecast.cache"
+    young=$(TZ=UTC build_week_strip 50 "$now" "$ps" -1 "" 2 6)
+    [[ "${young#*▮}" != *$'\033[2m'* ]]
     rm -rf "$tmpdir"
 }
 

@@ -99,11 +99,15 @@ the badge states the end (`5h[38%@23:00]`) and the notice names the wall
 (`5h caps ~14:20`). Cells carry the shape, badges carry state, notices do
 the warning. History draws in full; the live row folds the 7d future
 after two kept cells into `...▯(x14)` — the 5h windows *after* the one
-you are in, all alike, `×` red when the tail projects dry (the `week`
+you are in, `×` red when the tail projects dry (the `week`
 report still draws every slot). The count is the budget line's own,
-priced from the same instant, and it folds as soon as folding hides two
-cells: the future is one fact, and the ink belongs to history. Each strip
-ends
+priced from the same instant. The fold pays only while the tail is wider
+than its own token: ten cells or fewer draw in full, because the future
+stopped being one fact the day the cells learned your rhythm — a hollow
+cell you sleep through most of draws *dim*, so the drawn tail is a shape
+(tonight, the night, tomorrow morning), not a run of identical slots.
+Unlearned, every `▯` stays plain and only the fold rule changes. Each
+strip ends
 with its pace (used ÷ elapsed; dim <1x, pressure ≥1x, hidden until 5% of the
 window has run) and the reset its right edge is — axis labels, not restated
 badges.
@@ -113,8 +117,11 @@ badges.
 ▁          baseline: ran, negligible — the shortest bar of the same block
 ░          unknown — no sample; never drawn as idle
 ▮          now
-▯          ahead — the hollow of ▮; on 5h, the hours left in the window
-...▯(x14)  the folded future: 14 more 5h windows after this one (live 7d row)
+▯          ahead — the hollow of ▮; on 5h, the hours left in the window;
+           dim when your learned hours say you sleep through most of it
+           (× outranks it: unreachable beats asleep)
+...▯(x14)  the folded future: 14 more 5h windows after this one (live 7d
+           row, only while the tail is wider than this token)
 ×          pace won't cover it (7d only: learned forecast, linear when cold)
 ```
 

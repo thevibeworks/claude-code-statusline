@@ -2109,6 +2109,13 @@ SCOPE_STRAND_MIN_PCT=10          # scoped points the mix strands before it is wo
 SCOPE_MIX_MIN_7D=60              # ...and only once the account's own end is in sight
 SCOPE_MIX_MIN_SCOPE=5            # a model untouched this week is the underuse voice's job
 SCOPE_SAME_WALL_SEC=120          # resets this close are one wall; further apart, no ratio
+# A 5h ledger slot is a NIGHT when under half of it is waking time (awake
+# seconds < 9000, hours with mult >= REST_MULT_MAX). Half is the break-even a
+# reader can hold in their head: more asleep than awake and the slot is
+# capacity you will not reach. Shared with ccpace (docs/api/state-dir.md) so
+# both ledgers dim the same cells; the strip applies the same half-the-cell
+# rule to its 1h cells, where the threshold is 1800.
+REST_SLOT_AWAKE_MIN_SECS=9000
 
 # Rotate usage.jsonl when it exceeds the cap. Single .1 backup; the profile
 # builder reads .1 + current, so rotation never costs learned history.
@@ -2979,7 +2986,7 @@ run_session_summary() {
 #   ▁         ran, burned under a point — the baseline
 #   ░         unknown: no samples on record for that window
 #   ▮         the window you are in now
-#   ▯         a window still ahead of you
+#   ▯         a window still ahead of you (dim: one you likely sleep through)
 #   ×         a window the pool will not cover at the current pace
 # The report draws every slot, so what follows ▮ IS the budget line's
 # "~N✕5h left" laid out cell by cell — ▮ itself is where you are, not a
@@ -3002,7 +3009,16 @@ run_session_summary() {
 #             modifier letter used to sit here and broke the row's metrics.
 #   ░         unknown — outside the sample log's coverage
 #   ▮         the cell you are in now
-#   ▯         a cell still ahead of you (the hollow of ▮: an empty slot)
+#   ▯         a cell still ahead of you (the hollow of ▮: an empty slot);
+#             DIM when the learned rhythm says you sleep through most of it —
+#             capacity on the grid that is not really available. The one
+#             refinement this row carries by tint alone, and the one place
+#             that is honest: a dim ▯ is still a window ahead, so a reader
+#             who cannot see the tint loses nothing actionable. × outranks
+#             it — a cell the pool cannot cover is unusable for a stronger
+#             reason — and the dim count may sit one off the budget's
+#             "~N awake": these are grid slots, the sentence is clocks, the
+#             same one-cell tolerance the fold count documents below.
 #   ×         a cell the pool will not cover at the current pace — 7d only
 #   ...▯(✕11) the folded future: 11 more 5h windows AFTER the one you are in,
 #             all alike (× red when the tail projects dry) — live 7d strip
@@ -3035,15 +3051,20 @@ WEEK_CACHE_TTL_SECS=300
 # keeps WEEK_FUTURE_KEEP hollow cells, then folds the rest into `...▯(✕11)`
 # (count = windows_ahead, the 5h windows after this one; × red when the tail
 # projects dry).
-# History is information; the future is one fact, and the fact is the count.
-# The threshold is 2, not a column break-even: eleven hollow cells were
-# measured to read as "too much future" long before they were expensive, and
-# the count is the part that has to survive mid-week, when a pressure notice
-# owns the pin and this row is the only place the remaining windows appear.
-# A closing week still draws to its edge without help — four cells or fewer
-# leave nothing worth folding.
+# "History is information; the future is one fact" was this fold's original
+# argument, and the rest tint SUPERSEDED it: future cells now carry which
+# windows the reader is awake for, so the future is a shape, not one fact.
+# What remains of the fold is column economy. The token `...×(✕11)` is nine
+# columns; hiding fewer cells than that pays nothing, so a future of
+# WEEK_FUTURE_UNFOLD_MAX cells or fewer draws in full — the last ~2 days of
+# every week — and only the long early-week run still folds. The old
+# measurement stands where it was made: 30 hollow cells DO read as "too much
+# future", and the count is still the part that has to survive mid-week,
+# when a pressure notice owns the pin and this row is the only place the
+# remaining windows appear.
 WEEK_FUTURE_KEEP=2
 WEEK_FUTURE_MIN_HIDE=2
+WEEK_FUTURE_UNFOLD_MAX=10
 
 # The period start on the same 5-min grid the window keys are rounded to.
 # resets_at is jittered by the API (15:59:59.76 one fetch, 16:00:00.47 the
@@ -3196,13 +3217,15 @@ week_dry_slot() {
 # windows AHEAD of the current one, counted from real clocks by the caller;
 # the strip must not re-derive it, since a 34-cell grid spans 170h against a
 # 168h period and a count read off the drawing disagrees with the budget
-# sentence beside it — and finally an optional now-cell (-1: derive it from
-# the period start, which is what a grid-aligned strip wants).
+# sentence beside it — an optional now-cell (-1: derive it from
+# the period start, which is what a grid-aligned strip wants), and finally
+# the learned hour multipliers ("" unlearned): with them, a future ▯ whose
+# cell is mostly rest hours draws dim (see REST_SLOT_AWAKE_MIN_SECS).
 # Cells and gaps come out of one awk so the row is one string with a color
 # run per role.
 build_ledger_strip() {
     local pct="$1" now="$2" ps="$3" dry="$4" hist="$5" cells_n="$6" cell_secs="$7" gaps="${8:-0}" fut="${9:-0}"
-    local nleft="${10:-0}" nowslot_in="${11:--1}"
+    local nleft="${10:-0}" nowslot_in="${11:--1}" mults="${12:-}"
     local span_lo="" span_hi="" cells=""
     [ -n "$hist" ] && read -r span_lo span_hi cells <<<"$hist"
     local fill_color tzoff_s
@@ -3210,8 +3233,9 @@ build_ledger_strip() {
     tzoff_s=$(date +%z | awk '{ s=substr($0,1,1)=="-"?-1:1; h=substr($0,2,2)+0; m=substr($0,4,2)+0; print s*(h*3600+m*60) }')
     awk -v w="$cells_n" -v cs="$cell_secs" -v ps="$ps" -v now="$now" -v dry="$dry" \
         -v gaps="$gaps" -v tz="$tzoff_s" -v fut="$fut" \
-        -v minhide="$WEEK_FUTURE_MIN_HIDE" -v nleft="$nleft" -v mult="$MULT_GLYPH" \
-        -v nsin="$nowslot_in" \
+        -v minhide="$WEEK_FUTURE_MIN_HIDE" -v unfoldmax="$WEEK_FUTURE_UNFOLD_MAX" \
+        -v nleft="$nleft" -v mult="$MULT_GLYPH" \
+        -v nsin="$nowslot_in" -v mults="$mults" -v restmult="$REST_MULT_MAX" \
         -v lo="${span_lo:--1}" -v hi="${span_hi:--1}" -v cells="$cells" \
         -v C_FILL="$fill_color" -v C_DIM="$DIM" -v C_NOW="$BOLD" \
         -v C_DRY="$RED" -v C_OFF="$RESET" -v BASE="$LEDGER_BASE_GLYPH" '
@@ -3225,15 +3249,33 @@ build_ledger_strip() {
             if (c <= 11) return "▅"; if (c <= 15) return "▆"
             if (c <= 20) return "▇"; return "█"
         }
+        # Awake seconds of the cell starting at t0: the same hour arithmetic
+        # awake_secs walks, inlined because a fork per cell is 34 forks per
+        # render. hm[] is 1-based (split); an empty mults string leaves
+        # have_rest 0 and no cell ever asks.
+        function cell_awake(t0,    t2, end2, lt2, seg2, aw2) {
+            end2 = t0 + cs; aw2 = 0; t2 = t0
+            while (t2 < end2) {
+                lt2 = t2 + tz
+                seg2 = t2 + 3600 - (lt2 % 3600)
+                if (seg2 > end2) seg2 = end2
+                if (hm[int((lt2 % 86400) / 3600) + 1] + 0 >= restmult) aw2 += seg2 - t2
+                t2 = seg2
+            }
+            return aw2
+        }
         BEGIN {
             n = split(cells, a, ",")
             for (i = 1; i <= n; i++) { split(a[i], kv, ":"); cost[kv[1]] = kv[2] }
+            have_rest = (split(mults, hm, " ") == 24)
             nowslot = (nsin >= 0 ? nsin : int((now - ps) / cs))
-            # fold the future tail: everything past the kept cells is the
-            # same hollow slot, so name it once with a count instead of
-            # drawing it N times
+            # fold the future tail — but only when folding pays: the token is
+            # nine columns, and a future of unfoldmax cells or fewer costs no
+            # more drawn in full while carrying the rest shape the token
+            # cannot (see WEEK_FUTURE_UNFOLD_MAX)
             lim = w
-            if (fut > 0 && nleft > 0 && w - (nowslot + 1 + fut) >= minhide)
+            if (fut > 0 && nleft > 0 && w - (nowslot + 1) > unfoldmax \
+                && w - (nowslot + 1 + fut) >= minhide)
                 lim = nowslot + 1 + fut
             s = ""; prev = ""; pday = -1
             for (i = 0; i < lim; i++) {
@@ -3255,7 +3297,14 @@ build_ledger_strip() {
                     else                                        { g = "░"; c = C_DIM }
                 } else if (i == nowslot)                        { g = "▮"; c = C_NOW }
                 else if (dry >= 0 && i >= dry)                  { g = "×"; c = C_DRY }
-                else                                            { g = "▯"; c = "" }
+                else {
+                    # a window still ahead — dim when the learned rhythm says
+                    # the reader sleeps through most of it (under half the
+                    # cell awake). × above outranks this: unreachable beats
+                    # asleep. Unlearned, every ▯ stays plain.
+                    g = "▯"; c = ""
+                    if (have_rest && 2 * cell_awake(start) < cs) c = C_DIM
+                }
                 if (c != prev) { s = s C_OFF c; prev = c }
                 s = s g
             }
@@ -3277,9 +3326,13 @@ build_ledger_strip() {
 # 7d strip: 34 ✕ 5h cells from the period start, day-gapped. $5 is
 # week_history_cells' line; $6 folds the future tail after that many kept
 # cells (the live row passes WEEK_FUTURE_KEEP; the `week` report draws all and
-# never folds); $7 is windows_ahead, the number the fold token prints.
+# never folds); $7 is windows_ahead, the number the fold token prints. $8 is
+# a test seam: the hour multipliers, read from the learned profile when the
+# caller does not say (an UNSET $8, not an empty one — "" is how a test
+# states "unlearned" against a fixture that would otherwise speak).
 build_week_strip() {
-    build_ledger_strip "$1" "$2" "$3" "$4" "$5" "$WEEK_CELLS" 18000 1 "${6:-0}" "${7:-0}"
+    local mults="${8-$(hour_profile_mults)}"
+    build_ledger_strip "$1" "$2" "$3" "$4" "$5" "$WEEK_CELLS" 18000 1 "${6:-0}" "${7:-0}" -1 "$mults"
 }
 
 # 5h strip: the five hours of the current window, always all five. $4 is
@@ -3292,6 +3345,11 @@ build_week_strip() {
 # reflow every hour, which is the difference between an axis and a bar that
 # grows at you.
 #
+# A dim hollow hour is NOT a forecast of the pool — it is the reader's own
+# learned rhythm (an hour they are usually asleep for), the same rule the 7d
+# cells apply at half-the-cell: for a 1h cell that is 1800 awake seconds.
+# `▃▮▯▯▯` with the last two dim says the window outlives the evening.
+#
 # ▮ rides the real clock, not the grid. five_period_start rounds to 5 minutes
 # so week_scan's cache key holds still across renders (a resets_at that jitters
 # by a second would re-run a whole-log jq pass every render), and that rounding
@@ -3303,7 +3361,8 @@ build_five_strip() {
     local nowslot=$(( 4 - ${5:-0} / 3600 ))
     [ "$nowslot" -lt 0 ] && nowslot=0
     [ "$nowslot" -gt $((FIVE_CELLS - 1)) ] && nowslot=$((FIVE_CELLS - 1))
-    build_ledger_strip "$1" "$2" "$3" -1 "$4" "$FIVE_CELLS" "$FIVE_CELL_SECS" 0 0 0 "$nowslot"
+    local mults="${6-$(hour_profile_mults)}"
+    build_ledger_strip "$1" "$2" "$3" -1 "$4" "$FIVE_CELLS" "$FIVE_CELL_SECS" 0 0 0 "$nowslot" "$mults"
 }
 
 # Does a history line carry at least one cell BEFORE the now-cell? A single

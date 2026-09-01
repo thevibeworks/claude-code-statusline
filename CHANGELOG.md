@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.38.0 — 2026-09-01 — the future has a shape
+
+**The fold's own argument expired.** "History is information; the future
+is one fact — the count" was true while every hollow cell was identical.
+v0.36.0 taught the cells when you sleep, and a live frame made the cost
+concrete: `▮▯▯...×(✕6)` spends a nine-column token to hide five cells
+that would have said more drawn out. So the fold keeps only the job it
+still does — column economy on the long early-week run — and the rule is
+now break-even: a future of `WEEK_FUTURE_UNFOLD_MAX` (10) cells or fewer
+draws in full, which is the last ~2 days of every week. Above that,
+nothing changes: two kept cells, the counted token, the same number the
+budget line prices. The old measurement stands where it was made — 30
+hollow cells do read as "too much future".
+
+**A cell you sleep through draws dim.** With the learned shape (same
+read validation and 14-day gate as the walk), a future `▯` whose 5h slot
+has fewer than `REST_SLOT_AWAKE_MIN_SECS` (9000) awake seconds — under
+half the cell — dims: capacity on the grid that is not really available.
+The 5h strip applies the same half-the-cell rule to its 1h cells, so
+`▃▮▯▯` with the last two dim says the window outlives your evening. `×`
+outranks the tint (a cell the pool cannot cover is unusable for a
+stronger reason), `▮` and history are untouched, and unlearned every `▯`
+stays plain — the render is byte-identical to v0.37.0 apart from the
+unfold rule. The tint is the one refinement this row carries by color
+alone, and the one place that is honest about it: a dim `▯` is still a
+window ahead, so a reader without the tint loses nothing actionable. The
+dim count may sit one off the budget's `~N awake` — cells are grid
+slots, the sentence is clocks, the same one-cell tolerance the fold
+count has always carried.
+
+Ships with [ccpace](https://github.com/thevibeworks/ccpace) v0.6.0 ("the
+night on the ledger"), which dims the same cells by the same rule;
+`REST_SLOT_AWAKE_MIN_SECS` joins the shared reading rules in
+`docs/api/state-dir.md`. No `forecast.cache` change of any kind.
+
 ## v0.37.0 — 2026-09-01 — what a point buys
 
 **Two pools drain toward one wall and nothing said which one binds.** The
