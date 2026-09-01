@@ -1,5 +1,72 @@
 # Changelog
 
+## v0.36.0 — 2026-09-01 — the night is not runway
+
+**The forecast learns when you work, not just how much.** Claude Code can
+work around the clock; the human cannot, and every projection this script
+made burned flat through the night. The bill came in four places: a
+`7d dry ~Thu 03:00` that is a false alarm at 23:00 and a missed warning at
+09:00; an L1 blend projecting a hot day's rate through eight idle hours;
+"spend it" appearing at 23:00 for a surplus no waking hour can reach; and
+a ration dividing the week by windows you sleep through. The corpus
+already held the answer — burn credited by the envelope pass carries a
+timestamp, and hours that never burn across weeks are rest.
+
+`forecast.cache` gains `hour_profile`: 24 burn multipliers, local hour
+`"0"`..`"23"`, mean 1, so the rate at hour h is `weekday_rate x mult[h]`
+and integrating any whole day reproduces the weekday total exactly. Same
+envelope pass, same 14-day EWMA half-life, and today is excluded from it —
+a day that has only reached noon reports every evening hour as rest. The
+shape is floored at 0.1 and renormalized at BUILD time, so every reader
+sees the same numbers: a rest hour projects a tenth of a uniform hour,
+never zero, which is what the occasional overnight autonomous run costs.
+The field is additive, so `schema` stays 2; ccpace v0.4.0 writes and reads
+the identical model (`docs/api/state-dir.md` is the contract, down to
+`REST_MULT_MAX = 0.25`).
+
+**Absent or broken, the walk is exactly what it was.** The shape is read
+under one validation — 24 keys, each numeric in `[0, 24]`, mean in
+`[0.9, 1.1]`, `days_history >= 14` — and anything else walks flat. A bad
+hour shape narrows no clause and silences nothing; only the weekday guards
+can take the walk's voice away, which is the same division of labour the
+corrupt-profile guard has always had.
+
+**The walk steps hours now, and the L1 blend ends where it says it does.**
+Day-sized steps could not integrate a rate that changes at 08:00. They
+also let the recent-24h blend, once it started mid-day, run to the end of
+the day holding `now + 24h` — up to 47 hours of a hot day's rate on a
+sentence that claims 24. The blend is tested at each hour segment now, so
+it ends at exactly 24h out, and both tools reading this cache walk the
+same horizon. On a calm 10%/day profile with a 40% trailing day, that is
+`lands ~70%` where it used to be `~73%`.
+
+**`~6 awake` beside the window count.** The budget line ends up with three
+clauses and each answers a different question: `budget ~9✕5h left · ~6
+awake · even 3.8%/win · lands ~52%`. The awake count is the windows that
+fall in hours you have actually burned in; it appears only when it cuts
+the calendar count, and it is there to name the denominator beside it —
+`even` divides by the awake windows when the clause is present. A ration
+you can only hit by not sleeping is not a ration. At zero awake windows
+both clauses go and the landing stands alone. Row 2 is unchanged: columns
+are precious, and the strip beside it still counts every window ahead.
+
+**"Spend it" costs awake hours now.** The surplus feasibility check
+(`pct_per_window x time / 5h`, capped by the current window's headroom)
+counts only awake seconds in each leg. The current-window leg keeps its
+own cap; unlearned, the arithmetic is identical to before. A 35% surplus
+with 20 hours to the reset and 22 of the next 24 at rest reads `~35%
+expires even at full burn` instead of `spend it`.
+
+**`report` states the rhythm it walks.** One line, when learned:
+`rhythm: rest ~00:00-08:00 · 16h awake/day (learned)` — the longest
+circular run of rest hours, printed at three or more, because sleep wraps
+midnight and a run cut there reads as two short ones. An account that
+never stops gets `rhythm: no rest learned — burns around the clock`.
+
+Dry warnings need no new words: the shaped walk moves the dry TIME out of
+sleep by itself, which was the early-warning fix all along. The strip fold
+`(✕N)` and the windows-ahead countdown are untouched.
+
 ## v0.35.0 — 2026-08-27 — a directory is where a sample landed, not who it belongs to
 
 **A directory is where a sample landed, not who it belongs to.** The

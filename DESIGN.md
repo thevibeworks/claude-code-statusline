@@ -167,6 +167,23 @@ fb 91% vs 7d 55%         the MODEL caps first, not the account: switch, and the
 ~62% will expire         on pace to strand a large chunk of the subscription
 ```
 
+The budget line is the one sentence with three clauses, and each answers a
+different question:
+
+```
+budget ~9✕5h left · ~6 awake · even 3.8%/win · lands ~52%
+        count       awake       ration         prediction
+```
+
+`~N awake` is how many of those windows fall in hours this account has, week
+after week, actually burned in (`hour_profile`, `mult ≥ 0.25`). It appears
+only when it *cuts* the count, and it is there to name the denominator beside
+it: `even` divides by the awake windows when the clause is present and by all
+of them when it is not. A ration you can only hit by not sleeping is not a
+ration. At zero awake windows both clauses go and the landing stands alone.
+Row 2 is unchanged — it carries the landing, and falls back to the ration
+using the same denominator the long form would.
+
 ## Requests
 
 The API is asked for what the protocol does not hand us, and no more.

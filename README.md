@@ -390,7 +390,7 @@ clauses about one window can never disagree.
 |--------|-----------------------------------|
 | `! fb capped ~Thu 07:00` | The weekly limit scoped to *this session's model* hit 100%: that model is gone until then. The long form names a model that still has room. |
 | `! 5h caps ~05:18` | Linear projection off this window's own pace: you hit the wall before the reset. Long form adds how long you'd sit blocked. |
-| `! 7d dry ~Thu 09:00 · hard stop` | The learned per-weekday burn profile (EWMA over your own history), not a straight line — your heavy Tuesday counts more than an average. Tail says what happens at 100%: extra billing, or a stop. |
+| `! 7d dry ~Thu 09:00 · hard stop` | The learned per-weekday burn profile (EWMA over your own history), not a straight line — your heavy Tuesday counts more than an average, and the learned hour-of-day shape puts the dry point where you are awake to act on it instead of at 03:00. Tail says what happens at 100%: extra billing, or a stop. |
 | `! fb 91% vs 7d 55% · go op` | **The relation** between two badges: the *model* caps before the account does. Switching models buys the week's remaining capacity back; the roomiest other `weekly_scoped` limit in the payload gets named. |
 | `+ 7d rebased 53%→12%` | Utilization fell *inside* one window instance: burn never runs backwards, so this is a plan change or an out-of-band reset. The projections restart; the ledger still draws the old period. |
 | `+ last 5h of the week · 47% unused` | The 7d window resets inside this 5h window: no later window exists to spend the remainder through. |
@@ -398,7 +398,7 @@ clauses about one window can never disagree.
 | `+ 5h ~40m left · 70% unused` | Said only when the *week* is stranding capacity — an unspent 5h window is otherwise headroom, not waste, since the 5h window is a rate limit and not a budget. |
 | `+ ~62% will expire · go heavier` | On pace to strand a large chunk of the subscription. Speaks only to an engaged, unsqueezed session. |
 | `+ work 5h[8%] free` | A sibling account in the same shared home is idle while this one is pinned. |
-| `19✕5h left · lands ~52%` | The calm budget: runway plus the destination. The long form carries all three clauses — `budget ~19✕5h left · even 1.1%/win · lands ~52%` — and names each for what it is: `even N%/win` is the **ration** (spend that per window and the pool lands exactly on 100), `lands ~N%` is the **prediction** (spend like you have been and you end up here). Row 2 keeps the landing, because the count is already drawn on the strip beside it and the ration is surplus ÷ count, but where the week ends up is nowhere else on screen; with no projection yet the row falls back to the ration. 19 counts the windows **after** the one you are in — the window you are inside is where you are, not what you have left, and it is already drawn as `▮` and priced by `5h[38%]`. The count holds steady inside a window and steps down by one at each rollover. It wears no sigil — `!` and `+` interrupt, the week's resting reading does not. |
+| `19✕5h left · lands ~52%` | The calm budget: runway plus the destination. The long form carries all three clauses — `budget ~19✕5h left · ~13 awake · even 1.6%/win · lands ~52%` — and names each for what it is: `even N%/win` is the **ration** (spend that per window and the pool lands exactly on 100), `lands ~N%` is the **prediction** (spend like you have been and you end up here). `~13 awake` is how many of those windows fall in hours you have actually burned in (the learned `hour_profile`); it shows only when it cuts the count, and `even` then divides by it — a ration you can only hit by not sleeping is not a ration. Row 2 keeps the landing, because the count is already drawn on the strip beside it and the ration is surplus ÷ count, but where the week ends up is nowhere else on screen; with no projection yet the row falls back to the ration. 19 counts the windows **after** the one you are in — the window you are inside is where you are, not what you have left, and it is already drawn as `▮` and priced by `5h[38%]`. The count holds steady inside a window and steps down by one at each rollover. It wears no sigil — `!` and `+` interrupt, the week's resting reading does not. |
 
 `--notice off` keeps row 3 quiet; `--advisor off` silences both. `--check`
 and `--week` print the long form, since a terminal command has a whole
@@ -419,6 +419,7 @@ usage report - work (last 28d, 79 samples)
 
 5h windows closed: 3   avg 95% at close   2 hit the cap
 exchange rate: one full 5h window = ~10.46% of the week (~9.6 windows/week, learned)
+rhythm: rest ~00:00-08:00 · 16h awake/day (learned)
 
 week in progress: 5% used, resets Mon 08-03 23:59
 ```

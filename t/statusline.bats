@@ -851,6 +851,203 @@ EOF
     rm -rf "$tmpdir"
 }
 
+# --- the hour shape (rest model) -------------------------------------------
+
+# A valid hour_profile: 24 keys, mean 1, the named local hours at the 0.1
+# floor and the rest sharing what is left. TZ is pinned by every test that
+# uses these, so "hour" means one thing on any host.
+_hour_profile_at() { # comma-separated rest hours
+    awk -v rest="$1" 'BEGIN{
+        n = split(rest, r, ","); rv = 0.1; av = (24 - n * rv) / (24 - n)
+        printf "{"
+        for (i = 0; i < 24; i++) {
+            is = 0
+            for (j = 1; j <= n; j++) if (r[j] + 0 == i) is = 1
+            printf "%s\"%d\":%.4f", (i ? "," : ""), i, (is ? rv : av)
+        }
+        printf "}"
+    }'
+}
+
+# The same, placed relative to the CURRENT local hour: how a test puts the
+# span it asks about inside or outside sleep without owning the clock.
+_hour_profile_from_now() { # offset count
+    local off="$1" n="$2" h0 list="" i
+    h0=$(date +%H); h0=$((10#$h0))
+    for (( i = 0; i < n; i++ )); do list="$list,$(( (h0 + off + i + 48) % 24 ))"; done
+    _hour_profile_at "${list#,}"
+}
+
+_add_hour_profile() { # cache-file profile-json
+    jq -c --argjson h "$2" '. + {hour_profile: $h}' "$1" > "$1.t" && mv "$1.t" "$1"
+}
+
+@test "build_seven_day_profile: learns the hour shape, floored and mean 1" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    export TZ=UTC
+    # The fixture burns twice a day, at +4h and +8h from the hour it was
+    # written in, 12 points then 8. Two hot hours, twenty-two at rest.
+    _write_forecast_fixture "$tmpdir" 21
+    build_seven_day_profile
+    [ "$(jq -r '.hour_profile | length' "$tmpdir/forecast.cache")" = "24" ]
+    mean=$(jq -r '[.hour_profile[]] | add / 24' "$tmpdir/forecast.cache")
+    awk -v m="$mean" 'BEGIN{exit !(m >= 0.99 && m <= 1.01)}'
+    # The floor is the hedge for the occasional overnight autonomous run: a
+    # rest hour projects a tenth of a uniform hour, never zero.
+    [ "$(jq -r '[.hour_profile[] | select(. < 0.05)] | length' "$tmpdir/forecast.cache")" = "0" ]
+    [ "$(jq -r '[.hour_profile[] | select(. > 1)] | length' "$tmpdir/forecast.cache")" = "2" ]
+    # 60% of the burn in one hour is 14.4 uniform hours before the floor
+    # takes its cut and the shape is scaled back to mean 1.
+    top=$(jq -r '[.hour_profile[]] | max' "$tmpdir/forecast.cache")
+    awk -v p="$top" 'BEGIN{exit !(p >= 12 && p <= 14)}'
+    rm -rf "$tmpdir"
+}
+
+@test "build_seven_day_profile: today never trains the hour shape" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    export TZ=UTC
+    _write_forecast_fixture "$tmpdir" 21
+    # 30 points burned an hour ago, in an hour the history has never used. A
+    # day that has only reached noon reports every evening hour as rest, so
+    # today is evidence about burn and never about rhythm.
+    printf '{"timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":60}}\n' \
+        "$(( $(date +%s) - 3600 ))" >> "$tmpdir/usage.jsonl"
+    build_seven_day_profile
+    [ "$(jq -r '[.hour_profile[] | select(. > 1)] | length' "$tmpdir/forecast.cache")" = "2" ]
+    top=$(jq -r '[.hour_profile[]] | max' "$tmpdir/forecast.cache")
+    awk -v p="$top" 'BEGIN{exit !(p >= 12 && p <= 14)}'
+    # ...and the weekday side counted it, untouched by any of this
+    awk -v r="$(jq -r '.recent_24h' "$tmpdir/forecast.cache")" 'BEGIN{exit !(r >= 30)}'
+    rm -rf "$tmpdir"
+}
+
+@test "build_seven_day_profile: a first day of burn publishes no hour shape" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    export TZ=UTC
+    echo '{"account":{"uuid":"acct-A"}}' > "$tmpdir/profile.cache"
+    now=$(date +%s)
+    printf '{"timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":10}}\n' \
+        "$(( now - 7200 ))" > "$tmpdir/usage.jsonl"
+    printf '{"timestamp":%s,"user":{"uuid":"acct-A"},"seven_day":{"utilization":40}}\n' \
+        "$(( now - 3600 ))" >> "$tmpdir/usage.jsonl"
+    build_seven_day_profile
+    # The burn is real and counted; with today excluded there is nothing left
+    # to shape it with, and an absent field is how a reader is told to walk
+    # flat. A shape guessed from one day is worse than none.
+    [ "$(jq -r '.recent_24h' "$tmpdir/forecast.cache")" = "30.00" ]
+    [ "$(jq -r '.hour_profile' "$tmpdir/forecast.cache")" = "null" ]
+    rm -rf "$tmpdir"
+}
+
+@test "_profile_walk: an absent or broken hour shape walks exactly as before" {
+    tmpdir=$(mktemp -d)
+    export TZ=UTC
+    # Pinned clock: the shape makes the walk depend on the hour it runs in,
+    # so a regression test that let the clock move would compare two
+    # different questions.
+    now=$(date -u -d '2026-01-05 22:00:00' +%s)
+    base='{"computed_at":0,"days_history":20,"recent_24h":0,"recent_48h":0,"weekday_profile":{"0":20,"1":20,"2":20,"3":20,"4":20,"5":20,"6":20}}'
+    printf '%s' "$base" > "$tmpdir/forecast.cache"
+    want=$(CLAUDE_ACCOUNT_DIR="$tmpdir" _seven_day_walk 50 432000 "$now")
+    # the release's own numbers, so the baseline cannot drift with the fixture
+    read -r gap end <<<"$want"
+    [ "$gap" -ge 59 ] && [ "$gap" -le 60 ]
+    [ "$end" = "100" ]
+    # mean 3; one key of 24; a value of 30; a value that is not a number; a
+    # shape that is not an object at all. Every one of them walks flat, and
+    # none of them takes the walk's voice away — only the weekday guards do
+    # that.
+    while IFS= read -r bad; do
+        printf '%s' "$base" | jq -c --argjson h "$bad" '. + {hour_profile: $h}' > "$tmpdir/forecast.cache"
+        [ "$(CLAUDE_ACCOUNT_DIR="$tmpdir" _seven_day_walk 50 432000 "$now")" = "$want" ]
+    done <<EOF
+$(_hour_profile_at 0 | jq -c 'map_values(. * 3)')
+{"0":1}
+$(_hour_profile_at 0 | jq -c '.["3"] = 30')
+$(_hour_profile_at 0 | jq -c '.["3"] = "x"')
+$(_hour_profile_at 0 | jq -c '.["3"] = {"a":1}')
+"nonsense"
+EOF
+    rm -rf "$tmpdir"
+}
+
+@test "_profile_walk: the hour shape moves the dry-out out of the night" {
+    tmpdir=$(mktemp -d)
+    export TZ=UTC
+    # 22:00 on a Monday, 5 points left, 24%/day flat: one point an hour.
+    now=$(date -u -d '2026-01-05 22:00:00' +%s)
+    base='{"computed_at":0,"days_history":20,"recent_24h":0,"recent_48h":0,"weekday_profile":{"0":24,"1":24,"2":24,"3":24,"4":24,"5":24,"6":24}}'
+    printf '%s' "$base" > "$tmpdir/forecast.cache"
+    read -r gap _ <<<"$(CLAUDE_ACCOUNT_DIR="$tmpdir" _seven_day_walk 95 259200 "$now")"
+    # Flat, it dries at 03:00 — a false alarm at 23:00 and a missed warning
+    # at 09:00, which is the whole complaint against a flat night.
+    [ "$(date -u -d "@$(( now + 259200 - gap * 3600 ))" '+%H')" -lt 8 ]
+    _add_hour_profile "$tmpdir/forecast.cache" "$(_hour_profile_at 0,1,2,3,4,5,6,7)"
+    read -r gap _ <<<"$(CLAUDE_ACCOUNT_DIR="$tmpdir" _seven_day_walk 95 259200 "$now")"
+    # Shaped, the same 5 points take until after wake: the night burns a
+    # tenth of an hour each, so the crossing lands in the morning.
+    [ "$(date -u -d "@$(( now + 259200 - gap * 3600 ))" '+%H')" -ge 8 ]
+    # ...and over a whole number of days the shape is neutral by
+    # construction: every hour class is covered exactly as often, so the
+    # landing is the weekday total and nothing else.
+    printf '%s' "$base" | jq -c '.weekday_profile |= map_values(10)' > "$tmpdir/forecast.cache"
+    flat=$(CLAUDE_ACCOUNT_DIR="$tmpdir" _seven_day_walk 40 259200 "$now")
+    _add_hour_profile "$tmpdir/forecast.cache" "$(_hour_profile_at 0,1,2,3,4,5,6,7)"
+    [ "$(CLAUDE_ACCOUNT_DIR="$tmpdir" _seven_day_walk 40 259200 "$now")" = "$flat" ]
+    [ "$flat" = "-1 70" ]
+    rm -rf "$tmpdir"
+}
+
+@test "_profile_walk: the L1 blend ends at 24h, not at the end of that day" {
+    tmpdir=$(mktemp -d)
+    export TZ=UTC
+    now=$(date -u -d '2026-01-05 22:00:00' +%s)
+    # Calm 10%/day profile, a hot trailing day at 40%, 10% used, 3 days left.
+    # 24h of blend (40) plus 48h of profile (20) lands on 70. Day steps used
+    # to blend the whole day holding t+24h — 26 hours of hot rate the day
+    # never earned, and 73 on this fixture. The horizon is 24h in both tools
+    # that read this cache.
+    printf '{"computed_at":0,"days_history":20,"recent_24h":40,"recent_48h":0,"weekday_profile":{"0":10,"1":10,"2":10,"3":10,"4":10,"5":10,"6":10}}' > "$tmpdir/forecast.cache"
+    [ "$(CLAUDE_ACCOUNT_DIR="$tmpdir" _seven_day_walk 10 259200 "$now")" = "-1 70" ]
+    # The shape is still neutral over whole days with the blend binding: it
+    # redistributes the hot day, it does not add to it.
+    _add_hour_profile "$tmpdir/forecast.cache" "$(_hour_profile_at 0,1,2,3,4,5,6,7)"
+    [ "$(CLAUDE_ACCOUNT_DIR="$tmpdir" _seven_day_walk 10 259200 "$now")" = "-1 70" ]
+    rm -rf "$tmpdir"
+}
+
+@test "awake_secs: counts only the hours the account is awake for" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    export TZ=UTC
+    now=$(date -u -d '2026-01-05 22:00:00' +%s)
+    printf '{"days_history":20}' > "$tmpdir/forecast.cache"
+    _add_hour_profile "$tmpdir/forecast.cache" "$(_hour_profile_at 0,1,2,3,4,5,6,7)"
+    m=$(hour_profile_mults)
+    # a whole day holds 16 awake hours whatever hour it starts in
+    [ "$(awake_secs "$m" 0 86400 "$now")" = "57600" ]
+    # 22:00 to midnight is all awake; midnight to 08:00 is all rest
+    [ "$(awake_secs "$m" 0 7200 "$now")" = "7200" ]
+    [ "$(awake_secs "$m" 7200 36000 "$now")" = "0" ]
+    # partial hours count as the part they are
+    [ "$(awake_secs "$m" 0 1800 "$now")" = "1800" ]
+    [ "$(awake_secs "$m" 5400 9000 "$now")" = "1800" ]
+    # no live 5h window: the span is the whole remainder, from now
+    [ "$(awake_secs "$m" 0 36000 "$now")" = "7200" ]
+    # a 5h window outlasting the 7d reset leaves no span at all
+    [ "$(awake_secs "$m" 36000 7200 "$now")" = "0" ]
+    # unlearned is not zero: a caller must tell "you sleep through all of it"
+    # from "I do not know when you sleep"
+    [ -z "$(awake_secs "" 0 86400 "$now")" ]
+    printf '{"days_history":13}' > "$tmpdir/forecast.cache"
+    _add_hour_profile "$tmpdir/forecast.cache" "$(_hour_profile_at 0,1,2,3,4,5,6,7)"
+    [ -z "$(hour_profile_mults)" ]
+    rm -rf "$tmpdir"
+}
+
 @test "build_seven_day_profile: hourly gate skips rebuild" {
     tmpdir=$(mktemp -d)
     CLAUDE_ACCOUNT_DIR="$tmpdir"
@@ -1074,6 +1271,38 @@ _write_ledger_fixture() { # dir
     [[ "$output" == *"week in progress: 44% used"* ]]
     # 44% + 4d x 10%/day: lands ~83-84%
     [[ "$output" == *"lands ~8"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "run_usage_report: states the rhythm the walk is shaped by" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    export TZ=UTC
+    _write_ledger_fixture "$tmpdir"
+    base='{"computed_at":0,"days_history":20,"recent_24h":0,"recent_48h":0,"weekday_profile":{"0":10,"1":10,"2":10,"3":10,"4":10,"5":10,"6":10}}'
+    # Unlearned: the report claims no rhythm it has not measured.
+    printf '%s' "$base" > "$tmpdir/forecast.cache"
+    run run_usage_report 28
+    [[ "$output" != *rhythm* ]]
+    printf '%s' "$base" > "$tmpdir/forecast.cache"
+    _add_hour_profile "$tmpdir/forecast.cache" "$(_hour_profile_at 0,1,2,3,4,5,6,7)"
+    run run_usage_report 28
+    [[ "$output" == *"rhythm: rest ~00:00-08:00 · 16h awake/day (learned)"* ]]
+    # Sleep wraps midnight; a run cut there would read as two short ones.
+    printf '%s' "$base" > "$tmpdir/forecast.cache"
+    _add_hour_profile "$tmpdir/forecast.cache" "$(_hour_profile_at 22,23,0,1,2,3,4,5)"
+    run run_usage_report 28
+    [[ "$output" == *"rhythm: rest ~22:00-06:00 · 16h awake/day (learned)"* ]]
+    # An account that never stops, and one whose quiet hours are scattered
+    # rather than slept: neither has a rest block to name.
+    printf '%s' "$base" > "$tmpdir/forecast.cache"
+    _add_hour_profile "$tmpdir/forecast.cache" "$(_hour_profile_at "")"
+    run run_usage_report 28
+    [[ "$output" == *"rhythm: no rest learned — burns around the clock"* ]]
+    printf '%s' "$base" > "$tmpdir/forecast.cache"
+    _add_hour_profile "$tmpdir/forecast.cache" "$(_hour_profile_at 3,9,15)"
+    run run_usage_report 28
+    [[ "$output" == *"rhythm: no rest learned — burns around the clock"* ]]
     rm -rf "$tmpdir"
 }
 
@@ -3761,6 +3990,57 @@ JSON
     rm -rf "$tmpdir"
 }
 
+@test "build_advisor_line: the ration divides by the windows you are awake for" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    export TZ=UTC
+    reset_5h=$(date -u -d '+45 minutes' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_7d=$(date -u -d '+4 days 22 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":20,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":21,\"resets_at\":\"$reset_7d\"}}"
+    printf '{"computed_at":0,"days_history":20,"recent_24h":0,"recent_48h":0,"weekday_profile":{"0":-1,"1":-1,"2":-1,"3":-1,"4":-1,"5":-1,"6":-1}}' > "$tmpdir/forecast.cache"
+    # Unlearned, nothing moves: the ration is surplus over every window.
+    long=$(strip_ansi "$(notice_long_line "$(notice_collect "$usage" always)")")
+    [[ "$long" =~ ^budget\ ~24✕5h\ left\ ·\ even\ 3\.3%/win\ ·\ lands\ ~[0-9]+%$ ]]
+    # Eight hours of sleep a night, starting two hours from now, so the rest
+    # band sits inside the span wherever the clock happens to be.
+    _add_hour_profile "$tmpdir/forecast.cache" "$(_hour_profile_from_now 2 8)"
+    long=$(strip_ansi "$(notice_long_line "$(notice_collect "$usage" always)")")
+    [[ "$long" =~ ^budget\ ~24✕5h\ left\ ·\ ~([0-9]+)\ awake\ ·\ even\ ([0-9.]+)%/win\ ·\ lands\ ~[0-9]+%$ ]]
+    awake="${BASH_REMATCH[1]}" even="${BASH_REMATCH[2]}"
+    # The clause names the denominator beside it, which is what makes the
+    # line self-describing: a third of the week is asleep, so the honest
+    # ration per window you will actually spend is higher.
+    [ "$awake" -lt 24 ] && [ "$awake" -gt 0 ]
+    [ "$even" = "$(awk -v h=79 -v w="$awake" 'BEGIN{printf "%.1f", h/w}')" ]
+    # Row 2 is unchanged — the landing is still the one clause it carries.
+    plain=$(strip_ansi "$(build_advisor_line "$usage" always)")
+    [[ "$plain" =~ ^24✕5h\ left\ ·\ lands\ ~[0-9]+%$ ]]
+    rm -rf "$tmpdir"
+}
+
+@test "build_advisor_line: a window you sleep through takes the ration with it" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    export TZ=UTC
+    # The week ends in 3 hours and every one of them is a rest hour: one
+    # window ahead on the calendar, none you will be at the keyboard for.
+    reset_5h=$(date -u -d '+45 minutes' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_7d=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":20,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":75,\"resets_at\":\"$reset_7d\"}}"
+    printf '{"computed_at":0,"days_history":20,"recent_24h":0,"recent_48h":0,"weekday_profile":{"0":-1,"1":-1,"2":-1,"3":-1,"4":-1,"5":-1,"6":-1}}' > "$tmpdir/forecast.cache"
+    _add_hour_profile "$tmpdir/forecast.cache" "$(_hour_profile_from_now -1 6)"
+    long=$(strip_ansi "$(notice_long_line "$(notice_collect "$usage" always)")")
+    # No `~0 awake` and no ration: zero is not a denominator, and a clause
+    # about the next three hours would be pretending to be one about the
+    # week. Where the week lands still speaks.
+    [[ "$long" =~ ^budget\ ~1✕5h\ left\ ·\ lands\ ~[0-9]+%$ ]]
+    [[ "$long" != *awake* ]]
+    [[ "$long" != *"/win"* ]]
+    plain=$(strip_ansi "$(build_advisor_line "$usage" always)")
+    [[ "$plain" =~ ^1✕5h\ left\ ·\ lands\ ~[0-9]+%$ ]]
+    rm -rf "$tmpdir"
+}
+
 @test "build_advisor_line: hot 5h pace projects the cap wall-clock" {
     # 85% only 2h into the window (3h left): pace ~2.1x, caps well before reset
     reset_5h=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
@@ -4063,6 +4343,27 @@ _write_ppw_fixture() { # dir ppw
     seven=$(CLAUDE_ACCOUNT_DIR="$tmpdir" notice_collect "$usage" auto | awk -F$'\037' '$3 == "7d" { print $6 }')
     [[ "$seven" =~ ^last\ 5h\ of\ the\ week\ ·\ 56%\ unused\ ·\ ~53%\ expires\ even\ at\ full\ burn$ ]]
     [[ "$seven" != *"spend it"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "build_advisor_line: feasibility counts awake hours, not wall hours" {
+    tmpdir=$(mktemp -d)
+    CLAUDE_ACCOUNT_DIR="$tmpdir"
+    export TZ=UTC
+    # ppw=30, a fresh 5h window and 20h of week left: on the clock alone the
+    # 35% surplus is reachable and the line says spend it.
+    _write_ppw_fixture "$tmpdir" 30
+    reset_5h=$(date -u -d '+3 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    reset_7d=$(date -u -d '+20 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":10,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":65,\"resets_at\":\"$reset_7d\"}}"
+    plain=$(strip_ansi "$(build_advisor_line "$usage" auto)")
+    [[ "$plain" =~ ^\+\ 35%\ unused\ ·\ spend\ it$ ]]
+    # Learn that 22 of the next 24 hours are rest and the same clock buys
+    # nothing: "spend it" at 23:00 was advice to burn a third of a week
+    # through eight hours of sleep.
+    _add_hour_profile "$tmpdir/forecast.cache" "$(_hour_profile_from_now -1 22)"
+    plain=$(strip_ansi "$(build_advisor_line "$usage" auto)")
+    [[ "$plain" =~ ^\+\ 35%\ unused\ ·\ ~35%\ expires\ even\ at\ full\ burn$ ]]
     rm -rf "$tmpdir"
 }
 
