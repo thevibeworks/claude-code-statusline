@@ -1854,17 +1854,22 @@ _mark_dim() {
     [[ "${out#*▮}" == "{R}▯{R}{D}▯▯{R}▯▯▯{R}" ]]
 }
 
-@test "build_week_strip: × outranks rest — unreachable beats asleep" {
+@test "build_week_strip: a dry guess may not delete a window" {
+    # The dry projection used to overwrite future cells as red ×, and an
+    # unfolded ▮▯▯▯××× was read as three DELETED windows (measured live).
+    # The wall already has an owner — the pinned notice, with an exact
+    # time — so the drawn cells are identical with the projection and
+    # without it; only the fold token still carries the dry mark.
     local mults="0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 1.54 1.54 1.54 1.54 1.54 1.54 1.54 1.54 1.54 1.54 1.54 1.54 1.54 1.54 1.54"
-    local ps now raw
+    local ps now with without
     ps=$(( ($(date +%s) / 86400 - 6) * 86400 ))
     now=$((ps + 27 * 18000 + 100))
-    raw=$(TZ=UTC build_week_strip 50 "$now" "$ps" 31 "" 2 6 "$mults")
-    # the dry wall keeps its glyph and its red: no dim × anywhere
-    [[ "$(strip_ansi "$raw")" == *"×××"* ]]
-    [[ "$raw" != *$'\033[2m×'* ]]
-    # and the rest cells before it still dim
-    [[ "$(_mark_dim "$raw")" == *"▯{R}{D}▯▯{R}×××"* ]]
+    with=$(TZ=UTC build_week_strip 50 "$now" "$ps" 31 "" 2 6 "$mults")
+    without=$(TZ=UTC build_week_strip 50 "$now" "$ps" -1 "" 2 6 "$mults")
+    [ "$with" = "$without" ]
+    [[ "$(strip_ansi "$with")" != *×* ]]
+    # and the rest cells still dim
+    [[ "$(_mark_dim "$with")" == *"{D}▯▯{R}"* ]]
 }
 
 @test "build_week_strip: unlearned, every future cell stays plain" {
@@ -2105,8 +2110,10 @@ _mark_dim() {
     [ "$status" -eq 0 ]
     plain=$(strip_ansi "$output")
     bar=$(echo "$plain" | head -1 | sed 's/^7d  80% //; s/  .*$//' | tr -d ' ')
-    # affordable windows first, then the wall — never × before ▯
-    [[ "$bar" =~ ▮▯*×+$ ]]
+    # every future cell is a slot; the wall this frame projects is the
+    # advisor sentence's to state, not the grid's to draw
+    [[ "$bar" =~ ▮▯+$ ]]
+    [[ "$bar" != *×* ]]
     rm -rf "$tmpdir"
 }
 

@@ -2987,7 +2987,6 @@ run_session_summary() {
 #   ░         unknown: no samples on record for that window
 #   ▮         the window you are in now
 #   ▯         a window still ahead of you (dim: one you likely sleep through)
-#   ×         a window the pool will not cover at the current pace
 # The report draws every slot, so what follows ▮ IS the budget line's
 # "~N✕5h left" laid out cell by cell — ▮ itself is where you are, not a
 # window you have left. The live row folds that same tail and prints the
@@ -3014,15 +3013,15 @@ run_session_summary() {
 #             capacity on the grid that is not really available. The one
 #             refinement this row carries by tint alone, and the one place
 #             that is honest: a dim ▯ is still a window ahead, so a reader
-#             who cannot see the tint loses nothing actionable. × outranks
-#             it — a cell the pool cannot cover is unusable for a stronger
-#             reason — and the dim count may sit one off the budget's
-#             "~N awake": these are grid slots, the sentence is clocks, the
-#             same one-cell tolerance the fold count documents below.
-#   ×         a cell the pool will not cover at the current pace — 7d only
-#   ...▯(✕11) the folded future: 11 more 5h windows AFTER the one you are in,
-#             all alike (× red when the tail projects dry) — live 7d strip
-#             only. The count is windows ahead, the same number the budget
+#             who cannot see the tint loses nothing actionable. The dim
+#             count may sit one off the budget's "~N awake": these are grid
+#             slots, the sentence is clocks, the same one-cell tolerance
+#             the fold count documents below.
+#   ...▯(✕11) the folded future: 11 more 5h windows AFTER the one you are in
+#             (× in place of ▯ when the tail projects dry — the one place
+#             the dry mark still draws) — live 7d strip only, and only
+#             while the tail is wider than this token. The count is
+#             windows ahead, the same number the budget
 #             line prices as "~11✕5h left" — one line, one arithmetic. (It is
 #             NOT the hidden-cell count: the 34-cell grid spans 170h against a
 #             168h period, and a row that says 10 beside a budget that says 11
@@ -3035,11 +3034,14 @@ run_session_summary() {
 # strip that makes the hollow run the answer to "how long have I got" — five
 # slots, one per hour, `▃▃▮▯▯` is two whole hours left after this one, no
 # arithmetic and no second glance at the clock.
-# What neither strip draws on 5h is a FORECAST. An empty cell is a fact (that
-# hour has not happened); a × is a guess, and on a 5h window the guess is
-# already owned twice — the badge states the end (`5h[38%@23:00]`) and a
-# notice names the wall with its own gates and an exact time (`5h caps
-# ~14:20`). Cells carry the shape, badges carry state, notices do the warning.
+# What NEITHER strip draws in a cell is a FORECAST. An empty cell is a fact
+# (that span has not happened); a × is a guess, and the guess is already
+# owned — the badge states the end, a notice names the wall with its own
+# gates and an exact time (`5h caps ~14:20`, `7d dry ~Tue 22:00`). v0.33
+# established this for the 5h strip; the 7d strip kept its × cells only
+# because the fold hid them, and the unfold called the question: a run of
+# ××× was read live as deleted windows. Cells carry the shape, badges carry
+# state, notices do the warning; the folded token alone keeps the dry mark.
 # Shared by the live `--week` row and the `week` subcommand, so the two
 # surfaces cannot disagree.
 
@@ -3189,9 +3191,12 @@ five_history_cells() { week_scan "$1" "$2" | sed -n 2p; }
 # The slot where burn exhausts the pool before reset (-1 = none). The learned
 # walk speaks first (gap in HOURS before reset); with no trained forecast fall
 # back to the linear projection claude.py's cap_eta uses, so a wall visible on
-# one surface is visible on the other. Both wait out SEVEN_DAY_YOUNG_SECS: a
-# row of × drawn across a window that opened an hour ago is drawn from last
-# week's burn, and this row does not draw what it cannot see.
+# one surface is visible on the other. Both wait out SEVEN_DAY_YOUNG_SECS —
+# a guess drawn across a window that opened an hour ago comes from last
+# week's burn, and this surface does not draw what it cannot see. Since the
+# future cells stopped taking the × overwrite, this slot only decides the
+# folded token's glyph (`...×` vs `...▯`) — kept, because the early-week
+# fold is exactly where no per-cell shape exists to say it.
 week_dry_slot() {
     local seven_int="$1" seven_secs="$2" now="$3" period_start="$4"
     local dry_epoch="" walk_gap walk_end elapsed7
@@ -3296,12 +3301,18 @@ build_ledger_strip() {
                     else if (lo >= 0 && lo <= start + cs && start <= hi) { g = BASE; c = C_DIM }
                     else                                        { g = "░"; c = C_DIM }
                 } else if (i == nowslot)                        { g = "▮"; c = C_NOW }
-                else if (dry >= 0 && i >= dry)                  { g = "×"; c = C_DRY }
                 else {
                     # a window still ahead — dim when the learned rhythm says
                     # the reader sleeps through most of it (under half the
-                    # cell awake). × above outranks this: unreachable beats
-                    # asleep. Unlearned, every ▯ stays plain.
+                    # cell awake). Unlearned, every ▯ stays plain. A dry
+                    # projection used to overwrite these as red × — v0.33
+                    # made the 5h strip a record, not a forecast, and the
+                    # unfold put the same question to this one: a run of ×
+                    # was read as three DELETED windows (measured, live,
+                    # 2026-09-01), while the guess it drew was already owned
+                    # by the pinned notice with an exact time. Same answer
+                    # here now: a future cell is a slot, never a verdict;
+                    # only the fold token below still carries the dry mark.
                     g = "▯"; c = ""
                     if (have_rest && 2 * cell_awake(start) < cs) c = C_DIM
                 }
