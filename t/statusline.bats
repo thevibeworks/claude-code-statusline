@@ -2398,27 +2398,37 @@ EOF
 
 # --- premium band -> bar color ---------------------------------------------
 
-@test "premium_band_level: yellow band over 200k, red past 800k" {
-    ctx_size=1000000 exceeds_200k=false
-    context_pct=15; [ "$(premium_band_level)" = "0" ]
-    context_pct=30; [ "$(premium_band_level)" = "1" ]
-    context_pct=82; [ "$(premium_band_level)" = "2" ]
+@test "rewrite_exposure_level: yellow band over 200k, red past 800k" {
+    pc_recache_if_cold="" ctx_size=1000000 exceeds_200k=false
+    context_pct=15; [ "$(rewrite_exposure_level)" = "0" ]
+    context_pct=30; [ "$(rewrite_exposure_level)" = "1" ]
+    context_pct=82; [ "$(rewrite_exposure_level)" = "2" ]
 }
 
-@test "premium_band_level: exceeds_200k_tokens is ignored (cumulative-usage flag, not a window-size signal)" {
+@test "rewrite_exposure_level: exceeds_200k_tokens is ignored (cumulative-usage flag, not a window-size signal)" {
     # Real logs: a genuine 200k-window opus-4-6 session reports
     # exceeds_200k_tokens=true once cumulative usage passes 200k tokens — the
     # flag tracks session-total usage, not window capacity. Band must follow
     # ctx_size x context_pct only.
-    ctx_size=1000000 context_pct=15 exceeds_200k=true
-    [ "$(premium_band_level)" = "0" ]
+    pc_recache_if_cold="" ctx_size=1000000 context_pct=15 exceeds_200k=true
+    [ "$(rewrite_exposure_level)" = "0" ]
 }
 
-@test "premium_band_level: 200k window never enters the band, even with exceeds_200k=true" {
-    ctx_size=200000 context_pct=90 exceeds_200k=false
-    [ "$(premium_band_level)" = "0" ]
+@test "rewrite_exposure_level: 200k window never enters the band, even with exceeds_200k=true" {
+    pc_recache_if_cold="" ctx_size=200000 context_pct=90 exceeds_200k=false
+    [ "$(rewrite_exposure_level)" = "0" ]
     exceeds_200k=true
-    [ "$(premium_band_level)" = "0" ]
+    [ "$(rewrite_exposure_level)" = "0" ]
+}
+
+@test "rewrite_exposure_level: the CLI's recache_tokens_if_cold sizes the exposure" {
+    # 15% of 1M reads calm, but the CLI says a cold cache rewrites 250k.
+    ctx_size=1000000 context_pct=15 exceeds_200k=false
+    pc_recache_if_cold=250000; [ "$(rewrite_exposure_level)" = "1" ]
+    pc_recache_if_cold=900000; [ "$(rewrite_exposure_level)" = "2" ]
+    pc_recache_if_cold=150000; [ "$(rewrite_exposure_level)" = "0" ]
+    # null right after a compaction: fall back to the live context.
+    pc_recache_if_cold=""; context_pct=30; [ "$(rewrite_exposure_level)" = "1" ]
 }
 
 @test "build_usage_display: pace pressure shows explicit @Nd remaining" {
@@ -2667,7 +2677,7 @@ EOF
     rm -rf "$tmpdir"
 }
 
-@test "integration: premium band colors the context bar yellow (no :NNNk text)" {
+@test "integration: rewrite exposure colors the context bar yellow (no :NNNk text)" {
     tmpdir=$(mktemp -d)
     mkdir -p "$tmpdir/.claude"
     # 30% of a 1M window = 300k tokens, past the 200k premium boundary. The
@@ -2683,7 +2693,7 @@ EOF
     rm -rf "$tmpdir"
 }
 
-@test "integration: deep premium band (>800k) colors the context bar red" {
+@test "integration: deep rewrite exposure (>800k) colors the context bar red" {
     tmpdir=$(mktemp -d)
     mkdir -p "$tmpdir/.claude"
     result=$(echo '{"model":{"id":"claude-fable-5","display_name":"Fable 5"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.174","exceeds_200k_tokens":true,"context_window":{"used_percentage":82,"context_window_size":1000000}}' \
@@ -2720,7 +2730,7 @@ EOF
     rm -rf "$tmpdir"
 }
 
-@test "integration: suffix-less fable flags the premium band over 200k" {
+@test "integration: suffix-less fable flags rewrite exposure over 200k" {
     tmpdir=$(mktemp -d)
     mkdir -p "$tmpdir/.claude"
     # 30% of the (family-detected) 1M window = 300k, past the 200k boundary.
@@ -2733,7 +2743,7 @@ EOF
     rm -rf "$tmpdir"
 }
 
-@test "integration: exceeds_200k_tokens does not force the premium band at low pct" {
+@test "integration: exceeds_200k_tokens does not force rewrite exposure at low pct" {
     tmpdir=$(mktemp -d)
     mkdir -p "$tmpdir/.claude"
     # exceeds_200k_tokens tracks cumulative session usage crossing 200k, not
@@ -3574,6 +3584,80 @@ JSON
     rm -rf "$tmpdir"
 }
 
+# --- get_cache_health_cli (prompt_cache ledger, 2.1.251+) -------------------
+
+@test "get_cache_health_cli: warm ledger with no misses is ok; ttl and anchor are the CLI's" {
+    tmpdir=$(mktemp -d)
+    # expires_at 5600 on a 1h TTL => the last request was at 2000, not "now".
+    result=$(STATUSLINE_TEST_NOW_EPOCH=2500 get_cache_health_cli 200000 500 "$tmpdir/ch" 1h 5600 0 0 0 "")
+    [ "$result" = "ok|1h|2000|0" ]
+    jq -e '.pc_misses == 0 and .pc_rebuilds == 0 and .last_active_at == 2000' "$tmpdir/ch"
+    rm -rf "$tmpdir"
+}
+
+@test "get_cache_health_cli: a miss the CLI counted is a break, sized at what it re-cached" {
+    tmpdir=$(mktemp -d)
+    STATUSLINE_TEST_NOW_EPOCH=1000 get_cache_health_cli 200000 500 "$tmpdir/ch" 1h 4600 0 0 0 "" >/dev/null
+    # Next render: misses 0 -> 1, miss_recache_tokens 0 -> 419000.
+    result=$(STATUSLINE_TEST_NOW_EPOCH=8200 get_cache_health_cli 0 419000 "$tmpdir/ch" 1h 11800 1 0 419000 8199)
+    [ "$result" = "break|1h|8200|419000" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_cache_health_cli: a second miss is sized at the delta, not the session total" {
+    tmpdir=$(mktemp -d)
+    STATUSLINE_TEST_NOW_EPOCH=1000 get_cache_health_cli 200000 500 "$tmpdir/ch" 1h 4600 1 0 300000 900 >/dev/null
+    result=$(STATUSLINE_TEST_NOW_EPOCH=9000 get_cache_health_cli 0 150000 "$tmpdir/ch" 1h 12600 2 0 450000 8999)
+    [[ "$result" == break\|* ]]
+    [[ "$result" == *"|150000" ]]
+    rm -rf "$tmpdir"
+}
+
+@test "get_cache_health_cli: a rebuild the CLI expected (compaction) is building, not a break" {
+    tmpdir=$(mktemp -d)
+    STATUSLINE_TEST_NOW_EPOCH=1000 get_cache_health_cli 200000 500 "$tmpdir/ch" 1h 4600 0 0 0 "" >/dev/null
+    # /compact: read collapses to 0, a 60k prefix writes, expected_rebuilds 0 -> 1.
+    result=$(STATUSLINE_TEST_NOW_EPOCH=1100 get_cache_health_cli 0 60000 "$tmpdir/ch" 1h 4700 0 1 0 "")
+    [[ "$result" == building\|* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "get_cache_health_cli: no state yet but the CLI's last miss just happened is a break" {
+    tmpdir=$(mktemp -d)
+    # A resumed session's first frame: no state file, last_miss_at 10s ago,
+    # this turn wrote the 300k rewrite.
+    result=$(STATUSLINE_TEST_NOW_EPOCH=5000 get_cache_health_cli 0 300000 "$tmpdir/ch" 1h 8600 3 0 700000 4990)
+    [ "$result" = "break|1h|5000|300000" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_cache_health_cli: an old miss with no state is not a break" {
+    tmpdir=$(mktemp -d)
+    result=$(STATUSLINE_TEST_NOW_EPOCH=5000 get_cache_health_cli 200000 500 "$tmpdir/ch" 1h 8600 3 0 700000 1000)
+    [[ "$result" == ok\|* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "get_cache_health_cli: a break is held for the notice window, then clears" {
+    tmpdir=$(mktemp -d)
+    STATUSLINE_TEST_NOW_EPOCH=1000 get_cache_health_cli 200000 500 "$tmpdir/ch" 1h 4600 0 0 0 "" >/dev/null
+    STATUSLINE_TEST_NOW_EPOCH=8200 get_cache_health_cli 0 419000 "$tmpdir/ch" 1h 11800 1 0 419000 8199 >/dev/null
+    result=$(STATUSLINE_TEST_NOW_EPOCH=8230 get_cache_health_cli 419000 900 "$tmpdir/ch" 1h 11830 1 0 419000 8199)
+    [ "$result" = "break|1h|8230|419000" ]
+    result=$(STATUSLINE_TEST_NOW_EPOCH=8290 get_cache_health_cli 419000 900 "$tmpdir/ch" 1h 11890 1 0 419000 8199)
+    [[ "$result" == ok\|* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "get_cache_health_cli: a 5m TTL anchors 300s before expiry; null expiry keeps the old anchor" {
+    tmpdir=$(mktemp -d)
+    result=$(STATUSLINE_TEST_NOW_EPOCH=1000 get_cache_health_cli 50000 500 "$tmpdir/ch" 5m 1300 0 0 0 "")
+    [ "$result" = "ok|5m|1000|0" ]
+    result=$(STATUSLINE_TEST_NOW_EPOCH=1200 get_cache_health_cli 50000 500 "$tmpdir/ch" 5m "" 0 0 0 "")
+    [ "$result" = "ok|5m|1000|0" ]
+    rm -rf "$tmpdir"
+}
+
 @test "get_cache_health: creation breakdown overrides ttl class" {
     tmpdir=$(mktemp -d)
     result=$(get_cache_health 0 50000 1 "$tmpdir/cache_health" "" 50000 0)
@@ -3683,6 +3767,43 @@ JSON
         | CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
     plain=$(strip_ansi "$result")
     [[ "$plain" == *"${CACHE_GLYPH}!"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: prompt_cache ledger — a counted miss renders ≡!419k bold red" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/sessions"
+    echo '{"cache_read":200000,"cache_creation":100,"pc_misses":0,"pc_rebuilds":0,"pc_miss_recache":0,"last_active_at":1000}' > "$tmpdir/sessions/test-session-id_cache_health"
+    result=$(echo '{"model":{"id":"claude-fable-5-1","display_name":"Fable 5.1"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.258","context_window":{"used_percentage":42,"context_window_size":1000000,"current_usage":{"input_tokens":1,"output_tokens":58,"cache_creation_input_tokens":419000,"cache_read_input_tokens":0}},"prompt_cache":{"warm":true,"caching_observed":true,"ttl":"1h","expires_at":1788324900,"requests":44,"misses":1,"expected_rebuilds":0,"hit_ratio":0.5,"cache_write_tokens":600000,"miss_recache_tokens":419000,"last_miss_at":1788321300,"recache_tokens_if_cold":419000}}' \
+        | CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"${CACHE_GLYPH}!419k"* ]]
+    [[ "$result" == *$'\033[1;31m'"${CACHE_GLYPH}!419k"* ]]
+    jq -e '.pc_misses == 1 and .pc_miss_recache == 419000' "$tmpdir/sessions/test-session-id_cache_health"
+    rm -rf "$tmpdir"
+}
+
+@test "integration: prompt_cache ledger — a compaction rebuild renders ≡~, never ≡!" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/sessions"
+    echo '{"cache_read":200000,"cache_creation":100,"pc_misses":0,"pc_rebuilds":0,"pc_miss_recache":0,"last_active_at":1000}' > "$tmpdir/sessions/test-session-id_cache_health"
+    result=$(echo '{"model":{"id":"claude-fable-5-1","display_name":"Fable 5.1"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.258","context_window":{"used_percentage":6,"context_window_size":1000000,"current_usage":{"input_tokens":1,"output_tokens":58,"cache_creation_input_tokens":60000,"cache_read_input_tokens":0}},"prompt_cache":{"warm":true,"caching_observed":true,"ttl":"1h","expires_at":1788324900,"requests":45,"misses":0,"expected_rebuilds":1,"hit_ratio":0.9,"cache_write_tokens":260000,"miss_recache_tokens":0,"last_miss_at":null,"recache_tokens_if_cold":null}}' \
+        | CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" == *"${CACHE_GLYPH}~"* ]]
+    [[ "$plain" != *"${CACHE_GLYPH}!"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "integration: prompt_cache ledger — a warm session with no misses stays silent" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/sessions"
+    result=$(echo '{"model":{"id":"claude-fable-5-1","display_name":"Fable 5.1"},"cwd":"/tmp/test","workspace":{"current_dir":"/tmp/test"},"cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0,"total_api_duration_ms":0},"version":"2.1.258","context_window":{"used_percentage":21,"context_window_size":1000000,"current_usage":{"input_tokens":135,"output_tokens":2,"cache_creation_input_tokens":1061,"cache_read_input_tokens":205283}},"prompt_cache":{"warm":true,"caching_observed":true,"ttl":"1h","expires_at":1788324900,"requests":43,"misses":0,"expected_rebuilds":0,"hit_ratio":0.97,"cache_write_tokens":182487,"miss_recache_tokens":0,"last_miss_at":null,"recache_tokens_if_cold":205418}}' \
+        | CLAUDE_CACHE_DIR="$tmpdir/sessions" bash "$SCRIPT_DIR/statusline.sh" --test)
+    plain=$(strip_ansi "$result")
+    [[ "$plain" != *"${CACHE_GLYPH}"* ]]
+    # The exposure past 200k (205k cold rewrite) tints the calm 21% bar yellow.
+    [[ "$result" == *$'\033[0;33m'*"21%"* ]]
     rm -rf "$tmpdir"
 }
 

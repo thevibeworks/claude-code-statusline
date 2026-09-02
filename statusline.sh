@@ -61,8 +61,8 @@ SEVEN_DAY_YOUNG_SECS=86400       # a 7d projection needs a day of THIS window's
 EXTRA_AUTO_UTIL_PCT=50           # show extra when its own utilization >= 50%
 CACHE_BREAK_MIN_TOKENS=2000      # ignore cache drops below this (noise)
 CACHE_BREAK_DROP_PCT=5           # cache read must drop >5% to count as break
-CACHE_HEAVY_TOKENS=200000        # break badge turns bold-red past this: the
-                                 # >200k premium-band prefix, an expensive rewrite
+CACHE_HEAVY_TOKENS=200000        # break badge turns bold-red past this: a
+                                 # >200k prefix re-cached at the write rate
 ADVISOR_FLEET_FRESH_SECS=3600    # sibling account cache older than this is unknown
 ADVISOR_FLEET_FREE_PCT=40        # sibling counts as "free" at or under this 5h%
 ADVISOR_EXPIRY_HORIZON_SECS=86400 # 7d surplus clause: inside the last day of the week
@@ -453,7 +453,8 @@ elif [ "$test_mode" = true ]; then
         context_window: (.context_window // {used_percentage: 15, context_window_size: 1000000}),
         effort: .effort,
         fast_mode: .fast_mode,
-        rate_limits: .rate_limits
+        rate_limits: .rate_limits,
+        prompt_cache: .prompt_cache
     }' 2>/dev/null)
     debug_log "TEST MODE: transformed input: ${input:0:300}..."
 else
@@ -490,6 +491,14 @@ eval "$(echo "$input" | jq -r '
     @sh "cache_creation_1h_tokens=\(.context_window.current_usage.cache_creation.ephemeral_1h_input_tokens // .context_window.current_usage.cache_creation.ephemeral_1h // "")",
     @sh "cache_creation_5m_tokens=\(.context_window.current_usage.cache_creation.ephemeral_5m_input_tokens // .context_window.current_usage.cache_creation.ephemeral_5m // "")",
     @sh "uncached_input_tokens=\(.context_window.current_usage.input_tokens // "")",
+    @sh "pc_present=\(if (.prompt_cache | type) == "object" then 1 else "" end)",
+    @sh "pc_ttl=\(.prompt_cache.ttl // "")",
+    @sh "pc_expires_at=\(.prompt_cache.expires_at // "")",
+    @sh "pc_misses=\(.prompt_cache.misses // "")",
+    @sh "pc_rebuilds=\(.prompt_cache.expected_rebuilds // "")",
+    @sh "pc_miss_recache=\(.prompt_cache.miss_recache_tokens // "")",
+    @sh "pc_last_miss_at=\(.prompt_cache.last_miss_at // "")",
+    @sh "pc_recache_if_cold=\(.prompt_cache.recache_tokens_if_cold // "")",
     @sh "stdin_session_id=\(.session_id // "")"
 ' 2>/dev/null)"
 
@@ -540,8 +549,8 @@ fi
 debug_log "TERM WIDTH: $term_width"
 
 # Palette is organized in three lanes so a glance is unambiguous:
-#   STATUS  (green/yellow/red) — pressure ONLY: quota, context, cache, premium
-#                                band, expensive effort. Warm = "watch a limit".
+#   STATUS  (green/yellow/red) — pressure ONLY: quota, context, cache, rewrite
+#                                exposure, expensive effort. Warm = "watch a limit".
 #   IDENTITY (magenta/cyan/blue; fable = bright red 0;91 to match the Claude
 #                                Code TUI) — model family only. Never status.
 #                                Pressure red stays 0;31; fable is 0;91.
@@ -1551,6 +1560,121 @@ get_cache_health() {
     echo "${state}|${ttl_class}|${last_active_at}|${break_tokens}"
 }
 
+# Cache health from the CLI's own ledger. Claude Code 2.1.251+ sends a
+# prompt_cache object computed from every response's cache token counts:
+# misses (a request that re-processed >5% and >=2k tokens the cache already
+# held, with no compaction to explain it), expected_rebuilds (compaction or
+# tool-result clearing), miss_recache_tokens (what the misses wrote back),
+# ttl and expires_at (the exact deadline). It sees every request, including
+# the ones the 300ms render debounce skipped, so whenever it is present it
+# replaces the inferred drop rule, the idle-expiry guess and the TTL default.
+# Same tuple as get_cache_health, same state file (adds pc_* keys the older
+# detector ignores, so a CLI downgrade needs no migration).
+#   break     misses grew since the last render, or — with no state yet, a
+#             resumed session's first frame — the CLI's last miss is inside
+#             the hold window; sized at what those misses re-cached (this
+#             turn's write when the delta is unknown)
+#   building  a rebuild the CLI expected (compaction / clearing): a rewrite,
+#             not a miss — or a fresh prefix writing with nothing to read
+#   ok        otherwise
+get_cache_health_cli() {
+    local cache_read="${1:-0}" cache_creation="${2:-0}" state_file="${3:-}"
+    local ttl_class="${4:-}" expires_at="${5:-}" misses="${6:-0}" rebuilds="${7:-0}"
+    local miss_recache="${8:-0}" last_miss_at="${9:-}"
+    local now_epoch="${STATUSLINE_TEST_NOW_EPOCH:-$(date +%s)}"
+
+    cache_read=$(printf '%.0f' "${cache_read:-0}" 2>/dev/null) || cache_read=0
+    cache_creation=$(printf '%.0f' "${cache_creation:-0}" 2>/dev/null) || cache_creation=0
+    [[ "$misses" =~ ^[0-9]+$ ]] || misses=0
+    [[ "$rebuilds" =~ ^[0-9]+$ ]] || rebuilds=0
+    [[ "$miss_recache" =~ ^[0-9]+$ ]] || miss_recache=0
+    [[ "$last_miss_at" =~ ^[0-9]+$ ]] || last_miss_at=""
+    [[ "$expires_at" =~ ^[0-9]+$ ]] || expires_at=""
+    [ "$ttl_class" = "5m" ] || [ "$ttl_class" = "1h" ] || ttl_class=""
+
+    local ttl_secs=3600
+    [ "${ttl_class:-$CACHE_TTL_DEFAULT}" = "5m" ] && ttl_secs=300
+
+    local prev_misses="" prev_rebuilds="" prev_miss_recache="" last_active_at=""
+    local break_at=0 break_tokens=0
+    if [ -n "$state_file" ] && [ -f "$state_file" ] && jq -e 'type == "object"' "$state_file" >/dev/null 2>&1; then
+        eval "$(jq -r '
+            @sh "prev_misses=\(.pc_misses // "")",
+            @sh "prev_rebuilds=\(.pc_rebuilds // "")",
+            @sh "prev_miss_recache=\(.pc_miss_recache // "")",
+            @sh "last_active_at=\(.last_active_at // "")",
+            @sh "break_at=\(.break_at // 0)",
+            @sh "break_tokens=\(.break_tokens // 0)"
+        ' "$state_file" 2>/dev/null)"
+    fi
+
+    # The CLI's deadline is exact: anchor = expires_at - TTL. A null
+    # expires_at (last response carried no cache tokens) keeps the old anchor.
+    [ -n "$expires_at" ] && last_active_at=$((expires_at - ttl_secs))
+
+    local state="ok"
+    if [ -n "$prev_misses" ] && [ "$misses" -gt "$prev_misses" ] 2>/dev/null; then
+        state="break"
+        break_at="$now_epoch"
+        break_tokens=$((miss_recache - ${prev_miss_recache:-0}))
+    elif [ -z "$prev_misses" ] && [ -n "$last_miss_at" ] \
+         && [ $((now_epoch - last_miss_at)) -lt "$QUOTA_BUMP_NOTICE_SECS" ] 2>/dev/null; then
+        state="break"
+        break_at="$now_epoch"
+        break_tokens=0
+    elif [ -n "$prev_rebuilds" ] && [ "$rebuilds" -gt "$prev_rebuilds" ] 2>/dev/null; then
+        state="building"
+    elif [ "$cache_read" -le 0 ] && [ "$cache_creation" -gt "$CACHE_BREAK_MIN_TOKENS" ]; then
+        state="building"
+    fi
+    if [ "$state" = "break" ] && [ "${break_tokens:-0}" -le 0 ] 2>/dev/null; then
+        # Delta unknown: this turn's write is the rewrite the CLI just billed.
+        break_tokens="$cache_creation"
+        [ "$break_tokens" -gt 0 ] 2>/dev/null || break_tokens="$miss_recache"
+    fi
+
+    # Held like the inferred detector: a busy turn re-renders within seconds.
+    if [ "$state" != "break" ]; then
+        if [ "${break_at:-0}" -gt 0 ] 2>/dev/null && [ $((now_epoch - break_at)) -lt "$QUOTA_BUMP_NOTICE_SECS" ] 2>/dev/null; then
+            state="break"
+        else
+            break_at=0
+            break_tokens=0
+        fi
+    fi
+
+    if [ -n "$state_file" ]; then
+        mkdir -p "$(dirname "$state_file")" 2>/dev/null
+        local tmp_state="${state_file}.tmp.$$"
+        jq -n -c \
+            --argjson cache_read "$cache_read" \
+            --argjson cache_creation "$cache_creation" \
+            --arg ttl "$ttl_class" \
+            --argjson last_active "${last_active_at:-0}" \
+            --argjson break_at "${break_at:-0}" \
+            --argjson break_tokens "${break_tokens:-0}" \
+            --argjson misses "$misses" \
+            --argjson rebuilds "$rebuilds" \
+            --argjson miss_recache "$miss_recache" \
+            --argjson updated_at "$now_epoch" \
+            '{
+                cache_read: $cache_read,
+                cache_creation: $cache_creation,
+                ttl_class: (if $ttl == "" then null else $ttl end),
+                last_active_at: (if $last_active > 0 then $last_active else null end),
+                break_at: (if $break_at > 0 then $break_at else null end),
+                break_tokens: (if $break_tokens > 0 then $break_tokens else null end),
+                pc_misses: $misses,
+                pc_rebuilds: $rebuilds,
+                pc_miss_recache: $miss_recache,
+                updated_at: $updated_at
+            }' > "$tmp_state" 2>/dev/null && mv -f "$tmp_state" "$state_file" 2>/dev/null
+        rm -f "$tmp_state" 2>/dev/null
+    fi
+
+    echo "${state}|${ttl_class}|${last_active_at}|${break_tokens}"
+}
+
 infer_cache_ttl_class() {
     local cache_creation_1h="${1:-0}" cache_creation_5m="${2:-0}"
 
@@ -1605,16 +1729,16 @@ _fmt_epoch() {
 # the rewrite actually happened:
 #   cache!<size>  a resume landing on a dead cache (idle-expiry break) or a
 #                 mid-session prefix collapse. <size> = re-cached tokens; the
-#                 miss bills at ~20x the read rate (and burns 5h/7d quota on
-#                 subscriptions). BOLD red past CACHE_HEAVY_TOKENS — the >200k
-#                 premium-band rewrite the user asked to highlight.
+#                 miss bills at the write rate (20x a read on most models, 80x
+#                 on Fable 5.1) and burns 5h/7d quota on subscriptions. BOLD
+#                 red past CACHE_HEAVY_TOKENS — the >200k rewrite.
 #   cache~        a large prefix is (re)building this turn.
 # --cache always keeps the freeze-safe absolute deadline (cache@HH:MM = last
 # request + TTL): a past time in a frozen frame reads "expired at HH:MM", the
-# same wall-clock idiom as the 5h @reset. TTL: the CLI does not forward the
-# ephemeral_1h/5m breakdown today (ttl_class stays null), so an unobserved TTL
-# assumes CACHE_TTL_DEFAULT; an observed class renders as provenance
-# (cache:5m@…) and overrides it.
+# same wall-clock idiom as the 5h @reset. TTL: prompt_cache.ttl (2.1.251+)
+# is exact; without it the ephemeral_1h/5m breakdown decides, and an
+# unobserved TTL assumes CACHE_TTL_DEFAULT. An observed class renders as
+# provenance (cache:5m@…).
 build_cache_indicator() {
     local health_result="$1" mode="${2:-auto}"
     local state ttl_class last_active_at break_tokens
@@ -1639,7 +1763,7 @@ build_cache_indicator() {
         "break")
             # Rewrite size quantifies the hit: ≡!195k = a 195k-token prefix
             # was re-cached at the write rate. Bold past the heavy threshold
-            # — a >200k premium-band miss is the expensive one.
+            # — a >200k rewrite is the expensive one.
             local size=""
             [ "${break_tokens:-0}" -ge 1000 ] 2>/dev/null && size="$((break_tokens / 1000))k"
             local col="$RED"
@@ -5022,17 +5146,25 @@ is_1m_model() {
     [[ "$model_id" == *"[1m]"* ]] || is_default_1m_family "$model_id"
 }
 
-# Premium pricing band for 1M-window models: above 200k tokens the input rate
-# is higher. The cue lives in the CONTEXT BAR's color (not extra text — the
-# absolute NNNk was redundant with the bar's own percentage): yellow past 200k,
-# red past 800k. Echoes 0 (none) / 1 (yellow) / 2 (red).
-# Computed from ctx_size × context_pct only — see is_1m_model for why
-# exceeds_200k_tokens is not a valid signal here either.
-premium_band_level() {
-    local size="${ctx_size:-1000000}"
+# Rewrite exposure for 1M-window sessions: what a cold cache re-bills. Long
+# context itself is standard-priced on every 4.6+ model (a 900k request costs
+# the same per token as a 9k one — Anthropic's pricing page), so the bar's
+# extra color is not a pricing band: it is the size of the prefix a dead
+# cache rewrites at the write rate. The cue lives in the CONTEXT BAR's color
+# (not extra text — the absolute NNNk was redundant with the bar's own
+# percentage): yellow past 200k, red past 800k. Echoes 0 / 1 (yellow) / 2
+# (red). Sized from the CLI's recache_tokens_if_cold when it sends one
+# (2.1.251+), else the live context (ctx_size × context_pct) — see
+# is_1m_model for why exceeds_200k_tokens is not a valid signal here either.
+rewrite_exposure_level() {
     local abs=""
-    if [ -n "$context_pct" ] && [ "$size" -gt 0 ] 2>/dev/null; then
-        abs=$(( context_pct * size / 100 ))
+    if [ -n "$pc_recache_if_cold" ] && [ "$pc_recache_if_cold" -gt 0 ] 2>/dev/null; then
+        abs="$pc_recache_if_cold"
+    else
+        local size="${ctx_size:-1000000}"
+        if [ -n "$context_pct" ] && [ "$size" -gt 0 ] 2>/dev/null; then
+            abs=$(( context_pct * size / 100 ))
+        fi
     fi
     if [ -n "$abs" ] && [ "$abs" -gt 800000 ] 2>/dev/null; then
         echo 2
@@ -5200,7 +5332,7 @@ elif [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
     fi
 fi
 
-# Append the constant 1M-context tag; premium-band pressure colors the bar.
+# Append the constant 1M-context tag; rewrite exposure colors the bar.
 if is_1m_model; then
     model_text="${model_text}$(build_1m_tag)"
 fi
@@ -5218,11 +5350,11 @@ if [ -n "$context_pct" ] && [ "$context_pct" -ge 0 ] 2>/dev/null; then
         bar_color='\033[0;32m'
     fi
 
-    # Premium pricing band (1M models, >200k tokens) escalates the bar color:
-    # the bar % alone looks calm (320k = 32%) while every request in the band
-    # bills at the premium input rate. Yellow in the band, red past 800k.
+    # Rewrite exposure (1M sessions) escalates the bar color: the % alone
+    # looks calm (320k = 32%) while a dead cache rewrites all of it at the
+    # write rate. Yellow past 200k, red past 800k.
     if is_1m_model; then
-        band=$(premium_band_level)
+        band=$(rewrite_exposure_level)
         if [ "$band" = "2" ]; then
             bar_color='\033[0;31m'
         elif [ "$band" = "1" ] && [ "$bar_color" = '\033[0;32m' ]; then
@@ -5310,11 +5442,16 @@ elif [ -n "$effort_level" ] && [ "$effort_level" != "high" ]; then
 fi
 
 cache_indicator=""
-if [ "$cache_display_mode" != "off" ] && { [ -n "$cache_read_tokens" ] || [ -n "$cache_creation_tokens" ]; }; then
+if [ "$cache_display_mode" != "off" ] && { [ -n "$pc_present" ] || [ -n "$cache_read_tokens" ] || [ -n "$cache_creation_tokens" ]; }; then
     cache_state_file="$CLAUDE_CACHE_DIR/${stdin_session_id:-global}_cache_health"
     cache_ttl_class=$(infer_cache_ttl_class "$cache_creation_1h_tokens" "$cache_creation_5m_tokens")
-    cache_health=$(get_cache_health "$cache_read_tokens" "$cache_creation_tokens" "$uncached_input_tokens" "$cache_state_file" "$cache_ttl_class" "$cache_creation_1h_tokens" "$cache_creation_5m_tokens")
-    debug_log "CACHE HEALTH: state=$cache_health read=$cache_read_tokens creation=$cache_creation_tokens uncached=$uncached_input_tokens ttl=$cache_ttl_class"
+    if [ -n "$pc_present" ]; then
+        cache_health=$(get_cache_health_cli "$cache_read_tokens" "$cache_creation_tokens" "$cache_state_file" "${pc_ttl:-$cache_ttl_class}" "$pc_expires_at" "$pc_misses" "$pc_rebuilds" "$pc_miss_recache" "$pc_last_miss_at")
+        debug_log "CACHE HEALTH (cli ledger): state=$cache_health misses=$pc_misses rebuilds=$pc_rebuilds recache=$pc_miss_recache ttl=$pc_ttl expires=$pc_expires_at cold=$pc_recache_if_cold"
+    else
+        cache_health=$(get_cache_health "$cache_read_tokens" "$cache_creation_tokens" "$uncached_input_tokens" "$cache_state_file" "$cache_ttl_class" "$cache_creation_1h_tokens" "$cache_creation_5m_tokens")
+        debug_log "CACHE HEALTH: state=$cache_health read=$cache_read_tokens creation=$cache_creation_tokens uncached=$uncached_input_tokens ttl=$cache_ttl_class"
+    fi
     cache_indicator_text=$(build_cache_indicator "$cache_health" "$cache_display_mode")
     [ -n "$cache_indicator_text" ] && cache_indicator=" ${cache_indicator_text}"
 fi
