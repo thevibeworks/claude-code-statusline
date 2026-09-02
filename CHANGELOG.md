@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.40.0 — 2026-09-01 — what a cold cache costs
+
+**The bar's extra color above 200k was a pricing claim, and the price is
+gone.** Anthropic's pricing page: every 4.6+ model bills the full 1M window
+at standard rates — a 900k request costs the same per token as a 9k one. The
+"premium band" the README promised has not existed for any model you can
+run. What is still true above 200k is exposure: step away past the cache
+TTL and the whole prefix re-bills at the write rate, 20x a read on most
+models and 80x on Fable 5.1, where reads dropped to 0.025x. The color
+stays — yellow past 200k, red past 800k — and now means that: **rewrite
+exposure**, sized at what a cold cache would re-cache.
+
+**The cache badge now reads the CLI's ledger.** Claude Code 2.1.251 added a
+`prompt_cache` object to the status line input: misses (its own definition,
+the same >5% and >=2k thresholds this script inferred), expected rebuilds,
+tokens re-cached, TTL and the exact expiry. It sees every request, including
+the ones the 300ms render debounce skipped, so when it is present it replaces
+the drop rule, the idle-expiry guess and the TTL default. Two things change
+on screen: `≡!Nk` is sized at what the CLI's misses actually wrote back, and
+a compaction rebuild — a rewrite the CLI expected — shows `≡~`, never `≡!`.
+Same state file, new `pc_*` keys; older CLIs keep the inferred detector
+untouched.
+
+**Fable 5.1 shipped as `claude-fable-5-1` and the chip kept saying `fabl5`.**
+The abbreviation predates Fable having a minor; the chip now carries it:
+`fabl5.1`. And the `[1m]` tag follows the CLI's window in both directions —
+`CLAUDE_CODE_DISABLE_1M_CONTEXT=1` makes the CLI report 200k on Fable (and,
+since 2.1.223, compact there), so the tag drops with the bar instead of
+painting `[1m]` over a 200k window. The name decides only when the CLI sent
+no window at all. 486 bats.
+
 ## v0.39.0 — 2026-09-01 — a guess may not delete a window
 
 **v0.38.0 unfolded the future and the dry wall walked out with it.** The

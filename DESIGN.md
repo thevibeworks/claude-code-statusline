@@ -49,7 +49,7 @@ identity ───────────────────────�
 ## Color: three lanes
 
 ```
-status     green / yellow / red    pressure ONLY: quota, context, cache, premium band, effort
+status     green / yellow / red    pressure ONLY: quota, context, cache, rewrite exposure, effort
 identity   magenta / cyan / blue   model family (fable = bright red, its TUI color)
 neutral    grey / white / dim      everything else; MAX bold, PRO normal
 ```
