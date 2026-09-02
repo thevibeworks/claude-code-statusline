@@ -158,6 +158,9 @@ does that automatically (`curl_ca_bundle` in `statusline.sh`).
 **`five_hour` / `seven_day`** — the two account-wide windows. `utilization`
 is a float percentage; `resets_at` is ISO-8601 with microseconds and offset.
 The `*_dollars` fields have only been observed `null` on subscription plans.
+`five_hour.utilization` has been observed at `101.0` when the session window
+binds; it is a server reading, not a bounded progress-bar value. Renderers in
+this repository treat any value at or above 100 as `cap` and keep the reset.
 
 **`limits[]`** — the newer, generic limit contract (this is what the
 statusline parses first):

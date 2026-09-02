@@ -3914,9 +3914,17 @@ build_usage_display() {
         # Bump flash: reverse-video +N right after the badge — bound tight so
         # it can't read as belonging to the next badge, unmissable without
         # adding a fourth color lane. ASCII + (a ▲ glyph rendered poorly).
-        local bump_part=""
-        [ "$five_bump" -gt 0 ] 2>/dev/null && bump_part="${color}${REVERSE}+${five_bump}${NO_REVERSE}"
-        parts+=("${DIM}5h${color}[${five_int}%${reset_suffix}]${bump_part}${RESET}")
+        local bump_part="" five_label="${five_int}%"
+        # The API occasionally reports 101 at the wall. That is not a useful
+        # precision claim: once the session window binds, the state is CAP and
+        # the number to plan around is its reset. A +N flash beside `cap` would
+        # be equally meaningless, so the climb stops speaking there too.
+        if [ "$five_int" -ge 100 ] 2>/dev/null; then
+            five_label="cap"
+        elif [ "$five_bump" -gt 0 ] 2>/dev/null; then
+            bump_part="${color}${REVERSE}+${five_bump}${NO_REVERSE}"
+        fi
+        parts+=("${DIM}5h${color}[${five_label}${reset_suffix}]${bump_part}${RESET}")
     fi
 
     # 7d aggregate quota (if present and >0). Color comes from PACE, not level:
@@ -4206,6 +4214,43 @@ build_advisor_fleet_hint() {
 # field after it (a notice with no highlight token lost its long form).
 NOTICE_FS=$'\037'
 NOTICE_RECS=()
+
+# What Claude Code knows about lower-priority mode for THIS session window.
+# The usage endpoint has no offer/allowance field and statusline stdin carries
+# only 5h/7d, so neither is allowed to imply availability. The transcript does
+# carry the server's gated offer on the rejected assistant record and the local
+# command's enable/disable result. Read only the tail: the event is necessarily
+# recent when the current 5h window is capped, and a full transcript scan on
+# every render would make the statusline cost grow with the conversation.
+#
+# Echoes `offered`, `active`, or nothing. The reset match is the provenance
+# gate: an offer from the previous 5h window cannot advise this one.
+transcript_low_priority_state() {
+    local transcript="$1" reset_ts="$2"
+    [ -f "$transcript" ] && [ -n "$reset_ts" ] || return 0
+    local reset_epoch
+    reset_epoch=$(_epoch_from_ts "$reset_ts")
+    [ -n "$reset_epoch" ] || return 0
+    tail -300 "$transcript" 2>/dev/null | jq -rs --argjson reset "$reset_epoch" '
+        ([.[] | select(
+            .quotaLimits.lowPriorityOffer? == "treatment"
+            and .quotaLimits.rateLimitType? == "five_hour"
+            and (((.quotaLimits.resetsAt? // 0) - $reset) | fabs) <= 120
+        )] | sort_by(.timestamp // "") | last) as $offer |
+        if $offer == null then empty else
+          ([.[] | select(
+              .type? == "system" and .subtype? == "local_command"
+              and ((.content? // "") | type) == "string"
+              and ((.timestamp // "") >= ($offer.timestamp // ""))
+              and ((.content // "") | test("lower.priority|low-priority"; "i"))
+            ) | {at:(.timestamp // ""),
+                 state:(if ((.content // "") | test("Continuing now at lower priority|Lower-priority mode is back on"; "i"))
+                        then "active" else "" end)}]
+           | sort_by(.at) | last | .state) // "offered"
+        end
+    ' 2>/dev/null
+}
+
 notice_add() {
     NOTICE_RECS+=("$1$NOTICE_FS$2$NOTICE_FS$3$NOTICE_FS$4$NOTICE_FS$5$NOTICE_FS$6$NOTICE_FS$7")
 }
@@ -4335,12 +4380,13 @@ notice_collect() {
     [ "$mode" = "off" ] && return 0
     [ -n "$usage_data" ] || return 0
 
-    local five_util five_reset seven_util seven_reset extra_enabled
+    local five_util five_reset seven_util seven_reset seven_present extra_enabled
     eval "$(echo "$usage_data" | jq -r '
         @sh "five_util=\(.five_hour.utilization // 0)",
         @sh "five_reset=\(.five_hour.resets_at // "")",
         @sh "seven_util=\(.seven_day.utilization // 0)",
         @sh "seven_reset=\(.seven_day.resets_at // "")",
+        @sh "seven_present=\(.seven_day.utilization != null)",
         @sh "extra_enabled=\(.extra_usage.is_enabled // false)"
     ' 2>/dev/null)"
 
@@ -4430,9 +4476,41 @@ notice_collect() {
         fi
     fi
 
+    # A spent 5h window is a wall, not merely a high reading. Claude Code can
+    # now offer /low-priority to bypass this SESSION wall against the weekly
+    # pool, but the offer is gated and its separate allowance is not exposed
+    # to either statusline input or /api/oauth/usage. Name it only when this
+    # session's transcript proves the offer. If the local command enabled the
+    # mode, the wall is resolved and the remaining weekly pool is the fact.
+    # A fresh sibling account ranks above both later: it avoids the queue and
+    # preserves this account's weekly pool.
+    if [ "$five_int" -ge 100 ] && [ -n "$five_secs" ] && [ "$five_secs" -gt 0 ] 2>/dev/null; then
+        local five_back lowpri_state=""
+        five_back=$(_fmt_epoch $((now + five_secs)) '%H:%M')
+        [ -n "${transcript_path:-}" ] \
+            && lowpri_state=$(transcript_low_priority_state "$transcript_path" "$five_reset")
+        if [ -n "$five_back" ] && [ "$seven_present" = "true" ] \
+           && [ "$lowpri_state" = "active" ] && [ "$seven_int" -lt 100 ] 2>/dev/null; then
+            notice_add 70 '+' 5h "5h.lowpri.active.${five_back}" "${surplus}%" \
+                "lower priority · ${surplus}% of 7d left" \
+                "lower-priority mode bypasses the 5h cap until ${five_back} · ${surplus}% of the weekly pool remains"
+        elif [ -n "$five_back" ] && [ "$seven_present" = "true" ] \
+             && [ "$lowpri_state" = "offered" ] && [ "$seven_int" -lt 100 ] 2>/dev/null; then
+            notice_add 96 '!yellow' 5h "5h.capped.lowpri.${five_back}" "/low-priority" \
+                "5h capped · /low-priority uses 7d" \
+                "5h capped until ${five_back} · /low-priority continues now against the ${surplus}% left on 7d"
+            pressure=1
+        elif [ -n "$five_back" ]; then
+            notice_add 96 '!red' 5h "5h.capped.${five_back}" "~${five_back}" \
+                "5h capped · back ~${five_back}" \
+                "5h capped until ${five_back}"
+            pressure=1
+        fi
+    fi
+
     # 5h cap projection. Gate = the 5h badge's own pressure gate (>= 80),
-    # recovery-suppressed exactly like its colour. At 100% line 1 already
-    # says capped; only the fleet hint still helps there.
+    # recovery-suppressed exactly like its colour. At 100% the wall reader
+    # above owns the scope.
     if [ "$five_int" -ge 80 ] && [ "$five_int" -lt 100 ] \
        && [ -n "$five_secs" ] && [ "$five_secs" -gt "$FIVE_HOUR_RECOVERY_SECS" ] 2>/dev/null; then
         local elapsed=$((18000 - five_secs)) floor
@@ -4703,7 +4781,9 @@ notice_collect() {
         local hint
         hint=$(build_advisor_fleet_hint "${STATUSLINE_HOME}/accounts" "$ACCOUNT_TAG")
         if [ -n "$hint" ]; then
-            notice_add 60 '+' acct "acct.fleet.${hint%% *}" "${hint%% *}" \
+            local fleet_rank=60
+            [ "$five_int" -ge 100 ] 2>/dev/null && fleet_rank=98
+            notice_add "$fleet_rank" '+' acct "acct.fleet.${hint%% *}" "${hint%% *}" \
                 "$hint" "this account's 5h is spent · ${hint}"
         fi
     fi
