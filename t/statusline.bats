@@ -42,6 +42,16 @@ setup() {
     [ "$result" = "fabl5" ]
 }
 
+@test "abbreviate_model_id: fable-5-1 -> fabl5.1 (the minor Fable grew on 2026-09-01)" {
+    result=$(abbreviate_model_id "claude-fable-5-1")
+    [ "$result" = "fabl5.1" ]
+}
+
+@test "abbreviate_model_id: fable-5-1 with date suffix -> fabl5.1" {
+    result=$(abbreviate_model_id "claude-fable-5-1-20260901")
+    [ "$result" = "fabl5.1" ]
+}
+
 @test "abbreviate_model_id: unknown model passes through" {
     result=$(abbreviate_model_id "gpt-4o-mini")
     [ "$result" = "gpt-4o-mini" ]
@@ -2368,6 +2378,20 @@ EOF
 
 @test "is_1m_model: plain 200k model with no signals is not 1M" {
     model_id="claude-sonnet-4-6" ctx_size=200000 exceeds_200k=false
+    run is_1m_model
+    [ "$status" -eq 1 ]
+}
+
+@test "is_1m_model: a 200k window from the CLI beats the default-1M family (1M turned off)" {
+    # CLAUDE_CODE_DISABLE_1M_CONTEXT=1 on Fable: the CLI believes 200k and
+    # re-bases the bar to it. The name must not paint [1m] over that.
+    model_id="claude-fable-5-1" ctx_size=200000 exceeds_200k=false
+    run is_1m_model
+    [ "$status" -eq 1 ]
+}
+
+@test "is_1m_model: a 200k window from the CLI beats the [1m] suffix" {
+    model_id="claude-opus-4-8[1m]" ctx_size=200000 exceeds_200k=false
     run is_1m_model
     [ "$status" -eq 1 ]
 }

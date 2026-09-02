@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.39.1 — 2026-09-01 — the minor Fable grew, and the window is the CLI's
+
+**Fable 5.1 shipped as `claude-fable-5-1`, and the chip kept saying
+`fabl5`.** The abbreviation was written when Fable had one version
+component; the minor now exists and the chip carries it: `fabl5.1`. A
+trailing date component is still not a minor.
+
+**The `[1m]` tag now follows the CLI's window in both directions.** It
+already trusted `context_window_size` above 200k; below it, the default-1M
+family name still painted `[1m]` over a bar that the CLI had re-based to
+200k. That is exactly the frame `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` produces
+on Fable, where the tip "turn 1M off to make tokens last" lives (on Claude
+Code 2.1.258 that flag drops both the believed window and the auto-compact
+window to 200k for native-1M models). The name decides only when the CLI
+sent no window at all. 474 bats.
+
 ## v0.39.0 — 2026-09-01 — a guess may not delete a window
 
 **v0.38.0 unfolded the future and the dry wall walked out with it.** The

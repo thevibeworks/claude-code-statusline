@@ -5010,8 +5010,14 @@ get_runtime_model() {
 # window is bigger than 200k" — treating it as the latter mis-tagged a real
 # 200k opus session as opus4.6[1m] on ~14% of observed renders.
 is_1m_model() {
-    if [ -n "$ctx_size" ] && [ "$ctx_size" -gt 200000 ] 2>/dev/null; then
-        return 0
+    # A reported window is authoritative in both directions: 200k from the
+    # CLI on a default-1M family means the user turned 1M off
+    # (CLAUDE_CODE_DISABLE_1M_CONTEXT) and the bar is already re-based to
+    # 200k — the tag must not contradict it. The name only decides when
+    # the CLI sent no window at all.
+    if [ -n "$ctx_size" ] && [ "$ctx_size" -gt 0 ] 2>/dev/null; then
+        [ "$ctx_size" -gt 200000 ]
+        return
     fi
     [[ "$model_id" == *"[1m]"* ]] || is_default_1m_family "$model_id"
 }
@@ -5077,11 +5083,21 @@ abbreviate_model_id() {
         fi
         ;;
     claude-fable-*)
-        # Fable uses single-component versioning (claude-fable-5) — no
-        # major.minor split — so abbreviate to a 4-char family + version: fabl5.
+        # Fable abbreviates to a 4-char family + version: fabl5. It started
+        # single-component (claude-fable-5) and grew a minor with Fable 5.1
+        # (claude-fable-5-1 -> fabl5.1). A minor is one or two digits; a
+        # longer component is a date suffix and must not become ".20260115".
         local rest="${m#claude-fable-}"
         local major="${rest%%-*}"
-        echo "fabl${major}"
+        local minor=""
+        if [[ "$rest" == *-* ]]; then
+            minor="${rest#*-}"
+            minor="${minor%%-*}"
+        fi
+        case "$minor" in
+        [0-9]|[0-9][0-9]) echo "fabl${major}.${minor}" ;;
+        *)                echo "fabl${major}" ;;
+        esac
         ;;
     *) echo "$m" ;;
     esac
