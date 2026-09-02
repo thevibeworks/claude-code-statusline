@@ -2485,6 +2485,20 @@ EOF
     [ "$result" = "300" ]
 }
 
+@test "get_usage_fetch_ttl: a capped session never freezes API-only fields" {
+    # Without stdin, hot-window cadence still applies. With Claude Code's
+    # live 5h/7d fields, the API is only serving scoped/extra data, so it gets
+    # the two-minute weekly floor — finite, never cached to the reset.
+    [ "$(get_usage_fetch_ttl 100 0)" = "30" ]
+    [ "$(get_usage_fetch_ttl 100 1)" = "$STDIN_RL_FETCH_TTL" ]
+}
+
+@test "get_usage_fetch_ttl: stdin raises only faster adaptive cadences" {
+    [ "$(get_usage_fetch_ttl 10 1)" = "300" ]
+    [ "$(get_usage_fetch_ttl 30 1)" = "120" ]
+    [ "$(get_usage_fetch_ttl 60 1)" = "120" ]
+}
+
 # --- render_bar ---
 
 @test "render_bar: 50% fills half" {

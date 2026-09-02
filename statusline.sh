@@ -896,6 +896,7 @@ fetch_error_badge() {
 # snapshot and session-boundary detection.
 fetch_usage_for_session() {
     local session_id="$1"
+    local stdin_rate_limits="${2:-0}"
     local cache_file="$CLAUDE_ACCOUNT_DIR/usage.cache"
     local lock_file="$CLAUDE_ACCOUNT_DIR/usage.lock"
     local err_file="$CLAUDE_ACCOUNT_DIR/usage.err"
@@ -910,7 +911,8 @@ fetch_usage_for_session() {
 
         # Adaptive TTL: poll less when quota is low, more when it's hot
         local five_int=$(printf '%.0f' "$five_util" 2>/dev/null || echo 0)
-        local ttl=$(get_adaptive_ttl "$five_int")
+        local ttl
+        ttl=$(get_usage_fetch_ttl "$five_int" "$stdin_rate_limits")
 
         debug_log "fetch_usage_for_session: cache age=${age}s ttl=${ttl}s (5h_util=${five_int}%)"
         if [ $age -lt $ttl ]; then
@@ -1863,6 +1865,21 @@ get_adaptive_ttl() {
     elif [ "$five_int" -ge 20 ]; then echo 120
     else echo 300
     fi
+}
+
+# The API-only half of the payload (model-scoped limits and extra usage) keeps
+# moving while a 5h cap is bypassed by lower-priority service. Claude Code
+# already supplies 5h/7d on stdin, so those sessions need the weekly-paced
+# API floor, not the 30 s hot-window cadence — but they must never freeze to
+# the reset. One helper owns the rule for both the outer spawn gate and the
+# fetcher's lock-side recheck.
+get_usage_fetch_ttl() {
+    local five_int="${1:-0}" stdin_rate_limits="${2:-0}" ttl
+    ttl=$(get_adaptive_ttl "$five_int")
+    if [ "$stdin_rate_limits" = "1" ] && [ "$ttl" -lt "$STDIN_RL_FETCH_TTL" ]; then
+        ttl="$STDIN_RL_FETCH_TTL"
+    fi
+    echo "$ttl"
 }
 
 # Atomically acquire a lock file, or return 1 if another process holds a
@@ -5637,14 +5654,15 @@ if [ -n "$session_id" ] && [ "$_may_have_oauth" = true ]; then
         age=$(($(date +%s) - fetched_at))
         five_int=$(printf '%.0f' "$five_util" 2>/dev/null || echo 0)
         seven_int_cache=$(printf '%.0f' "$seven_util_cache" 2>/dev/null || echo 0)
-        ttl=$(get_adaptive_ttl "$five_int")
+        stdin_rate_limits=0
+        if [ -n "$rl_five_pct" ] || [ -n "$rl_seven_pct" ]; then
+            stdin_rate_limits=1
+        fi
+        ttl=$(get_usage_fetch_ttl "$five_int" "$stdin_rate_limits")
         # Claude Code hands 5h/7d on stdin every render (merged below), so
         # the API is only asked for what stdin lacks — the model-scoped
         # weekly limit and extra usage — which move at the week's pace,
         # not the sitting's: no need for the 30 s hot-window cadence.
-        if [ -n "$rl_five_pct" ] || [ -n "$rl_seven_pct" ]; then
-            [ "$ttl" -lt "$STDIN_RL_FETCH_TTL" ] && ttl=$STDIN_RL_FETCH_TTL
-        fi
         [ "$age" -ge "$ttl" ] && should_fetch=true
     fi
 
@@ -5660,7 +5678,7 @@ if [ -n "$session_id" ] && [ "$_may_have_oauth" = true ]; then
 
     if [ "$should_fetch" = true ]; then
         reap_stale_lock "$lock_file" 15
-        [ ! -f "$lock_file" ] && (fetch_usage_for_session "$session_id" >/dev/null 2>&1 &)
+        [ ! -f "$lock_file" ] && (fetch_usage_for_session "$session_id" "${stdin_rate_limits:-0}" >/dev/null 2>&1 &)
     fi
 
     if [ -f "$cache_file" ]; then

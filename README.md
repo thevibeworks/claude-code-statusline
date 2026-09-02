@@ -530,6 +530,8 @@ shared dir -- `~/.claude/statusline/` -- and a single fetch serves all
 concurrent sessions. Per-session prompt-cache-health state stays under
 `~/.claude/statusline/sessions/`. Old `$SCRIPT_DIR` state is migrated on first
 run. Setting only `CLAUDE_CACHE_DIR` keeps the legacy single-dir behavior.
+At a 5h cap, stdin keeps 5h/7d live and API-only scoped/extra fields continue
+on a two-minute TTL; the cache is never frozen to the session reset.
 
 </details>
 

@@ -224,6 +224,8 @@ The API is asked for what the protocol does not hand us, and no more.
   a monotone envelope: a dip is stale, never a refund.
 - `/api/oauth/usage` (scoped weekly `fb`, extra usage): adaptive TTL by 5h
   heat (300→30 s) with a 120 s floor whenever stdin already carries 5h/7d.
+  A capped 5h window never freezes this cache: lower-priority requests still
+  move 7d and scoped counters, so API-only fields keep the finite 120 s TTL.
 - Profile: 24 h. Prepaid: 5 min. All caches shared per account under
   `~/.claude/statusline/[accounts/<tag>/]` — one fetch serves every
   session, container, and ccpace (`docs/api/state-dir.md`).

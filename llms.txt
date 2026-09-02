@@ -8,7 +8,7 @@
 > points went), a notice engine that pins the top condition and briefly
 > explains the next (cap projections, expiring-surplus and underuse advice,
 > fleet relief), and a `report` subcommand that ledgers what each closed
-> window expired unused. 489 bats tests, deps are jq + curl, no daemon, no
+> window expired unused. 491 bats tests, deps are jq + curl, no daemon, no
 > telemetry.
 
 Key facts for agents:
@@ -45,7 +45,7 @@ Key facts for agents:
 - [statusline.sh](https://github.com/thevibeworks/claude-code-statusline/blob/main/statusline.sh): the entire product
 - [install.sh](https://github.com/thevibeworks/claude-code-statusline/blob/main/install.sh): installer (curl | bash, or STATUSLINE_SRC=<checkout>)
 - [Makefile](https://github.com/thevibeworks/claude-code-statusline/blob/main/Makefile): install / status / diff / uninstall / check
-- [t/statusline.bats](https://github.com/thevibeworks/claude-code-statusline/blob/main/t/statusline.bats): 471 statusline tests
+- [t/statusline.bats](https://github.com/thevibeworks/claude-code-statusline/blob/main/t/statusline.bats): 473 statusline tests
 - [t/install.bats](https://github.com/thevibeworks/claude-code-statusline/blob/main/t/install.bats): 18 installer tests
 
 ## Optional
