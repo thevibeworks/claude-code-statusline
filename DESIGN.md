@@ -164,6 +164,11 @@ What the readers know, beyond the badges:
 
 ```
 fb capped ~Thu 07:00     the running model is gone until then
+5h capped · /low-priority uses 7d
+                         this session wall can be bypassed, and this session's
+                         transcript proves Claude Code offered the mode
+lower priority · 47% of 7d left
+                         the bypass is active; the weekly pool is now the budget
 5h caps ~05:18           this sitting hits the wall before its reset
 7d dry ~Thu 09:00        the learned weekday forecast, not a straight line
 7d rebased 53%→12%       utilization fell INSIDE one window: a plan change or
@@ -180,6 +185,15 @@ fb ~22% expires          the ACCOUNT caps first: at this week's mix the 7d pool
                          headroom, not waste
 ~62% will expire         on pace to strand a large chunk of the subscription
 ```
+
+At the 5h wall the badge says `5h[cap@04:00]`, never `100%` or `101%`:
+the percentage has stopped being a reading and the reset is the useful fact.
+`/low-priority` is never inferred from weekly headroom. Its eligibility is
+gated per session and absent from both statusline stdin and `/api/oauth/usage`;
+only a matching `quotaLimits.lowPriorityOffer` in this session's transcript
+allows the notice to name it. The transcript's local-command result then
+distinguishes offered from active. The separate lower-priority allowance is
+not exposed there either, so this statusline does not manufacture one.
 
 The budget line is the one sentence with three clauses, and each answers a
 different question:
@@ -210,6 +224,8 @@ The API is asked for what the protocol does not hand us, and no more.
   a monotone envelope: a dip is stale, never a refund.
 - `/api/oauth/usage` (scoped weekly `fb`, extra usage): adaptive TTL by 5h
   heat (300→30 s) with a 120 s floor whenever stdin already carries 5h/7d.
+  A capped 5h window never freezes this cache: lower-priority requests still
+  move 7d and scoped counters, so API-only fields keep the finite 120 s TTL.
 - Profile: 24 h. Prepaid: 5 min. All caches shared per account under
   `~/.claude/statusline/[accounts/<tag>/]` — one fetch serves every
   session, container, and ccpace (`docs/api/state-dir.md`).

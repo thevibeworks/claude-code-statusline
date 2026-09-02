@@ -88,7 +88,7 @@ The raw `/api/oauth/usage` response (see `oauth-usage.md`) plus one field:
 | Field | Type | Meaning |
 |-------|------|---------|
 | `fetched_at` | int epoch s | When this fetch succeeded |
-| `five_hour.utilization` | number 0–100 | 5h window used % |
+| `five_hour.utilization` | number, 0+ | 5h window used %. The API has emitted 101 at the binding wall; consumers should treat >=100 as capped, not as extra precision. |
 | `five_hour.resets_at` | ISO-8601 | 5h window end |
 | `seven_day.*` | same | 7d window |
 | `extra_usage.*` | object | overage spend (see oauth-usage.md) |

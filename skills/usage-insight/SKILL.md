@@ -80,6 +80,11 @@ the deep-dive version of what the advisor row says in one sentence.
   the useful fact is its `resets_at`, not the percentage.
 - 5h pressure with a reset < 30min away is self-healing — say "resets
   in N minutes" instead of alarming.
+- A capped 5h window is the shorter session wall, not an exhausted week.
+  If the live statusline says `/low-priority` was offered or is active,
+  explain that it continues against the remaining 7d pool while requests
+  wait for spare capacity. The state dir alone cannot prove eligibility or
+  see the separate lower-priority allowance, so never invent either.
 - Recommending another account: only name siblings whose cache is
   fresh (< 1h); an idle-looking stale account is unknown, not free.
 

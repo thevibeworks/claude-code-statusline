@@ -214,6 +214,14 @@ setup() {
     [[ "$plain" =~ 5h\[87%@[0-9]{2}:[0-9]{2}\] ]]
 }
 
+@test "build_usage_display: a spent 5h window is cap, not 100-or-101 percent" {
+    reset_time=$(date -u -d '+2 hours' '+%Y-%m-%dT%H:%M:%SZ')
+    usage="{\"five_hour\":{\"utilization\":101,\"resets_at\":\"$reset_time\"},\"seven_day\":{\"utilization\":53}}"
+    plain=$(strip_ansi "$(build_usage_display "$usage" "")")
+    [[ "$plain" =~ 5h\[cap@[0-9]{2}:[0-9]{2}\] ]]
+    [[ "$plain" != *"101%"* ]]
+}
+
 @test "build_usage_display: 7d at 75% under pace pressure shows reset" {
     # 75% with ~2.2d left = ~4.8d elapsed: runway falls short of the deadline,
     # so the badge surfaces the absolute reset (verdict carried by color).
@@ -2477,6 +2485,20 @@ EOF
     [ "$result" = "300" ]
 }
 
+@test "get_usage_fetch_ttl: a capped session never freezes API-only fields" {
+    # Without stdin, hot-window cadence still applies. With Claude Code's
+    # live 5h/7d fields, the API is only serving scoped/extra data, so it gets
+    # the two-minute weekly floor — finite, never cached to the reset.
+    [ "$(get_usage_fetch_ttl 100 0)" = "30" ]
+    [ "$(get_usage_fetch_ttl 100 1)" = "$STDIN_RL_FETCH_TTL" ]
+}
+
+@test "get_usage_fetch_ttl: stdin raises only faster adaptive cadences" {
+    [ "$(get_usage_fetch_ttl 10 1)" = "300" ]
+    [ "$(get_usage_fetch_ttl 30 1)" = "120" ]
+    [ "$(get_usage_fetch_ttl 60 1)" = "120" ]
+}
+
 # --- render_bar ---
 
 @test "render_bar: 50% fills half" {
@@ -4349,10 +4371,46 @@ JSON
     [ -z "$(build_advisor_line "$usage" auto)" ]
 }
 
-@test "build_advisor_line: capped 5h adds no clause (line 1 already says it)" {
+@test "build_advisor_line: capped 5h names the wall and return time" {
     reset_5h=$(date -u -d '+2 hours' '+%Y-%m-%dT%H:%M:%SZ')
     usage="{\"five_hour\":{\"utilization\":100,\"resets_at\":\"$reset_5h\"},\"seven_day\":{\"utilization\":10}}"
-    [ -z "$(build_advisor_line "$usage" auto)" ]
+    plain=$(strip_ansi "$(build_advisor_line "$usage" auto)")
+    [[ "$plain" =~ ^!\ 5h\ capped\ ·\ back\ ~[0-9]{2}:[0-9]{2}$ ]]
+}
+
+@test "transcript_low_priority_state: the gated offer and local toggle are current-window evidence" {
+    transcript=$(mktemp)
+    reset_epoch=$(( $(date +%s) + 7200 ))
+    reset_iso=$(date -u -d "@$reset_epoch" '+%Y-%m-%dT%H:%M:%SZ')
+    printf '%s\n' "{\"type\":\"assistant\",\"timestamp\":\"2026-09-02T07:29:28Z\",\"quotaLimits\":{\"rateLimitType\":\"five_hour\",\"resetsAt\":$reset_epoch,\"lowPriorityOffer\":\"treatment\"}}" > "$transcript"
+    [ "$(transcript_low_priority_state "$transcript" "$reset_iso")" = "offered" ]
+
+    printf '%s\n' '{"type":"system","subtype":"local_command","timestamp":"2026-09-02T07:30:00Z","content":"<local-command-stdout>Continuing now at lower priority until your limit resets. Run /low-priority to stop.</local-command-stdout>"}' >> "$transcript"
+    [ "$(transcript_low_priority_state "$transcript" "$reset_iso")" = "active" ]
+
+    printf '%s\n' '{"type":"system","subtype":"local_command","timestamp":"2026-09-02T07:31:00Z","content":"<local-command-stdout>Lower-priority mode is off. New messages wait for your usage limit as usual.</local-command-stdout>"}' >> "$transcript"
+    [ -z "$(transcript_low_priority_state "$transcript" "$reset_iso")" ]
+    # An offer from another window is not permission to advertise the mode.
+    [ -z "$(transcript_low_priority_state "$transcript" "$(date -u -d "@$((reset_epoch + 18000))" '+%Y-%m-%dT%H:%M:%SZ')")" ]
+    rm -f "$transcript"
+}
+
+@test "notice_collect: a proven low-priority offer explains what bypasses the 5h wall" {
+    transcript=$(mktemp)
+    reset_epoch=$(( $(date +%s) + 7200 ))
+    reset_iso=$(date -u -d "@$reset_epoch" '+%Y-%m-%dT%H:%M:%SZ')
+    printf '%s\n' "{\"type\":\"assistant\",\"timestamp\":\"2026-09-02T07:29:28Z\",\"quotaLimits\":{\"rateLimitType\":\"five_hour\",\"resetsAt\":$reset_epoch,\"lowPriorityOffer\":\"treatment\"}}" > "$transcript"
+    usage="{\"five_hour\":{\"utilization\":101,\"resets_at\":\"$reset_iso\"},\"seven_day\":{\"utilization\":53}}"
+    plain=$(transcript_path="$transcript" build_advisor_line "$usage" auto)
+    [ "$(strip_ansi "$plain")" = "! 5h capped · /low-priority uses 7d" ]
+    no_week="{\"five_hour\":{\"utilization\":101,\"resets_at\":\"$reset_iso\"}}"
+    plain=$(transcript_path="$transcript" build_advisor_line "$no_week" auto)
+    [[ "$(strip_ansi "$plain")" == "! 5h capped · back ~"* ]]
+
+    printf '%s\n' '{"type":"system","subtype":"local_command","timestamp":"2026-09-02T07:30:00Z","content":"<local-command-stdout>Continuing now at lower priority until your limit resets. Run /low-priority to stop.</local-command-stdout>"}' >> "$transcript"
+    plain=$(transcript_path="$transcript" build_advisor_line "$usage" auto)
+    [ "$(strip_ansi "$plain")" = "+ lower priority · 47% of 7d left" ]
+    rm -f "$transcript"
 }
 
 @test "build_advisor_line: pace-hot 7d projects dry point with hard-stop tail" {

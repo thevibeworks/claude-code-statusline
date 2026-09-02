@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.41.0 — 2026-09-02 — a session wall is not a weekly wall
+
+Claude Code 2.1.258 can offer `/low-priority` after the 5h session window
+binds, letting that session continue against the weekly pool while requests
+wait for spare capacity. The statusline used to render the wall as
+`5h[101%]` and then pin a weekly-surplus notice, which made an interrupted
+session look like an invitation to spend.
+
+The badge now says `5h[cap@04:00]`, and a capped 5h notice outranks weekly
+opportunity. `/low-priority` is named only when the current transcript's
+`quotaLimits.lowPriorityOffer` proves Claude Code offered it for this exact
+window; the local-command result distinguishes offered from active. Neither
+statusline stdin nor `/api/oauth/usage` exposes the separate lower-priority
+allowance, so no allowance percentage is guessed. A fresh sibling account
+still outranks the bypass because it avoids the queue and preserves this
+account's week.
+
+The cache policy is explicit now too. A 5h cap is not a terminal account:
+stdin continues to update 5h/7d on every render, while scoped and extra-usage
+fields keep a finite two-minute API TTL. The outer spawn gate and the
+lock-side cache recheck now share one function, with regression tests holding
+100% to 120 seconds rather than to the reset.
+
+491 bats.
+
 ## v0.40.0 — 2026-09-01 — what a cold cache costs
 
 **The bar's extra color above 200k was a pricing claim, and the price is

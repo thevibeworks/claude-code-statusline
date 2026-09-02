@@ -396,6 +396,8 @@ clauses about one window can never disagree.
 | Notice | What it knows that line 1 doesn't |
 |--------|-----------------------------------|
 | `! fb capped ~Thu 07:00` | The weekly limit scoped to *this session's model* hit 100%: that model is gone until then. The long form names a model that still has room. |
+| `! 5h capped · /low-priority uses 7d` | The shorter session window bound while the weekly pool still has room, and this session's transcript says Claude Code actually offered lower-priority mode. The statusline does not infer eligibility from headroom. |
+| `+ lower priority · 47% of 7d left` | This session enabled the bypass. Requests may wait for spare capacity and now draw against the weekly pool; the lower-priority allowance itself is not exposed to statusline scripts, so no allowance percentage is guessed. |
 | `! 5h caps ~05:18` | Linear projection off this window's own pace: you hit the wall before the reset. Long form adds how long you'd sit blocked. |
 | `! 7d dry ~Thu 09:00 · hard stop` | The learned per-weekday burn profile (EWMA over your own history), not a straight line — your heavy Tuesday counts more than an average, and the learned hour-of-day shape puts the dry point where you are awake to act on it instead of at 03:00. Tail says what happens at 100%: extra billing, or a stop. |
 | `! fb 91% vs 7d 55% · go op` | **The relation** between two badges: the *model* caps before the account does. Switching models buys the week's remaining capacity back; the roomiest other `weekly_scoped` limit in the payload gets named. |
@@ -411,6 +413,10 @@ clauses about one window can never disagree.
 `--notice off` keeps row 3 quiet; `--advisor off` silences both. `--check`
 and `--week` print the long form, since a terminal command has a whole
 line to spend.
+
+At a spent session window, line 1 renders `5h[cap@04:00]` rather than
+`5h[100%]` or the occasional API value `5h[101%]`. Once the window binds,
+`cap` is the state and the reset is the number to plan around.
 
 ## The waste ledger
 
@@ -524,6 +530,8 @@ shared dir -- `~/.claude/statusline/` -- and a single fetch serves all
 concurrent sessions. Per-session prompt-cache-health state stays under
 `~/.claude/statusline/sessions/`. Old `$SCRIPT_DIR` state is migrated on first
 run. Setting only `CLAUDE_CACHE_DIR` keeps the legacy single-dir behavior.
+At a 5h cap, stdin keeps 5h/7d live and API-only scoped/extra fields continue
+on a two-minute TTL; the cache is never frozen to the session reset.
 
 </details>
 
